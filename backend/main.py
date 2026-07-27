@@ -4,82 +4,105 @@ import argparse
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-
-from news_fetcher import get_latest_20_news
-from card_generator import generate_all_cards
-
+from pydantic import BaseModel
 from contextlib import asynccontextmanager
 
-# Cache current news articles in memory
-cached_news = []
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Fetch initial news and generate cards on startup."""
-    global cached_news
-    print("[Server Startup] Fetching latest 20 Tech & Finance news articles...")
-    cached_news = get_latest_20_news()
-    print(f"[Server Startup] Generating visual PNG cards for {len(cached_news)} news items...")
-    generate_all_cards(cached_news, OUTPUT_DIR)
-    print("[Server Startup] Visual cards ready!")
-    yield
-
-app = FastAPI(title="Tech & Finance News Visual Card Engine", lifespan=lifespan)
+from news_fetcher import fetch_and_sync_news_to_db
+import database as db
 
 # Output directory for cards
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output", "cards")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize SQLite database, fetch initial news, and sync cards on startup."""
+    print("[Server Startup] Initializing SQLite database...")
+    db.init_db()
+    print("[Server Startup] Syncing Tech & Finance news with SQLite DB...")
+    fetch_and_sync_news_to_db()
+    print("[Server Startup] Database & visual cards ready!")
+    yield
+
+app = FastAPI(
+    title="Tinder-Style Tech & Finance News Visual Card Engine",
+    description="Dockerized API serving 9:16 mobile swipe news cards backed by SQLite.",
+    version="1.1.0",
+    lifespan=lifespan
+)
+
 # Mount output folder as static file route
 app.mount("/output/cards", StaticFiles(directory=OUTPUT_DIR), name="cards")
 
+class SwipeRequest(BaseModel):
+    article_id: int
+    action: str  # 'read' or 'pass'
+
 @app.get("/", response_class=HTMLResponse)
 def read_root():
-    """Serve the web visual dashboard."""
+    """Serve the desktop/gallery visual dashboard."""
     template_path = os.path.join(os.path.dirname(__file__), "templates", "dashboard.html")
     if os.path.exists(template_path):
         with open(template_path, "r", encoding="utf-8") as f:
             return HTMLResponse(content=f.read())
     return HTMLResponse(content="<h1>Dashboard template missing</h1>", status_code=404)
 
+@app.get("/mobile", response_class=HTMLResponse)
+def read_mobile_app():
+    """Serve the Tinder-Style Mobile Swipe App UI."""
+    template_path = os.path.join(os.path.dirname(__file__), "templates", "mobile_preview.html")
+    if os.path.exists(template_path):
+        with open(template_path, "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    return HTMLResponse(content="<h1>Mobile template missing</h1>", status_code=404)
+
 @app.get("/api/news")
-def get_news():
-    """API endpoint to get the latest 20 news articles."""
-    global cached_news
-    if not cached_news:
-        cached_news = get_latest_20_news()
-    return JSONResponse(content={"status": "ok", "count": len(cached_news), "articles": cached_news})
+@app.get("/api/v1/feed")
+def get_news_feed():
+    """API endpoint serving latest 50 news card items from SQLite database."""
+    articles = db.get_latest_articles(50)
+    if not articles:
+        articles = fetch_and_sync_news_to_db()
+    return JSONResponse(content={"status": "ok", "count": len(articles), "articles": articles})
 
 @app.get("/api/cards/generate")
-def trigger_generate_cards():
-    """API endpoint to re-fetch news and regenerate visual PNG cards."""
-    global cached_news
-    cached_news = get_latest_20_news()
-    files = generate_all_cards(cached_news, OUTPUT_DIR)
+@app.get("/api/v1/cards/refresh")
+def trigger_refresh_cards():
+    """API endpoint to re-fetch news, deduplicate via SQLite DB, and generate missing cards."""
+    articles = fetch_and_sync_news_to_db()
     return JSONResponse(content={
         "status": "success",
-        "count": len(files),
-        "output_directory": OUTPUT_DIR,
-        "files": [os.path.basename(f) for f in files]
+        "count": len(articles),
+        "database": "SQLite (news_database.db)",
+        "articles": articles
+    })
+
+@app.post("/api/v1/swipe")
+def record_swipe(req: SwipeRequest):
+    """API endpoint to record mobile user swipe actions (Read / Pass) into SQLite database."""
+    if req.action not in ("read", "pass"):
+        return JSONResponse(content={"error": "Invalid action. Must be 'read' or 'pass'"}, status_code=400)
+    
+    db.record_user_swipe(req.article_id, req.action)
+    return JSONResponse(content={
+        "status": "recorded",
+        "article_id": req.article_id,
+        "action": req.action
     })
 
 def run_cli_mode():
-    """CLI mode to fetch 20 news items and build visual card images directly."""
+    """CLI mode to fetch news, deduplicate in SQLite, and build visual card images."""
     print("=" * 60)
-    print(" TECH & FINANCE NEWS VISUAL CARD GENERATOR (CLI)")
+    print(" TECH & FINANCE NEWS VISUAL CARD GENERATOR (CLI + SQLITE)")
     print("=" * 60)
-    print("[1/2] Fetching 20 latest news articles (10 Tech + 10 Finance)...")
-    articles = get_latest_20_news()
-    print(f"[OK] Fetched {len(articles)} news items.\n")
+    print("[1/2] Initializing SQLite Database...")
+    db.init_db()
 
-    print("[2/2] Rendering visual PNG cards into backend/output/cards/...")
-    cards = generate_all_cards(articles, OUTPUT_DIR)
+    print("[2/2] Fetching and syncing news to SQLite DB...")
+    articles = fetch_and_sync_news_to_db()
     print("\n" + "=" * 60)
-    print(f"SUCCESS! {len(cards)} visual cards created successfully:")
-    for card in cards:
-        print(f"   * {card}")
+    print(f"SUCCESS! SQLite DB updated with {len(articles)} active news cards.")
     print("=" * 60)
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Tech & Finance News Visual Card Engine")

@@ -5,9 +5,14 @@ import feedparser
 from datetime import datetime
 from dotenv import load_dotenv
 
+import database as db
+from card_generator import create_visual_card
+
 load_dotenv()
 
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "").strip()
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output", "cards")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 CATEGORY_IMAGES = {
     "TECH": [
@@ -32,29 +37,21 @@ def clean_html(text: str) -> str:
     return ' '.join(clean.split())
 
 def generate_short_summary(title: str, category: str, raw_desc: str, source: str) -> str:
-    """
-    Generate a distinct, concise short summary for the card.
-    Prevents the description from duplicating the headline.
-    """
+    """Generate distinct short summary for news item."""
     clean_desc = clean_html(raw_desc)
     clean_title = clean_html(title)
     
-    # Strip source suffix if present in description
     if ' - ' in clean_desc:
         clean_desc = clean_desc.rsplit(' - ', 1)[0].strip()
 
-    # Check if raw description is empty, or just duplicates the title
     title_words = set(clean_title.lower().split())
     desc_words = set(clean_desc.lower().split())
-    
     overlap = len(title_words.intersection(desc_words)) / max(len(title_words), 1)
 
     if clean_desc and overlap < 0.70 and len(clean_desc) > 30:
         return clean_desc
 
-    # Generate a smart, distinct short summary based on key headline concepts
     title_lower = title.lower()
-    
     if "ai" in title_lower or "artificial intelligence" in title_lower:
         return f"Industry developments and strategic moves in AI model scaling, infrastructure, and enterprise adoption reported by {source}."
     elif "layoff" in title_lower or "job" in title_lower or "cut" in title_lower:
@@ -70,7 +67,7 @@ def generate_short_summary(title: str, category: str, raw_desc: str, source: str
     else:
         return f"Financial sector analysis covering corporate earnings, market trends, and strategic investment movements."
 
-def fetch_from_news_api(category: str, query: str, count: int = 10) -> list:
+def fetch_from_news_api(category: str, query: str, count: int = 25) -> list:
     """Fetch news from NewsAPI.org."""
     if not NEWS_API_KEY or NEWS_API_KEY == "your_news_api_key_here":
         return []
@@ -97,7 +94,6 @@ def fetch_from_news_api(category: str, query: str, count: int = 10) -> list:
                 short_summary = generate_short_summary(title, category, raw_desc, src_name)
 
                 results.append({
-                    "id": f"{category.lower()}_{idx+1}",
                     "title": title,
                     "description": short_summary,
                     "source": src_name,
@@ -111,8 +107,8 @@ def fetch_from_news_api(category: str, query: str, count: int = 10) -> list:
         print(f"[Warning] NewsAPI fetch failed for {category}: {e}")
     return []
 
-def fetch_from_rss(category: str, rss_url: str, count: int = 10) -> list:
-    """Fallback fetch from Google News / Public RSS feeds."""
+def fetch_from_rss(category: str, rss_url: str, count: int = 25) -> list:
+    """Fetch news from Google News / RSS fallback."""
     results = []
     try:
         feed = feedparser.parse(rss_url)
@@ -132,7 +128,6 @@ def fetch_from_rss(category: str, rss_url: str, count: int = 10) -> list:
             raw_desc = getattr(entry, 'summary', getattr(entry, 'description', ''))
             short_summary = generate_short_summary(title, category, raw_desc, source)
 
-            # Publication date formatting
             pub_str = "Recently"
             if hasattr(entry, 'published_parsed') and entry.published_parsed:
                 dt = datetime(*entry.published_parsed[:6])
@@ -141,7 +136,6 @@ def fetch_from_rss(category: str, rss_url: str, count: int = 10) -> list:
             img = CATEGORY_IMAGES[category][idx % len(CATEGORY_IMAGES[category])]
 
             results.append({
-                "id": f"{category.lower()}_{idx+1}",
                 "title": title,
                 "description": short_summary,
                 "source": source,
@@ -154,29 +148,53 @@ def fetch_from_rss(category: str, rss_url: str, count: int = 10) -> list:
         print(f"[Error] RSS feed fetch error for {category}: {e}")
     return results
 
-def get_latest_20_news() -> list:
-    """Fetch 10 Tech and 10 Finance news articles (total 20)."""
-    tech_news = fetch_from_news_api("TECH", "technology OR tech OR AI", 10)
-    finance_news = fetch_from_news_api("FINANCE", "finance OR stock OR market", 10)
+def fetch_and_sync_news_to_db() -> list:
+    """
+    1. Fetches 25 Tech + 25 Finance = 50 news items.
+    2. Checks SQLite database if news already exists.
+    3. Saves ONLY new articles to DB and renders 9:16 PNG cards.
+    4. Returns latest 50 articles from SQLite database.
+    """
+    tech_news = fetch_from_news_api("TECH", "technology OR tech OR AI", 25)
+    finance_news = fetch_from_news_api("FINANCE", "finance OR stock OR market", 25)
 
-    if len(tech_news) < 10:
+    if len(tech_news) < 25:
         rss_tech_url = "https://news.google.com/rss/search?q=technology+industry+AI&hl=en-US&gl=US&ceid=US:en"
-        tech_news = fetch_from_rss("TECH", rss_tech_url, 10)
+        tech_news = fetch_from_rss("TECH", rss_tech_url, 25)
 
-    if len(finance_news) < 10:
+    if len(finance_news) < 25:
         rss_fin_url = "https://news.google.com/rss/search?q=finance+stocks+markets&hl=en-US&gl=US&ceid=US:en"
-        finance_news = fetch_from_rss("FINANCE", rss_fin_url, 10)
+        finance_news = fetch_from_rss("FINANCE", rss_fin_url, 25)
 
-    total_news = tech_news[:10] + finance_news[:10]
+    raw_articles = tech_news[:25] + finance_news[:25]
     
-    for idx, item in enumerate(total_news, start=1):
-        item["index"] = idx
+    new_count = 0
+    skipped_count = 0
 
-    return total_news
+    for idx, item in enumerate(raw_articles, start=1):
+        item['index'] = idx
+        article_key = db.generate_article_key(item['title'], item['url'])
+
+        # Check if already in DB
+        if db.is_article_in_db(article_key):
+            skipped_count += 1
+        else:
+            filename = f"card_{idx:02d}_{item['category'].lower()}.png"
+            filepath = os.path.join(OUTPUT_DIR, filename)
+            try:
+                create_visual_card(item, filepath)
+            except Exception as e:
+                print(f"[Warning] Card rendering error: {e}")
+
+            db.save_article(item, filename)
+            new_count += 1
+
+    print(f"[DB Sync Summary] Processed {len(raw_articles)} items: {new_count} NEW inserted, {skipped_count} ALREADY EXISTED.")
+
+    # Retrieve latest 50 articles from SQLite database
+    latest_articles = db.get_latest_articles(50)
+    return latest_articles
 
 if __name__ == "__main__":
-    news = get_latest_20_news()
-    print(f"Successfully fetched {len(news)} news articles!")
-    for item in news:
-        print(f"[{item['index']}] [{item['category']}] Title: {item['title']}")
-        print(f"    Summary: {item['description']}\n")
+    articles = fetch_and_sync_news_to_db()
+    print(f"Total articles in DB query: {len(articles)}")

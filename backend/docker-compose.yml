@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  news-cards-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: news_cards_backend
+    ports:
+      - "8000:8000"
+    environment:
+      - NEWS_API_KEY=${NEWS_API_KEY:-your_news_api_key_here}
+      - PORT=8000
+      - HOST=0.0.0.0
+    volumes:
+      - ./output/cards:/app/output/cards
+      - ./news_database.db:/app/news_database.db
+    restart: unless-stopped

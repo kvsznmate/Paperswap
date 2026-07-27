@@ -4,18 +4,50 @@ import requests
 from PIL import Image, ImageDraw, ImageFont
 
 def get_font(size: int, bold: bool = False):
-    """Load system font if available, fallback to default font."""
+    """Load cross-platform TrueType font (Windows, Linux Docker, macOS)."""
     font_names = [
+        # Linux / Docker paths (DejaVu, Liberation, FreeSans)
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf" if bold else "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+        
+        # Windows paths
         "C:\\Windows\\Fonts\\segoeuib.ttf" if bold else "C:\\Windows\\Fonts\\segoeui.ttf",
         "C:\\Windows\\Fonts\\arialbd.ttf" if bold else "C:\\Windows\\Fonts\\arial.ttf",
         "C:\\Windows\\Fonts\\calibrib.ttf" if bold else "C:\\Windows\\Fonts\\calibri.ttf",
+        
+        # macOS paths
+        "/Library/Fonts/Arial Bold.ttf" if bold else "/Library/Fonts/Arial.ttf",
     ]
+    
     for name in font_names:
         if os.path.exists(name):
             try:
                 return ImageFont.truetype(name, size)
             except Exception:
                 pass
+                
+    # Auto-fallback: Ensure clean TTF is downloaded into local fonts directory if system TTF missing
+    local_font_dir = os.path.join(os.path.dirname(__file__), "fonts")
+    os.makedirs(local_font_dir, exist_ok=True)
+    local_font_path = os.path.join(local_font_dir, "DejaVuSans.ttf")
+    
+    if not os.path.exists(local_font_path):
+        try:
+            url = "https://raw.githubusercontent.com/dejavu-fonts/dejavu-fonts/master/ttf/DejaVuSans.ttf"
+            r = requests.get(url, timeout=5)
+            if r.status_code == 200:
+                with open(local_font_path, "wb") as f:
+                    f.write(r.content)
+        except Exception as e:
+            print(f"[Warning] Font download fallback failed: {e}")
+            
+    if os.path.exists(local_font_path):
+        try:
+            return ImageFont.truetype(local_font_path, size)
+        except Exception:
+            pass
+
     return ImageFont.load_default()
 
 def wrap_text(text: str, font: ImageFont.ImageFont, max_width: int, draw: ImageDraw.ImageDraw) -> list:

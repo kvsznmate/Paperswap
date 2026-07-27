@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>NewsSwipe ⚡ - Tinder-Style News</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-dark: #090c15;
+            --card-bg: #121824;
+            --accent-green: #10b981;
+            --accent-red: #ef4444;
+            --accent-blue: #6366f1;
+            --text-main: #f8fafc;
+            --text-sub: #94a3b8;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-touch-callout: none;
+        }
+
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+            background-image: radial-gradient(circle at 50% 10%, rgba(99, 102, 241, 0.15), transparent 60%);
+        }
+
+        /* Mobile App Container Frame */
+        .app-shell {
+            width: 100%;
+            max-width: 440px;
+            height: 100vh;
+            max-height: 900px;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            background: #0d121d;
+            box-shadow: 0 25px 60px rgba(0, 0, 0, 0.8);
+            overflow: hidden;
+        }
+
+        @media (min-width: 480px) {
+            .app-shell {
+                height: 92vh;
+                border-radius: 40px;
+                border: 4px solid #1e2638;
+            }
+        }
+
+        /* App Header Bar */
+        .app-header {
+            padding: 18px 24px 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            z-index: 20;
+        }
+
+        .brand-logo {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 20px;
+            font-weight: 800;
+            letter-spacing: -0.5px;
+            background: linear-gradient(135deg, #ffffff, #818cf8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .queue-counter {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-sub);
+            background: rgba(30, 41, 59, 0.6);
+            padding: 6px 14px;
+            border-radius: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        /* Card Swipe Deck Container */
+        .deck-container {
+            flex: 1;
+            position: relative;
+            margin: 10px 16px 15px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        /* Swipeable Card Item */
+        .swipe-card {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            border-radius: 28px;
+            overflow: hidden;
+            background: var(--card-bg);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.5);
+            cursor: grab;
+            touch-action: none;
+            will-change: transform;
+            transition: transform 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .swipe-card:active {
+            cursor: grabbing;
+        }
+
+        /* Generated 9:16 PNG Card Graphic */
+        .card-img-fit {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            background: #090c15;
+            pointer-events: none;
+        }
+
+        /* Dynamic Swipe Feedback Overlay Badges */
+        .swipe-badge {
+            position: absolute;
+            top: 40px;
+            font-size: 28px;
+            font-weight: 800;
+            padding: 8px 24px;
+            border-radius: 12px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            opacity: 0;
+            transition: opacity 0.15s ease;
+            z-index: 30;
+            pointer-events: none;
+        }
+
+        .badge-read {
+            right: 30px;
+            color: var(--accent-green);
+            border: 4px solid var(--accent-green);
+            transform: rotate(15deg);
+        }
+
+        .badge-pass {
+            left: 30px;
+            color: var(--accent-red);
+            border: 4px solid var(--accent-red);
+            transform: rotate(-15deg);
+        }
+
+        /* Bottom Controls Action Bar */
+        .app-actions {
+            padding: 10px 30px 25px;
+            display: flex;
+            justify-content: space-around;
+            align-items: center;
+            z-index: 20;
+        }
+
+        .action-btn {
+            width: 62px;
+            height: 62px;
+            border-radius: 50%;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            background: rgba(22, 30, 46, 0.8);
+            backdrop-filter: blur(10px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 26px;
+            cursor: pointer;
+            transition: all 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3);
+        }
+
+        .action-btn:active {
+            transform: scale(0.88);
+        }
+
+        .btn-pass {
+            color: var(--accent-red);
+            border-color: rgba(239, 68, 68, 0.3);
+        }
+
+        .btn-pass:hover {
+            background: rgba(239, 68, 68, 0.15);
+            box-shadow: 0 0 20px rgba(239, 68, 68, 0.4);
+        }
+
+        .btn-read {
+            width: 72px;
+            height: 72px;
+            font-size: 30px;
+            color: var(--accent-green);
+            border-color: rgba(16, 185, 129, 0.4);
+            background: rgba(16, 185, 129, 0.15);
+        }
+
+        .btn-read:hover {
+            background: rgba(16, 185, 129, 0.3);
+            box-shadow: 0 0 25px rgba(16, 185, 129, 0.5);
+        }
+
+        .btn-undo {
+            color: #f59e0b;
+            border-color: rgba(245, 158, 11, 0.3);
+            font-size: 22px;
+        }
+
+        /* Empty Feed State */
+        .empty-state {
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 40px 20px;
+            height: 100%;
+        }
+
+        .empty-state h3 {
+            font-size: 22px;
+            margin: 15px 0 10px;
+        }
+
+        .empty-state p {
+            font-size: 14px;
+            color: var(--text-sub);
+            margin-bottom: 25px;
+        }
+
+        .btn-reload {
+            background: linear-gradient(135deg, var(--accent-blue), #4f46e5);
+            color: #fff;
+            padding: 12px 28px;
+            border-radius: 14px;
+            font-weight: 700;
+            border: none;
+            cursor: pointer;
+            font-size: 15px;
+            box-shadow: 0 8px 20px rgba(99, 102, 241, 0.4);
+        }
+    </style>
+</head>
+<body>
+
+    <div class="app-shell">
+        <header class="app-header">
+            <div class="brand-logo">
+                <span>🔥</span> NewsSwipe
+            </div>
+            <div class="queue-counter" id="queue-counter">Card 1 / 20</div>
+        </header>
+
+        <div class="deck-container" id="deck-container">
+            <!-- Swipe Cards populated dynamically -->
+            <div class="empty-state" id="empty-state">
+                <div style="font-size: 54px;">🎉</div>
+                <h3>All 20 News Cards Swiped!</h3>
+                <p>You're all caught up on the latest Tech & Finance news.</p>
+                <button class="btn-reload" onclick="reloadFeed()">🔄 Reload 20 Cards</button>
+            </div>
+        </div>
+
+        <footer class="app-actions">
+            <button class="action-btn btn-undo" title="Undo last swipe" onclick="undoSwipe()">↩</button>
+            <button class="action-btn btn-pass" title="Pass / Skip" onclick="triggerSwipe('left')">✖</button>
+            <button class="action-btn btn-read" title="Read Article" onclick="triggerSwipe('right')">💚</button>
+        </footer>
+    </div>
+
+    <script>
+        let articlesQueue = [];
+        let currentIndex = 0;
+        let historyStack = [];
+        let activeCardEl = null;
+
+        // Touch & Drag State
+        let startX = 0, startY = 0;
+        let currentX = 0, currentY = 0;
+        let isDragging = false;
+
+        async function loadFeed() {
+            try {
+                const response = await fetch('/api/v1/feed');
+                const data = await response.json();
+                articlesQueue = data.articles;
+                currentIndex = 0;
+                historyStack = [];
+                renderDeck();
+            } catch (err) {
+                console.error("Failed to load feed:", err);
+            }
+        }
+
+        function renderDeck() {
+            const container = document.getElementById('deck-container');
+            const counter = document.getElementById('queue-counter');
+            
+            // Remove existing card elements
+            document.querySelectorAll('.swipe-card').forEach(c => c.remove());
+
+            if (currentIndex >= articlesQueue.length) {
+                document.getElementById('empty-state').style.display = 'flex';
+                counter.innerText = "Done!";
+                return;
+            } else {
+                document.getElementById('empty-state').style.display = 'none';
+                counter.innerText = `Card ${currentIndex + 1} / ${articlesQueue.length}`;
+            }
+
+            // Render top 3 stacked cards for depth effect
+            const maxVisible = Math.min(3, articlesQueue.length - currentIndex);
+            for (let i = maxVisible - 1; i >= 0; i--) {
+                const idx = currentIndex + i;
+                const article = articlesQueue[idx];
+
+                const card = document.createElement('div');
+                card.className = 'swipe-card';
+                card.id = `card-${idx}`;
+                
+                // Stack depth transform
+                const scale = 1 - (i * 0.04);
+                const translateY = i * 12;
+                card.style.transform = `translateY(${translateY}px) scale(${scale})`;
+                card.style.zIndex = 10 - i;
+
+                const catClass = article.category.toLowerCase();
+                const cardFilename = `card_${String(article.index).padStart(2, '0')}_${catClass}.png`;
+                const imgPath = `/output/cards/${cardFilename}`;
+
+                card.innerHTML = `
+                    <div class="swipe-badge badge-read">READ →</div>
+                    <div class="swipe-badge badge-pass">SKIP</div>
+                    <img src="${imgPath}" class="card-img-fit" alt="${article.title}">
+                `;
+
+                if (i === 0) {
+                    activeCardEl = card;
+                    attachDragListeners(card, article);
+                }
+
+                container.appendChild(card);
+            }
+        }
+
+        function attachDragListeners(card, article) {
+            // Pointer / Mouse / Touch Events
+            card.addEventListener('pointerdown', handleDragStart);
+            window.addEventListener('pointermove', handleDragMove);
+            window.addEventListener('pointerup', handleDragEnd);
+
+            function handleDragStart(e) {
+                isDragging = true;
+                startX = e.clientX;
+                startY = e.clientY;
+                card.style.transition = 'none';
+            }
+
+            function handleDragMove(e) {
+                if (!isDragging) return;
+                currentX = e.clientX - startX;
+                currentY = e.clientY - startY;
+
+                const rotate = currentX * 0.08;
+                card.style.transform = `translate(${currentX}px, ${currentY}px) rotate(${rotate}deg)`;
+
+                // Badges opacity feedback
+                const badgeRead = card.querySelector('.badge-read');
+                const badgePass = card.querySelector('.badge-pass');
+
+                if (currentX > 30) {
+                    badgeRead.style.opacity = Math.min(1, currentX / 120);
+                    badgePass.style.opacity = 0;
+                } else if (currentX < -30) {
+                    badgePass.style.opacity = Math.min(1, Math.abs(currentX) / 120);
+                    badgeRead.style.opacity = 0;
+                } else {
+                    badgeRead.style.opacity = 0;
+                    badgePass.style.opacity = 0;
+                }
+            }
+
+            function handleDragEnd(e) {
+                if (!isDragging) return;
+                isDragging = false;
+                card.style.transition = 'transform 0.35s cubic-bezier(0.175, 0.885, 0.32, 1.275)';
+
+                const threshold = 110;
+                if (currentX > threshold) {
+                    completeSwipe('right', article);
+                } else if (currentX < -threshold) {
+                    completeSwipe('left', article);
+                } else {
+                    // Spring back to center
+                    card.style.transform = 'translate(0px, 0px) rotate(0deg)';
+                    card.querySelector('.badge-read').style.opacity = 0;
+                    card.querySelector('.badge-pass').style.opacity = 0;
+                }
+
+                currentX = 0;
+                currentY = 0;
+                window.removeEventListener('pointermove', handleDragMove);
+                window.removeEventListener('pointerup', handleDragEnd);
+            }
+        }
+
+        function triggerSwipe(direction) {
+            if (!activeCardEl || currentIndex >= articlesQueue.length) return;
+            const article = articlesQueue[currentIndex];
+            completeSwipe(direction, article);
+        }
+
+        function completeSwipe(direction, article) {
+            if (!activeCardEl) return;
+
+            const flyX = direction === 'right' ? window.innerWidth : -window.innerWidth;
+            const flyRotate = direction === 'right' ? 30 : -30;
+
+            activeCardEl.style.transition = 'transform 0.45s ease-in, opacity 0.4s';
+            activeCardEl.style.transform = `translate(${flyX}px, ${currentY || 0}px) rotate(${flyRotate}deg)`;
+            activeCardEl.style.opacity = '0';
+
+            historyStack.push({ index: currentIndex, direction: direction });
+
+            setTimeout(() => {
+                if (direction === 'right') {
+                    // Direct user to full news story URL
+                    window.open(article.url, '_blank');
+                }
+                currentIndex++;
+                renderDeck();
+            }, 300);
+        }
+
+        function undoSwipe() {
+            if (historyStack.length === 0) return;
+            const last = historyStack.pop();
+            currentIndex = last.index;
+            renderDeck();
+        }
+
+        function reloadFeed() {
+            loadFeed();
+        }
+
+        // Initialize on load
+        loadFeed();
+    </script>
+</body>
+</html>
