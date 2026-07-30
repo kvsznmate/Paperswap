@@ -246,9 +246,12 @@ def generate_all_cards(articles: list, output_dir: str = "output/cards") -> list
     os.makedirs(output_dir, exist_ok=True)
     generated_files = []
     
+    from database import generate_article_key
+
     for article in articles:
         idx = article.get("index", 1)
-        filename = f"card_{idx:02d}_{article.get('category').lower()}.png"
+        article_key = generate_article_key(article.get("title", ""), article.get("url", "#"))
+        filename = f"{article_key}_card.png"
         filepath = os.path.join(output_dir, filename)
         try:
             path = create_visual_card(article, filepath)

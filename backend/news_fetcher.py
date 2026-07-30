@@ -179,7 +179,7 @@ def fetch_and_sync_news_to_db() -> list:
         if db.is_article_in_db(article_key):
             skipped_count += 1
         else:
-            filename = f"card_{idx:02d}_{item['category'].lower()}.png"
+            filename = f"{article_key}_card.png"
             filepath = os.path.join(OUTPUT_DIR, filename)
             try:
                 create_visual_card(item, filepath)
