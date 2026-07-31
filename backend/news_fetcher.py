@@ -6,14 +6,12 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 import database as db
-from card_generator import create_visual_card
 
 load_dotenv()
 
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "").strip()
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output", "cards")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# These URLs are stored as image_url and rendered by the phone UI (no PNG cards).
 CATEGORY_IMAGES = {
     "TECH": [
         "https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=800&q=80",
@@ -29,6 +27,7 @@ CATEGORY_IMAGES = {
     ]
 }
 
+
 def clean_html(text: str) -> str:
     """Strip HTML tags and clean whitespace from text."""
     if not text:
@@ -36,11 +35,12 @@ def clean_html(text: str) -> str:
     clean = re.sub(r'<[^>]+>', '', text)
     return ' '.join(clean.split())
 
+
 def generate_short_summary(title: str, category: str, raw_desc: str, source: str) -> str:
     """Generate distinct short summary for news item."""
     clean_desc = clean_html(raw_desc)
     clean_title = clean_html(title)
-    
+
     if ' - ' in clean_desc:
         clean_desc = clean_desc.rsplit(' - ', 1)[0].strip()
 
@@ -67,11 +67,12 @@ def generate_short_summary(title: str, category: str, raw_desc: str, source: str
     else:
         return f"Financial sector analysis covering corporate earnings, market trends, and strategic investment movements."
 
+
 def fetch_from_news_api(category: str, query: str, count: int = 25) -> list:
     """Fetch news from NewsAPI.org."""
     if not NEWS_API_KEY or NEWS_API_KEY == "your_news_api_key_here":
         return []
-    
+
     url = f"https://newsapi.org/v2/everything?q={query}&language=en&sortBy=publishedAt&pageSize={count}&apiKey={NEWS_API_KEY}"
     try:
         resp = requests.get(url, timeout=8)
@@ -106,6 +107,7 @@ def fetch_from_news_api(category: str, query: str, count: int = 25) -> list:
     except Exception as e:
         print(f"[Warning] NewsAPI fetch failed for {category}: {e}")
     return []
+
 
 def fetch_from_rss(category: str, rss_url: str, count: int = 25) -> list:
     """Fetch news from Google News / RSS fallback."""
@@ -148,12 +150,16 @@ def fetch_from_rss(category: str, rss_url: str, count: int = 25) -> list:
         print(f"[Error] RSS feed fetch error for {category}: {e}")
     return results
 
+
 def fetch_and_sync_news_to_db() -> list:
     """
     1. Fetches 25 Tech + 25 Finance = 50 news items.
-    2. Checks SQLite database if news already exists.
-    3. Saves ONLY new articles to DB and renders 9:16 PNG cards.
-    4. Returns latest 50 articles from SQLite database.
+    2. Checks the database to see if the article already exists.
+    3. Saves ONLY new articles (deduplicated by MD5 article_key).
+    4. Returns latest 50 articles from the database.
+
+    Cards are no longer rendered server-side — the phone builds the visual card
+    from the article fields (title, description, image_url, ...).
     """
     tech_news = fetch_from_news_api("TECH", "technology OR tech OR AI", 25)
     finance_news = fetch_from_news_api("FINANCE", "finance OR stock OR market", 25)
@@ -167,7 +173,7 @@ def fetch_and_sync_news_to_db() -> list:
         finance_news = fetch_from_rss("FINANCE", rss_fin_url, 25)
 
     raw_articles = tech_news[:25] + finance_news[:25]
-    
+
     new_count = 0
     skipped_count = 0
 
@@ -175,26 +181,19 @@ def fetch_and_sync_news_to_db() -> list:
         item['index'] = idx
         article_key = db.generate_article_key(item['title'], item['url'])
 
-        # Check if already in DB
         if db.is_article_in_db(article_key):
             skipped_count += 1
         else:
-            filename = f"{article_key}_card.png"
-            filepath = os.path.join(OUTPUT_DIR, filename)
-            try:
-                create_visual_card(item, filepath)
-            except Exception as e:
-                print(f"[Warning] Card rendering error: {e}")
-
-            db.save_article(item, filename)
+            db.save_article(item)
             new_count += 1
 
     print(f"[DB Sync Summary] Processed {len(raw_articles)} items: {new_count} NEW inserted, {skipped_count} ALREADY EXISTED.")
 
-    # Retrieve latest 50 articles from SQLite database
     latest_articles = db.get_latest_articles(50)
     return latest_articles
 
+
 if __name__ == "__main__":
+    db.init_db()
     articles = fetch_and_sync_news_to_db()
     print(f"Total articles in DB query: {len(articles)}")
