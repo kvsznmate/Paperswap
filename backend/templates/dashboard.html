@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Tech & Finance News - Visual Cards Hub</title>
+    <title>PaperSwap - Headlines Hub</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -131,13 +131,17 @@
             box-shadow: 0 4px 12px rgba(0,0,0,0.3);
         }
 
+        .btn-mobile {
+            background: linear-gradient(135deg, var(--finance-color), #059669);
+            box-shadow: 0 4px 15px var(--finance-glow);
+        }
+
         main {
             max-width: 1400px;
             margin: 30px auto 0;
             padding: 0 5%;
         }
 
-        /* Filter Tabs */
         .tabs-bar {
             display: flex;
             justify-content: space-between;
@@ -206,7 +210,6 @@
             100% { transform: scale(0.95); opacity: 0.8; }
         }
 
-        /* News Cards Grid */
         .cards-grid {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
@@ -361,16 +364,6 @@
             transition: background 0.2s;
         }
 
-        .btn-view-card {
-            background: rgba(30, 41, 59, 0.8);
-            color: var(--text-primary);
-            border: 1px solid var(--border-card);
-        }
-
-        .btn-view-card:hover {
-            background: rgba(51, 65, 85, 0.9);
-        }
-
         .btn-article {
             background: rgba(0, 112, 243, 0.15);
             color: #60a5fa;
@@ -379,65 +372,6 @@
 
         .btn-article:hover {
             background: rgba(0, 112, 243, 0.3);
-        }
-
-        /* Modal */
-        .modal-overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: rgba(5, 8, 15, 0.85);
-            backdrop-filter: blur(12px);
-            z-index: 1000;
-            display: none;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
-        }
-
-        .modal-overlay.active {
-            display: flex;
-        }
-
-        .modal-box {
-            background: var(--bg-dark);
-            border: 1px solid var(--border-card);
-            border-radius: 20px;
-            max-width: 950px;
-            width: 100%;
-            overflow: hidden;
-            box-shadow: 0 25px 50px rgba(0,0,0,0.8);
-            position: relative;
-        }
-
-        .modal-header {
-            padding: 16px 24px;
-            border-bottom: 1px solid var(--border-card);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .modal-close {
-            background: transparent;
-            border: none;
-            color: var(--text-secondary);
-            font-size: 24px;
-            cursor: pointer;
-        }
-
-        .modal-body {
-            padding: 20px;
-            text-align: center;
-        }
-
-        .modal-img {
-            max-width: 100%;
-            height: auto;
-            border-radius: 12px;
-            border: 1px solid var(--border-card);
         }
     </style>
 </head>
@@ -449,12 +383,12 @@
                 <div class="logo-icon">⚡</div>
                 <div class="logo-title">
                     <h1>Tech & Finance News API</h1>
-                    <p>Latest 20 Headlines • Python Visual Card Generator</p>
+                    <p>Latest 50 Headlines • PostgreSQL-backed feed</p>
                 </div>
             </div>
             <div class="controls">
-                <button class="btn btn-secondary" onclick="fetchNews()">🔄 Refresh 20 News</button>
-                <button class="btn" onclick="generatePNGs()">📷 Generate PNG Cards</button>
+                <button class="btn btn-secondary" onclick="refreshNews()">🔄 Refresh feed</button>
+                <a class="btn btn-mobile" href="/mobile">📱 Open swipe app</a>
             </div>
         </div>
     </header>
@@ -462,53 +396,55 @@
     <main>
         <div class="tabs-bar">
             <div class="nav-tabs">
-                <button class="tab-btn active" onclick="filterCategory('ALL', this)">All News (20)</button>
-                <button class="tab-btn" onclick="filterCategory('TECH', this)">Tech Industry (10)</button>
-                <button class="tab-btn" onclick="filterCategory('FINANCE', this)">Finance (10)</button>
+                <button class="tab-btn active" onclick="filterCategory('ALL', this)">All News (50)</button>
+                <button class="tab-btn" onclick="filterCategory('TECH', this)">Tech Industry (25)</button>
+                <button class="tab-btn" onclick="filterCategory('FINANCE', this)">Finance (25)</button>
             </div>
             <div class="status-pill">
                 <div class="pulse-dot"></div>
-                <span id="status-text">20 Latest Articles Loaded</span>
+                <span id="status-text">Loading articles…</span>
             </div>
         </div>
 
         <div class="cards-grid" id="news-grid">
-            <!-- News Cards will be dynamically injected here -->
+            <!-- News cards injected here -->
         </div>
     </main>
-
-    <!-- Modal for PNG Card Preview -->
-    <div class="modal-overlay" id="image-modal">
-        <div class="modal-box">
-            <div class="modal-header">
-                <h3 id="modal-title">Python Visual PNG Card</h3>
-                <button class="modal-close" onclick="closeModal()">&times;</button>
-            </div>
-            <div class="modal-body">
-                <img src="" id="modal-img" class="modal-img" alt="Visual Card">
-                <div style="margin-top: 15px; display: flex; justify-content: center; gap: 15px;">
-                    <a id="modal-download" class="btn" download href="">⬇ Download Card PNG</a>
-                </div>
-            </div>
-        </div>
-    </div>
 
     <script>
         let allArticles = [];
 
+        function escapeHtml(str) {
+            const d = document.createElement('div');
+            d.textContent = str == null ? '' : str;
+            return d.innerHTML;
+        }
+
         async function fetchNews() {
             const statusText = document.getElementById('status-text');
-            statusText.innerText = "Fetching latest news...";
+            statusText.innerText = "Loading articles…";
             try {
                 const response = await fetch('/api/news');
                 const data = await response.json();
-                allArticles = data.articles;
+                allArticles = data.articles || [];
                 renderCards(allArticles);
-                statusText.innerText = `${allArticles.length} Latest Articles Loaded`;
+                statusText.innerText = `${allArticles.length} latest articles loaded`;
             } catch (err) {
                 console.error("Error fetching news:", err);
                 statusText.innerText = "Failed to load news";
             }
+        }
+
+        // Re-sync on the server (dedup + fresh fetch), then reload the grid.
+        async function refreshNews() {
+            const statusText = document.getElementById('status-text');
+            statusText.innerText = "Refreshing feed…";
+            try {
+                await fetch('/api/v1/cards/refresh');
+            } catch (e) {
+                console.error("Refresh failed:", e);
+            }
+            fetchNews();
         }
 
         function renderCards(articles) {
@@ -520,28 +456,25 @@
                 card.className = 'news-card';
                 card.setAttribute('data-category', art.category);
 
-                const catClass = art.category.toLowerCase();
-                const cardFilename = `card_${String(art.index).padStart(2, '0')}_${catClass}.png`;
-                const pngPath = `/output/cards/${cardFilename}`;
+                const catClass = (art.category || 'TECH').toLowerCase();
 
                 card.innerHTML = `
                     <div class="card-thumb-wrap">
-                        <img src="${art.image_url}" class="card-thumb" alt="News Image" onerror="this.src='https://images.unsplash.com/photo-1518770660439-4636190af475?w=800'">
+                        <img src="${escapeHtml(art.image_url)}" class="card-thumb" alt="News Image" onerror="this.src='https://images.unsplash.com/photo-1518770660439-4636190af475?w=800'">
                         <div class="badge-bar">
-                            <span class="cat-badge ${catClass}">${art.category}</span>
+                            <span class="cat-badge ${catClass}">${escapeHtml(art.category)}</span>
                             <span class="index-badge">#${String(art.index).padStart(2, '0')}</span>
                         </div>
                     </div>
                     <div class="card-body">
                         <div class="card-meta">
-                            <span class="source-name">${art.source}</span>
-                            <span>${art.published_at}</span>
+                            <span class="source-name">${escapeHtml(art.source)}</span>
+                            <span>${escapeHtml(art.published_at)}</span>
                         </div>
-                        <h2 class="card-title">${art.title}</h2>
-                        <p class="card-desc">${art.description}</p>
+                        <h2 class="card-title">${escapeHtml(art.title)}</h2>
+                        <p class="card-desc">${escapeHtml(art.description)}</p>
                         <div class="card-footer">
-                            <button class="btn-card btn-view-card" onclick="openModal('${pngPath}', '${art.title.replace(/'/g, "\\'")}')">🖼 View PNG Card</button>
-                            <a href="${art.url}" target="_blank" class="btn-card btn-article">Read Article ↗</a>
+                            <a href="${escapeHtml(art.url)}" target="_blank" class="btn-card btn-article">Read Article ↗</a>
                         </div>
                     </div>
                 `;
@@ -556,36 +489,10 @@
             if (cat === 'ALL') {
                 renderCards(allArticles);
             } else {
-                const filtered = allArticles.filter(a => a.category === cat);
-                renderCards(filtered);
+                renderCards(allArticles.filter(a => a.category === cat));
             }
         }
 
-        async function generatePNGs() {
-            const statusText = document.getElementById('status-text');
-            statusText.innerText = "Generating 20 PNG visual cards...";
-            try {
-                const res = await fetch('/api/cards/generate');
-                const result = await res.json();
-                statusText.innerText = `Generated ${result.count} Visual PNG Cards!`;
-                alert(`Successfully generated ${result.count} PNG visual cards in backend/output/cards/`);
-            } catch (e) {
-                alert("Error generating PNG cards: " + e);
-            }
-        }
-
-        function openModal(imgSrc, title) {
-            document.getElementById('modal-title').innerText = title;
-            document.getElementById('modal-img').src = imgSrc;
-            document.getElementById('modal-download').href = imgSrc;
-            document.getElementById('image-modal').classList.add('active');
-        }
-
-        function closeModal() {
-            document.getElementById('image-modal').classList.remove('active');
-        }
-
-        // Initialize on load
         fetchNews();
     </script>
 </body>
