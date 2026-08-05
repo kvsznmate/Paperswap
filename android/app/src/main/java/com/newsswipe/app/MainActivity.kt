@@ -25,7 +25,10 @@ import com.newsswipe.app.data.model.NewsArticle
 import com.newsswipe.app.ui.components.ActionButtons
 import com.newsswipe.app.ui.components.SwipeableCardStack
 import com.newsswipe.app.ui.theme.DarkObsidian
+import com.newsswipe.app.ui.theme.PureBlack
+import com.newsswipe.app.ui.theme.SpaceCadet
 import com.newsswipe.app.ui.theme.NewsSwipeAndroidTheme
+import androidx.compose.ui.text.style.TextDecoration
 import com.newsswipe.app.ui.theme.TextPrimary
 import com.newsswipe.app.ui.theme.TextSecondary
 import com.newsswipe.app.viewmodel.NewsUiState
@@ -38,7 +41,7 @@ class MainActivity : ComponentActivity() {
             NewsSwipeAndroidTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
-                    color = DarkObsidian
+                    color = PureBlack
                 ) {
                     NewsSwipeAppScreen()
                 }
@@ -70,7 +73,7 @@ fun NewsSwipeAppScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(DarkObsidian)
+            .background(PureBlack)
             .padding(horizontal = 16.dp, vertical = 12.dp)
     ) {
         // 1. Top Bar Header
@@ -78,45 +81,16 @@ fun NewsSwipeAppScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "🔥 ",
-                    fontSize = 20.sp
-                )
-                Text(
-                    text = "PaperSwap",
-                    color = TextPrimary,
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.ExtraBold
-                )
-            }
-
-            when (val state = uiState) {
-                is NewsUiState.Success -> {
-                    val countStr = if (state.currentIndex < state.articles.size) {
-                        "Card ${state.currentIndex + 1} / ${state.articles.size}"
-                    } else {
-                        "Done!"
-                    }
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(Color(0xFF1E2638))
-                            .padding(horizontal = 12.dp, vertical = 6.dp)
-                    ) {
-                        Text(
-                            text = countStr,
-                            color = TextSecondary,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-                }
-                else -> {}
-            }
+            Text(
+                text = "PaperSwap",
+                color = TextPrimary,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.ExtraBold,
+                textDecoration = TextDecoration.Underline
+            )
         }
 
         // 2. Main Content Area

@@ -3,6 +3,8 @@ package com.newsswipe.app.ui.theme
 import androidx.compose.ui.graphics.Color
 
 val DarkObsidian = Color(0xFF090C15)
+val SpaceCadet = Color(0xFF1D2951)
+val PureBlack = Color(0xFF000000)
 val CardBackground = Color(0xFF121824)
 val CardBorder = Color(0xFF222B3C)
 

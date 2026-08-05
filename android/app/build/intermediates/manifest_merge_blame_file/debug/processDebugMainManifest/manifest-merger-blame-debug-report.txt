@@ -41,8 +41,8 @@
 27-->C:\Users\matek_yulq090\Desktop\Antigrav_test\android\app\src\main\AndroidManifest.xml:12:9-54
 28        android:icon="@mipmap/ic_launcher"
 28-->C:\Users\matek_yulq090\Desktop\Antigrav_test\android\app\src\main\AndroidManifest.xml:13:9-43
-29        android:label="NewsSwipe ⚡"
-29-->C:\Users\matek_yulq090\Desktop\Antigrav_test\android\app\src\main\AndroidManifest.xml:14:9-36
+29        android:label="PaperSwap"
+29-->C:\Users\matek_yulq090\Desktop\Antigrav_test\android\app\src\main\AndroidManifest.xml:14:9-34
 30        android:roundIcon="@mipmap/ic_launcher_round"
 30-->C:\Users\matek_yulq090\Desktop\Antigrav_test\android\app\src\main\AndroidManifest.xml:15:9-54
 31        android:supportsRtl="true"
@@ -57,8 +57,8 @@
 35-->C:\Users\matek_yulq090\Desktop\Antigrav_test\android\app\src\main\AndroidManifest.xml:22:13-41
 36            android:exported="true"
 36-->C:\Users\matek_yulq090\Desktop\Antigrav_test\android\app\src\main\AndroidManifest.xml:23:13-36
-37            android:label="NewsSwipe ⚡"
-37-->C:\Users\matek_yulq090\Desktop\Antigrav_test\android\app\src\main\AndroidManifest.xml:24:13-40
+37            android:label="PaperSwap"
+37-->C:\Users\matek_yulq090\Desktop\Antigrav_test\android\app\src\main\AndroidManifest.xml:24:13-38
 38            android:theme="@style/Theme.NewsSwipeAndroid" >
 38-->C:\Users\matek_yulq090\Desktop\Antigrav_test\android\app\src\main\AndroidManifest.xml:25:13-58
 39            <intent-filter>

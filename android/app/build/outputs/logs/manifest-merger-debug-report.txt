@@ -104,7 +104,7 @@ MERGED from [androidx.startup:startup-runtime:1.1.1] C:\Users\matek_yulq090\.gra
 	android:supportsRtl
 		ADDED from C:\Users\matek_yulq090\Desktop\Antigrav_test\android\app\src\main\AndroidManifest.xml:16:9-35
 	android:label
-		ADDED from C:\Users\matek_yulq090\Desktop\Antigrav_test\android\app\src\main\AndroidManifest.xml:14:9-36
+		ADDED from C:\Users\matek_yulq090\Desktop\Antigrav_test\android\app\src\main\AndroidManifest.xml:14:9-34
 	android:fullBackupContent
 		ADDED from C:\Users\matek_yulq090\Desktop\Antigrav_test\android\app\src\main\AndroidManifest.xml:12:9-54
 	android:roundIcon
@@ -124,7 +124,7 @@ MERGED from [androidx.startup:startup-runtime:1.1.1] C:\Users\matek_yulq090\.gra
 activity#com.newsswipe.app.MainActivity
 ADDED from C:\Users\matek_yulq090\Desktop\Antigrav_test\android\app\src\main\AndroidManifest.xml:21:9-30:20
 	android:label
-		ADDED from C:\Users\matek_yulq090\Desktop\Antigrav_test\android\app\src\main\AndroidManifest.xml:24:13-40
+		ADDED from C:\Users\matek_yulq090\Desktop\Antigrav_test\android\app\src\main\AndroidManifest.xml:24:13-38
 	android:exported
 		ADDED from C:\Users\matek_yulq090\Desktop\Antigrav_test\android\app\src\main\AndroidManifest.xml:23:13-36
 	android:theme
