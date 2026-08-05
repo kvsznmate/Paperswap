@@ -4,3 +4,4 @@ uvicorn>=0.27.0
 python-dotenv>=1.0.0
 feedparser>=6.0.10
 psycopg2-binary>=2.9.9
+apscheduler>=3.10.0

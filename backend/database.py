@@ -157,3 +157,22 @@ def record_user_swipe(article_id: int, action: str):
     conn.commit()
     cursor.close()
     conn.close()
+
+
+def purge_old_articles(days: int = 7) -> int:
+    """Delete articles older than `days` (based on created_at), returning the
+    number of rows removed. Related user_swipes rows are removed automatically
+    via ON DELETE CASCADE. Card 'images' are hotlinked URLs stored in the row,
+    so deleting the row is all the cleanup required."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM articles WHERE created_at < NOW() - (%s || ' days')::interval",
+        (days,),
+    )
+    removed = cursor.rowcount
+    conn.commit()
+    cursor.close()
+    conn.close()
+    print(f"[DB Purge] Removed {removed} article(s) older than {days} days.")
+    return removed

@@ -4,20 +4,52 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
+from apscheduler.schedulers.background import BackgroundScheduler
 
 from news_fetcher import fetch_and_sync_news_to_db
 import database as db
 
 
+# Hours between automatic refreshes. Overridable via env (docker-compose sets REFRESH_INTERVAL).
+REFRESH_INTERVAL_HOURS = float(os.getenv("REFRESH_INTERVAL", "12"))
+# Articles older than this are purged on each refresh.
+PURGE_OLDER_THAN_DAYS = int(os.getenv("PURGE_OLDER_THAN_DAYS", "7"))
+
+scheduler = BackgroundScheduler()
+
+
+def refresh_pipeline():
+    """One full refresh cycle: fetch + dedup new news, then purge week-old rows
+    (and their cascaded swipes). Run on startup and on the scheduled interval."""
+    fetch_and_sync_news_to_db()
+    db.purge_old_articles(days=PURGE_OLDER_THAN_DAYS)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize the PostgreSQL database and sync news on startup."""
+    """Initialize the database, run an initial refresh, and start the 12-hour scheduler."""
     print("[Server Startup] Initializing PostgreSQL database...")
     db.init_db()
-    print("[Server Startup] Syncing Tech & Finance news with the database...")
-    fetch_and_sync_news_to_db()
+    print("[Server Startup] Running initial fetch + purge...")
+    refresh_pipeline()
     print("[Server Startup] Database ready!")
+
+    scheduler.add_job(
+        refresh_pipeline,
+        "interval",
+        hours=REFRESH_INTERVAL_HOURS,
+        id="refresh_pipeline",
+        replace_existing=True,
+        max_instances=1,   # never let a slow run overlap the next tick
+        coalesce=True,     # collapse missed runs into a single execution
+    )
+    scheduler.start()
+    print(f"[Scheduler] Auto-refresh every {REFRESH_INTERVAL_HOURS} h; "
+          f"purging articles older than {PURGE_OLDER_THAN_DAYS} days.")
+
     yield
+
+    scheduler.shutdown(wait=False)
 
 
 app = FastAPI(
@@ -98,8 +130,10 @@ def run_cli_mode():
     print("[1/2] Initializing PostgreSQL Database...")
     db.init_db()
 
-    print("[2/2] Fetching and syncing news to the database...")
-    articles = fetch_and_sync_news_to_db()
+    print("[2/2] Fetching, syncing, and purging old news in the database...")
+    fetch_and_sync_news_to_db()
+    db.purge_old_articles(days=PURGE_OLDER_THAN_DAYS)
+    articles = db.get_latest_articles(50)
     print("\n" + "=" * 60)
     print(f"SUCCESS! Database updated with {len(articles)} active news cards.")
     print("=" * 60)

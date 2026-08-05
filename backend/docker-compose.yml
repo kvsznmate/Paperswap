@@ -26,6 +26,8 @@ services:
       # host is the compose service name "db", not localhost
       DATABASE_URL: postgresql://newsuser:newspass@db:5432/newsdb
       NEWS_API_KEY: ${NEWS_API_KEY:-your_news_api_key_here}
+      REFRESH_INTERVAL: ${REFRESH_INTERVAL:-12}       # hours between auto-refreshes
+      PURGE_OLDER_THAN_DAYS: ${PURGE_OLDER_THAN_DAYS:-7}  # delete articles older than this
     depends_on:
       db:
         condition: service_healthy
