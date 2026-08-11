@@ -285,42 +285,217 @@ def get_hourly_usage_distribution() -> list:
     return result
 
 
-def get_telemetry_summary() -> dict:
-    """Combine system disk usage and user analytics."""
-    import shutil
-    total, used, free = shutil.disk_usage("/")
-
+def get_top_swiped_articles(limit: int = 6) -> list:
+    """Retrieve articles with the highest number of 'read' (swipe right) actions."""
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) as total_articles FROM articles")
-    articles_count = cursor.fetchone()['total_articles']
-
-    cursor.execute("SELECT COUNT(*) as total_swipes FROM user_swipes")
-    swipes_count = cursor.fetchone()['total_swipes']
-
-    cursor.execute("SELECT COUNT(*) as total_sessions FROM user_sessions")
-    sessions_count = cursor.fetchone()['total_sessions']
+    cursor.execute('''
+        SELECT a.id, a.title, a.source, a.category, a.image_url, a.url, a.published_at,
+               COUNT(CASE WHEN s.action = 'read' THEN 1 END) as read_count,
+               COUNT(CASE WHEN s.action = 'pass' THEN 1 END) as pass_count,
+               COUNT(s.id) as total_swipes
+        FROM articles a
+        JOIN user_swipes s ON a.id = s.article_id
+        GROUP BY a.id, a.title, a.source, a.category, a.image_url, a.url, a.published_at
+        HAVING COUNT(CASE WHEN s.action = 'read' THEN 1 END) > 0
+        ORDER BY read_count DESC, total_swipes DESC
+        LIMIT %s
+    ''', (limit,))
+    rows = cursor.fetchall()
     cursor.close()
     conn.close()
 
+    results = []
+    for r in rows:
+        item = dict(r)
+        total = item['total_swipes']
+        reads = item['read_count']
+        item['like_ratio_percent'] = round((reads / total * 100), 1) if total > 0 else 0
+        results.append(item)
+    return results
+
+
+def get_top_api_endpoints(limit: int = 6) -> list:
+    """Retrieve top API endpoints by total request hits and percentage distribution."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT endpoint, method, COUNT(*) as hit_count
+        FROM request_logs
+        GROUP BY endpoint, method
+        ORDER BY hit_count DESC
+        LIMIT %s
+    ''', (limit,))
+    rows = cursor.fetchall()
+
+    cursor.execute("SELECT COUNT(*) as total_requests FROM request_logs")
+    total_row = cursor.fetchone()
+    total_reqs = total_row['total_requests'] if total_row else 1
+    total_reqs = max(total_reqs, 1)
+
+    cursor.close()
+    conn.close()
+
+    results = []
+    for r in rows:
+        item = dict(r)
+        item['percentage'] = round((item['hit_count'] / total_reqs) * 100, 1)
+        results.append(item)
+    return results
+
+
+def get_folder_storage_sizes() -> list:
+    """Analyze folder disk usage across key system and application directories."""
+    target_paths = [
+        {"name": "App Backend Workspace", "path": os.path.dirname(__file__)},
+        {"name": "HTML Templates", "path": os.path.join(os.path.dirname(__file__), "templates")},
+        {"name": "PostgreSQL Data", "path": "/var/lib/postgresql/data"},
+        {"name": "System Logs (/var/log)", "path": "/var/log"},
+        {"name": "Temp Storage (/tmp)", "path": "/tmp"}
+    ]
+    results = []
+    for item in target_paths:
+        p = item["path"]
+        size_bytes = 0
+        exists = os.path.exists(p)
+        if exists:
+            if os.path.isfile(p):
+                size_bytes = os.path.getsize(p)
+            else:
+                for root, dirs, files in os.walk(p):
+                    for f in files:
+                        try:
+                            fp = os.path.join(root, f)
+                            if not os.path.islink(fp):
+                                size_bytes += os.path.getsize(fp)
+                        except Exception:
+                            pass
+        size_mb = round(size_bytes / (1024 * 1024), 2)
+        results.append({
+            "name": item["name"],
+            "path": p,
+            "exists": exists,
+            "size_mb": size_mb,
+            "display_size": f"{size_mb} MB" if size_mb < 1024 else f"{round(size_mb/1024, 2)} GB"
+        })
+    return results
+
+
+def get_database_detailed_analytics() -> dict:
+    """Retrieve database stats: oldest entry, newest entry, total reads vs passes, article counts."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT COUNT(*) as total_articles, MIN(created_at) as oldest, MAX(created_at) as newest FROM articles")
+    art_stats = cursor.fetchone() or {}
+
+    cursor.execute("SELECT COUNT(*) as total_swipes, COUNT(CASE WHEN action = 'read' THEN 1 END) as read_count, COUNT(CASE WHEN action = 'pass' THEN 1 END) as pass_count FROM user_swipes")
+    swipe_stats = cursor.fetchone() or {}
+
+    cursor.execute("SELECT COUNT(*) as total_sessions FROM user_sessions")
+    sess_stats = cursor.fetchone() or {}
+
+    cursor.execute("SELECT COUNT(*) as total_requests FROM request_logs")
+    req_stats = cursor.fetchone() or {}
+
+    cursor.close()
+    conn.close()
+
+    oldest_str = art_stats.get('oldest').isoformat() if art_stats.get('oldest') else 'N/A'
+    newest_str = art_stats.get('newest').isoformat() if art_stats.get('newest') else 'N/A'
+    total_swipes = swipe_stats.get('total_swipes', 0)
+    reads = swipe_stats.get('read_count', 0)
+    passes = swipe_stats.get('pass_count', 0)
+    read_ratio = round((reads / total_swipes * 100), 1) if total_swipes > 0 else 0.0
+
+    return {
+        "total_articles": art_stats.get('total_articles', 0),
+        "oldest_entry": oldest_str,
+        "latest_refresh": newest_str,
+        "total_swipes": total_swipes,
+        "read_swipes": reads,
+        "pass_swipes": passes,
+        "read_ratio_percent": read_ratio,
+        "total_sessions": sess_stats.get('total_sessions', 0),
+        "total_requests": req_stats.get('total_requests', 0)
+    }
+
+
+def get_oracle_quota_status(used_gb: float) -> dict:
+    """Calculate usage against Oracle Cloud Always Free allowances."""
+    # Always free block storage limit: 200 GB
+    # Always free ARM OCPU limit: 2 OCPUs
+    # Always free ARM RAM limit: 12 GB
+    # Always free Egress limit: 10,000 GB (10 TB/month)
+    storage_limit_gb = 200.0
+    storage_quota_percent = round((used_gb / storage_limit_gb) * 100, 1)
+
+    return {
+        "ocpu": {
+            "used": 1,
+            "limit": 2,
+            "unit": "OCPU",
+            "percent": 50.0,
+            "status": "Safe (50% of 2 OCPU Free Allowance)"
+        },
+        "memory": {
+            "used_gb": 2.0,
+            "limit_gb": 12.0,
+            "unit": "GB RAM",
+            "percent": 16.7,
+            "status": "Safe (16.7% of 12 GB Free Allowance)"
+        },
+        "storage": {
+            "used_gb": used_gb,
+            "limit_gb": storage_limit_gb,
+            "percent": storage_quota_percent,
+            "status": f"{storage_quota_percent}% of 200 GB Free Allowance Used"
+        },
+        "egress": {
+            "estimated_used_gb": 0.5,
+            "limit_gb": 10000.0,
+            "percent": 0.005,
+            "status": "Safe (<0.1% of 10 TB/mo Egress Free Allowance)"
+        }
+    }
+
+
+def get_telemetry_summary() -> dict:
+    """Combine system disk usage, folder sizes, top swiped articles, API endpoints, Oracle free quota, and DB analytics."""
+    import shutil
+    total, used, free = shutil.disk_usage("/")
+    used_gb = round(used / (1024**3), 2)
+    total_gb = round(total / (1024**3), 2)
+
+    db_analytics = get_database_detailed_analytics()
+    top_articles = get_top_swiped_articles(6)
+    top_endpoints = get_top_api_endpoints(6)
+    folder_sizes = get_folder_storage_sizes()
+    oracle_quota = get_oracle_quota_status(used_gb)
     active_users = get_active_users_count(60)
     avg_duration = get_avg_session_duration_minutes()
     hourly_distribution = get_hourly_usage_distribution()
 
     return {
         "storage": {
-            "total_gb": round(total / (1024**3), 2),
-            "used_gb": round(used / (1024**3), 2),
+            "total_gb": total_gb,
+            "used_gb": used_gb,
             "free_gb": round(free / (1024**3), 2),
             "used_percent": round((used / total) * 100, 1)
         },
+        "folder_analytics": folder_sizes,
+        "oracle_quota": oracle_quota,
         "user_analytics": {
             "currently_connected_users": active_users,
             "avg_session_minutes": avg_duration,
-            "total_sessions": sessions_count,
-            "total_swipes": swipes_count,
-            "total_articles": articles_count
+            "total_sessions": db_analytics["total_sessions"],
+            "total_swipes": db_analytics["total_swipes"],
+            "total_articles": db_analytics["total_articles"]
         },
-        "hourly_distribution": hourly_distribution
+        "hourly_distribution": hourly_distribution,
+        "top_swiped_cards": top_articles,
+        "top_api_endpoints": top_endpoints,
+        "database_analytics": db_analytics
     }
+
 

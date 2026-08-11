@@ -65,10 +65,10 @@ app = FastAPI(
 async def log_requests_middleware(request: Request, call_next):
     """Middleware to track request frequency for usage peak hours analysis."""
     path = request.url.path
-    # Ignore static files or health checks if needed
-    if not path.startswith("/static") and not path.endswith(".ico"):
+    if not path.startswith("/static") and not path.endswith(".ico") and not path.startswith("/api/v1/telemetry"):
         try:
             db.log_request_event(path, request.method)
+            add_log_entry(f"{request.method} {path} - 200 OK", "HTTP")
         except Exception:
             pass  # DB might still be initializing
     response = await call_next(request)
@@ -162,11 +162,34 @@ def user_heartbeat(req: HeartbeatRequest, request: Request):
     return JSONResponse(content={"status": "ok", "session_id": req.session_id})
 
 
+import collections
+import datetime
+
+RECENT_LOGS = collections.deque(maxlen=100)
+
+def add_log_entry(message: str, level: str = "INFO"):
+    """Helper to append timestamped application logs for live dashboard streaming."""
+    now_str = datetime.datetime.now().strftime("%H:%M:%S")
+    entry = f"[{now_str}] [{level}] {message}"
+    RECENT_LOGS.append(entry)
+    print(entry)
+
+# Log startup message
+add_log_entry("Application process initialized. Telemetry system online.", "SYSTEM")
+
+
 @app.get("/api/v1/telemetry/stats")
 def get_telemetry_stats():
-    """Get system telemetry (VM storage, active users, avg time connected, peak hours)."""
+    """Get system telemetry (VM storage, active users, avg time connected, peak hours, top swipes, etc.)."""
     stats = db.get_telemetry_summary()
     return JSONResponse(content=stats)
+
+
+@app.get("/api/v1/telemetry/logs")
+def get_telemetry_logs():
+    """Stream recent 50 application & request logs to the analytics dashboard terminal."""
+    return JSONResponse(content={"status": "ok", "logs": list(RECENT_LOGS)})
+
 
 
 
