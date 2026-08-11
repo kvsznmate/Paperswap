@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PaperSwap - Oracle VM Telemetry & Engagement Dashboard</title>
+    <title>Oracle VM Analytics Dashboard</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -711,7 +711,7 @@
                     </svg>
                 </div>
                 <div class="brand-titles">
-                    <h1>Oracle VM Telemetry</h1>
+                    <h1>Oracle VM Analytics</h1>
                     <p>PaperSwap Infrastructure & User Engagement Monitor</p>
                 </div>
             </div>
@@ -728,10 +728,10 @@
         <!-- Navigation Tabs -->
         <div class="analytics-tabs">
             <button class="analytics-tab-btn active" onclick="switchTab('overview', this)">Infrastructure & VM</button>
-            <button class="analytics-tab-btn" onclick="switchTab('folders', this)">File Storage Tree</button>
+            <button class="analytics-tab-btn" onclick="switchTab('folders', this)">File Storage</button>
             <button class="analytics-tab-btn" onclick="switchTab('database', this)">Database Inspector</button>
-            <button class="analytics-tab-btn" onclick="switchTab('swipes', this)">Swiped Right Cards</button>
-            <button class="analytics-tab-btn" onclick="switchTab('logs', this)">Live Server Logs</button>
+            <button class="analytics-tab-btn" onclick="switchTab('swipes', this)">Liked stories</button>
+            <button class="analytics-tab-btn" onclick="switchTab('logs', this)">Server Logs</button>
         </div>
 
         <!-- TAB 1: OVERVIEW & VM HEALTH -->
@@ -740,11 +740,11 @@
             <div class="section-header">
                 <div>
                     <h2>Real-Time Performance Overview</h2>
-                    <p>Live metrics from your Oracle Cloud ARM VM instance & PostgreSQL backend.</p>
+                    <p>Live metrics from your Oracle Cloud ARM VM.</p>
                 </div>
                 <div>
                     <span class="live-badge">
-                        <span class="pulse-dot"></span> Telemetry Active
+                        <span class="pulse-dot"></span> VM Active running
                     </span>
                 </div>
             </div>
@@ -783,11 +783,11 @@
 
                 <div class="kpi-card">
                     <div class="kpi-title">
-                        <span>Total Swipes Recorded</span>
-                        <span class="kpi-tag">SWIPES</span>
+                        <span>Total Stories Liked</span>
+                        <span class="kpi-tag">LIKES</span>
                     </div>
                     <div class="kpi-value" id="total-swipes-val">--</div>
-                    <div class="kpi-subtext" id="articles-count-subtext">Active articles: --</div>
+                    <div class="kpi-subtext" id="articles-count-subtext">Active news articles: --</div>
                 </div>
             </div>
 
