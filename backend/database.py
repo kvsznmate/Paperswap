@@ -345,13 +345,16 @@ def get_top_api_endpoints(limit: int = 6) -> list:
 
 
 def get_folder_storage_sizes() -> list:
-    """Analyze folder disk usage across key system and application directories."""
+    """Analyze folder disk usage across key system, docker container, and application directories."""
     target_paths = [
-        {"name": "App Backend Workspace", "path": os.path.dirname(__file__)},
-        {"name": "HTML Templates", "path": os.path.join(os.path.dirname(__file__), "templates")},
-        {"name": "PostgreSQL Data", "path": "/var/lib/postgresql/data"},
+        {"name": "Docker Containers & Images", "path": "/var/lib/docker"},
+        {"name": "Linux System Binaries & Libs (/usr)", "path": "/usr"},
+        {"name": "OS System Cache & State (/var)", "path": "/var/cache"},
+        {"name": "PostgreSQL Database Data", "path": "/var/lib/postgresql/data"},
+        {"name": "Application Backend Workspace", "path": os.path.dirname(__file__)},
+        {"name": "HTML Templates & Static Assets", "path": os.path.join(os.path.dirname(__file__), "templates")},
         {"name": "System Logs (/var/log)", "path": "/var/log"},
-        {"name": "Temp Storage (/tmp)", "path": "/tmp"}
+        {"name": "Temporary Files (/tmp)", "path": "/tmp"}
     ]
     results = []
     for item in target_paths:
@@ -362,14 +365,17 @@ def get_folder_storage_sizes() -> list:
             if os.path.isfile(p):
                 size_bytes = os.path.getsize(p)
             else:
-                for root, dirs, files in os.walk(p):
-                    for f in files:
-                        try:
-                            fp = os.path.join(root, f)
-                            if not os.path.islink(fp):
-                                size_bytes += os.path.getsize(fp)
-                        except Exception:
-                            pass
+                try:
+                    for root, dirs, files in os.walk(p):
+                        for f in files:
+                            try:
+                                fp = os.path.join(root, f)
+                                if not os.path.islink(fp):
+                                    size_bytes += os.path.getsize(fp)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
         size_mb = round(size_bytes / (1024 * 1024), 2)
         results.append({
             "name": item["name"],
@@ -379,6 +385,7 @@ def get_folder_storage_sizes() -> list:
             "display_size": f"{size_mb} MB" if size_mb < 1024 else f"{round(size_mb/1024, 2)} GB"
         })
     return results
+
 
 
 def get_database_detailed_analytics() -> dict:

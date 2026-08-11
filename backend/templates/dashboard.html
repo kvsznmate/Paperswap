@@ -380,16 +380,20 @@
     <header>
         <div class="header-container">
             <div class="logo-box">
-                <div class="logo-icon">⚡</div>
+                <div class="logo-icon">
+                    <svg width="24" height="24" viewBox="0 0 108 108" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M54 20L24 65h24l-6 23 36-45h-24z" fill="#FFFFFF"/>
+                    </svg>
+                </div>
                 <div class="logo-title">
                     <h1>Tech & Finance News API</h1>
                     <p>Latest 50 Headlines • PostgreSQL-backed feed</p>
                 </div>
             </div>
             <div class="controls">
-                <a class="btn btn-secondary" href="/analytics">📊 VM Analytics</a>
-                <button class="btn btn-secondary" onclick="refreshNews()">🔄 Refresh feed</button>
-                <a class="btn btn-mobile" href="/mobile">📱 Open swipe app</a>
+                <a class="btn btn-secondary" href="/analytics">VM Analytics</a>
+                <button class="btn btn-secondary" onclick="refreshNews()">Refresh Feed</button>
+                <a class="btn btn-mobile" href="/mobile">Open Swipe App</a>
             </div>
         </div>
     </header>

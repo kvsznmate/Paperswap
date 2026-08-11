@@ -76,9 +76,13 @@
             display: flex;
             align-items: center;
             justify-content: center;
-            font-weight: 800;
-            font-size: 20px;
             box-shadow: 0 0 20px rgba(99, 102, 241, 0.4);
+        }
+
+        .brand-logo svg {
+            width: 24px;
+            height: 24px;
+            fill: #ffffff;
         }
 
         .brand-titles h1 {
@@ -157,7 +161,7 @@
             color: var(--text-secondary);
             padding: 10px 20px;
             border-radius: 12px;
-            font-size: 14px;
+            font-size: 13px;
             font-weight: 700;
             cursor: pointer;
             white-space: nowrap;
@@ -271,9 +275,13 @@
             align-items: center;
         }
 
-        .kpi-icon {
-            font-size: 18px;
-            opacity: 0.8;
+        .kpi-tag {
+            font-size: 11px;
+            font-weight: 700;
+            padding: 2px 8px;
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.08);
+            color: var(--accent-cyan);
         }
 
         .kpi-value {
@@ -315,15 +323,8 @@
             margin-bottom: 30px;
         }
 
-        .grid-equal {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-            gap: 24px;
-            margin-bottom: 30px;
-        }
-
         @media (max-width: 1024px) {
-            .grid-2col, .grid-equal {
+            .grid-2col {
                 grid-template-columns: 1fr;
             }
         }
@@ -650,16 +651,20 @@
     <header>
         <div class="header-container">
             <div class="brand-box">
-                <div class="brand-logo">⚡</div>
+                <div class="brand-logo">
+                    <svg viewBox="0 0 108 108" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M54 20L24 65h24l-6 23 36-45h-24z" fill="#FFFFFF"/>
+                    </svg>
+                </div>
                 <div class="brand-titles">
                     <h1>Oracle VM Telemetry</h1>
                     <p>PaperSwap Infrastructure & User Engagement Monitor</p>
                 </div>
             </div>
             <div class="nav-actions">
-                <a href="/" class="btn">📰 News Hub</a>
-                <a href="/mobile" class="btn">📱 Mobile Preview</a>
-                <button class="btn btn-primary" id="manual-refresh-btn">🔄 Refresh Stats</button>
+                <a href="/" class="btn">News Hub</a>
+                <a href="/mobile" class="btn">Mobile Preview</a>
+                <button class="btn btn-primary" id="manual-refresh-btn">Refresh Stats</button>
             </div>
         </div>
     </header>
@@ -668,11 +673,11 @@
         
         <!-- Navigation Tabs -->
         <div class="analytics-tabs">
-            <button class="analytics-tab-btn active" onclick="switchTab('overview', this)">⚡ Infrastructure & VM</button>
-            <button class="analytics-tab-btn" onclick="switchTab('swipes', this)">🔥 Swiped Right Cards</button>
-            <button class="analytics-tab-btn" onclick="switchTab('database', this)">🗄️ Database Deep Dive</button>
-            <button class="analytics-tab-btn" onclick="switchTab('folders', this)">📂 File Storage Analytics</button>
-            <button class="analytics-tab-btn" onclick="switchTab('logs', this)">📟 Live Server Logs</button>
+            <button class="analytics-tab-btn active" onclick="switchTab('overview', this)">Infrastructure & VM</button>
+            <button class="analytics-tab-btn" onclick="switchTab('swipes', this)">Swiped Right Cards</button>
+            <button class="analytics-tab-btn" onclick="switchTab('database', this)">Database Deep Dive</button>
+            <button class="analytics-tab-btn" onclick="switchTab('folders', this)">File Storage Analytics</button>
+            <button class="analytics-tab-btn" onclick="switchTab('logs', this)">Live Server Logs</button>
         </div>
 
         <!-- TAB 1: OVERVIEW & VM HEALTH -->
@@ -695,7 +700,7 @@
                 <div class="kpi-card">
                     <div class="kpi-title">
                         <span>Currently Connected</span>
-                        <span class="kpi-icon">🟢</span>
+                        <span class="kpi-tag">LIVE</span>
                     </div>
                     <div class="kpi-value" id="active-users-val">--</div>
                     <div class="kpi-subtext">Active heartbeats in last 60s</div>
@@ -704,7 +709,7 @@
                 <div class="kpi-card">
                     <div class="kpi-title">
                         <span>Current Storage Usage</span>
-                        <span class="kpi-icon">💾</span>
+                        <span class="kpi-tag">DISK</span>
                     </div>
                     <div class="kpi-value" id="storage-used-val">-- GB</div>
                     <div class="progress-bar-bg">
@@ -716,7 +721,7 @@
                 <div class="kpi-card">
                     <div class="kpi-title">
                         <span>Avg Time Connected</span>
-                        <span class="kpi-icon">⏱️</span>
+                        <span class="kpi-tag">SESSION</span>
                     </div>
                     <div class="kpi-value" id="avg-duration-val">-- min</div>
                     <div class="kpi-subtext">Average active user session length</div>
@@ -725,7 +730,7 @@
                 <div class="kpi-card">
                     <div class="kpi-title">
                         <span>Total Swipes Recorded</span>
-                        <span class="kpi-icon">📲</span>
+                        <span class="kpi-tag">SWIPES</span>
                     </div>
                     <div class="kpi-value" id="total-swipes-val">--</div>
                     <div class="kpi-subtext" id="articles-count-subtext">Active articles: --</div>
@@ -746,9 +751,7 @@
                     <div class="panel-title">Oracle Free Tier Quotas</div>
                     <div class="panel-subtitle">How close you are to Oracle Always Free tier limits</div>
                     
-                    <div class="quota-list" id="oracle-quota-list">
-                        <!-- Quota items injected via JS -->
-                    </div>
+                    <div class="quota-list" id="oracle-quota-list"></div>
                 </div>
 
             </div>
@@ -771,9 +774,7 @@
                 </div>
             </div>
 
-            <div class="cards-leaderboard-grid" id="swiped-cards-grid">
-                <!-- Swiped cards injected via JS -->
-            </div>
+            <div class="cards-leaderboard-grid" id="swiped-cards-grid"></div>
         </div>
 
         <!-- TAB 3: DATABASE DEEP DIVE -->
@@ -785,9 +786,7 @@
                 </div>
             </div>
 
-            <div class="db-stats-grid" id="db-stats-grid">
-                <!-- DB boxes injected via JS -->
-            </div>
+            <div class="db-stats-grid" id="db-stats-grid"></div>
         </div>
 
         <!-- TAB 4: FILE STORAGE ANALYTICS -->
@@ -795,13 +794,11 @@
             <div class="section-header">
                 <div>
                     <h2>File & Folder Level Analytics</h2>
-                    <p>Disk space breakdown across application, templates, database, and system log directories.</p>
+                    <p>Disk space breakdown across system, docker container images, OS binaries, and app directories.</p>
                 </div>
             </div>
 
-            <div class="folder-grid" id="folder-grid">
-                <!-- Folder cards injected via JS -->
-            </div>
+            <div class="folder-grid" id="folder-grid"></div>
         </div>
 
         <!-- TAB 5: REAL-TIME SYSTEM LOGS CONSOLE -->
@@ -816,7 +813,7 @@
             <div class="panel-card">
                 <div class="terminal-controls">
                     <span style="font-weight: 700; font-size: 13px; color: var(--accent-cyan);">Output Buffer (Recent 100 Entries)</span>
-                    <button class="btn" style="padding: 5px 12px; font-size: 12px;" onclick="fetchLogs()">🔄 Refresh Logs</button>
+                    <button class="btn" style="padding: 5px 12px; font-size: 12px;" onclick="fetchLogs()">Refresh Logs</button>
                 </div>
                 <div class="terminal-box" id="terminal-box">
                     <div class="terminal-line SYSTEM">[SYSTEM] Live log console initialized. Auto-polling active...</div>
@@ -1001,7 +998,7 @@
                     <div class="swiped-body">
                         <div class="swiped-title">${card.title}</div>
                         <div class="swiped-stats-row">
-                            <span class="like-pill">💚 ${card.read_count} Swiped Right</span>
+                            <span class="like-pill">${card.read_count} Swiped Right</span>
                             <span>Ratio: ${card.like_ratio_percent}%</span>
                         </div>
                     </div>
