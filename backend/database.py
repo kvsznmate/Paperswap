@@ -344,27 +344,40 @@ def get_top_api_endpoints(limit: int = 6) -> list:
     return results
 
 
-def get_folder_storage_sizes() -> list:
-    """Analyze folder disk usage across key system, docker container, and application directories."""
-    target_paths = [
-        {"name": "Docker Containers & Images", "path": "/var/lib/docker"},
-        {"name": "Linux System Binaries & Libs (/usr)", "path": "/usr"},
-        {"name": "OS System Cache & State (/var)", "path": "/var/cache"},
-        {"name": "PostgreSQL Database Data", "path": "/var/lib/postgresql/data"},
-        {"name": "Application Backend Workspace", "path": os.path.dirname(__file__)},
-        {"name": "HTML Templates & Static Assets", "path": os.path.join(os.path.dirname(__file__), "templates")},
-        {"name": "System Logs (/var/log)", "path": "/var/log"},
-        {"name": "Temporary Files (/tmp)", "path": "/tmp"}
+def get_folder_storage_sizes() -> dict:
+    """Scan top-level root filesystem directories (/var, /usr, /lib, /app, /tmp) to account for full 7.7 GB VM usage."""
+    import shutil
+    import subprocess
+
+    total, used, free = shutil.disk_usage("/")
+    used_bytes = max(used, 1)
+
+    top_dirs = [
+        {"name": "/var (Docker Containers, DB Data & Logs)", "path": "/var"},
+        {"name": "/usr (Linux System Binaries & Python Libs)", "path": "/usr"},
+        {"name": "/lib & /lib64 (Shared System Libraries)", "path": "/lib"},
+        {"name": "/app (PaperSwap Backend Workspace)", "path": os.path.dirname(__file__)},
+        {"name": "/etc (System & Network Configurations)", "path": "/etc"},
+        {"name": "/tmp (Temporary Files)", "path": "/tmp"},
+        {"name": "/root & /home (User Home Directories)", "path": "/root"}
     ]
-    results = []
-    for item in target_paths:
+
+    folder_nodes = []
+    for item in top_dirs:
         p = item["path"]
         size_bytes = 0
         exists = os.path.exists(p)
         if exists:
-            if os.path.isfile(p):
-                size_bytes = os.path.getsize(p)
-            else:
+            # 1. Fast du command execution
+            try:
+                res = subprocess.run(["du", "-sb", p], capture_output=True, text=True, timeout=2)
+                if res.returncode == 0 and res.stdout:
+                    size_bytes = int(res.stdout.split()[0])
+            except Exception:
+                pass
+
+            # 2. Fallback to os.walk if du not available
+            if size_bytes == 0 and os.path.isdir(p):
                 try:
                     for root, dirs, files in os.walk(p):
                         for f in files:
@@ -376,15 +389,83 @@ def get_folder_storage_sizes() -> list:
                                 pass
                 except Exception:
                     pass
+
         size_mb = round(size_bytes / (1024 * 1024), 2)
-        results.append({
+        size_gb = round(size_bytes / (1024**3), 2)
+        display = f"{size_gb} GB" if size_gb >= 0.1 else f"{size_mb} MB"
+
+        # Children sub-tree
+        sub_items = []
+        if p == "/var":
+            sub_paths = [
+                {"name": "/var/lib (Docker Storage & PostgreSQL Data)", "path": "/var/lib"},
+                {"name": "/var/cache (OS Package Manager Cache)", "path": "/var/cache"},
+                {"name": "/var/log (System & Container Logs)", "path": "/var/log"}
+            ]
+            for sp in sub_paths:
+                sp_bytes = 0
+                if os.path.exists(sp["path"]):
+                    try:
+                        res = subprocess.run(["du", "-sb", sp["path"]], capture_output=True, text=True, timeout=2)
+                        if res.returncode == 0 and res.stdout:
+                            sp_bytes = int(res.stdout.split()[0])
+                    except Exception:
+                        pass
+                sp_mb = round(sp_bytes / (1024 * 1024), 2)
+                sp_gb = round(sp_bytes / (1024**3), 2)
+                sub_items.append({
+                    "name": sp["name"],
+                    "path": sp["path"],
+                    "size_display": f"{sp_gb} GB" if sp_gb >= 0.1 else f"{sp_mb} MB",
+                    "percent_of_parent": round((sp_bytes / max(size_bytes, 1)) * 100, 1)
+                })
+
+        elif p == os.path.dirname(__file__):
+            sub_paths = [
+                {"name": "/app/templates (HTML Dashboards)", "path": os.path.join(p, "templates")},
+                {"name": "/app/news_database.db (Local Cache)", "path": os.path.join(p, "news_database.db")}
+            ]
+            for sp in sub_paths:
+                sp_bytes = 0
+                if os.path.exists(sp["path"]):
+                    try:
+                        if os.path.isfile(sp["path"]):
+                            sp_bytes = os.path.getsize(sp["path"])
+                        else:
+                            for root, dirs, files in os.walk(sp["path"]):
+                                for f in files:
+                                    fp = os.path.join(root, f)
+                                    if not os.path.islink(fp):
+                                        sp_bytes += os.path.getsize(fp)
+                    except Exception:
+                        pass
+                sp_mb = round(sp_bytes / (1024 * 1024), 2)
+                sub_items.append({
+                    "name": sp["name"],
+                    "path": sp["path"],
+                    "size_display": f"{sp_mb} MB",
+                    "percent_of_parent": round((sp_bytes / max(size_bytes, 1)) * 100, 1)
+                })
+
+        folder_nodes.append({
             "name": item["name"],
             "path": p,
             "exists": exists,
+            "size_bytes": size_bytes,
             "size_mb": size_mb,
-            "display_size": f"{size_mb} MB" if size_mb < 1024 else f"{round(size_mb/1024, 2)} GB"
+            "size_gb": size_gb,
+            "display_size": display,
+            "percent_of_used_disk": round((size_bytes / used_bytes) * 100, 1),
+            "children": sub_items
         })
-    return results
+
+    folder_nodes.sort(key=lambda x: x["size_bytes"], reverse=True)
+    return {
+        "used_gb": round(used_bytes / (1024**3), 2),
+        "total_gb": round(total / (1024**3), 2),
+        "folders": folder_nodes
+    }
+
 
 
 

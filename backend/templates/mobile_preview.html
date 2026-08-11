@@ -295,8 +295,15 @@
     <div class="app-shell">
         <header class="app-header">
             <div class="brand-logo">
-                <svg width="20" height="20" viewBox="0 0 108 108" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M54 20L24 65h24l-6 23 36-45h-24z" fill="#818CF8"/>
+                <svg width="24" height="24" viewBox="0 0 108 108" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect width="108" height="108" rx="28" fill="url(#mob-logo-grad)"/>
+                    <path d="M54 20L24 65h24l-6 23 36-45h-24z" fill="#FFFFFF"/>
+                    <defs>
+                        <linearGradient id="mob-logo-grad" x1="0" y1="0" x2="108" y2="108" gradientUnits="userSpaceOnUse">
+                            <stop stop-color="#818CF8"/>
+                            <stop offset="1" stop-color="#6366F1"/>
+                        </linearGradient>
+                    </defs>
                 </svg> PaperSwap
             </div>
             <div class="queue-counter" id="queue-counter">Card 1 / 50</div>
