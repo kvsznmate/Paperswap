@@ -1,8 +1,9 @@
 import os
 import argparse
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
+from typing import Optional
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -60,9 +61,29 @@ app = FastAPI(
 )
 
 
+@app.middleware("http")
+async def log_requests_middleware(request: Request, call_next):
+    """Middleware to track request frequency for usage peak hours analysis."""
+    path = request.url.path
+    # Ignore static files or health checks if needed
+    if not path.startswith("/static") and not path.endswith(".ico"):
+        try:
+            db.log_request_event(path, request.method)
+        except Exception:
+            pass  # DB might still be initializing
+    response = await call_next(request)
+    return response
+
+
 class SwipeRequest(BaseModel):
     article_id: int
     action: str  # 'read' or 'pass'
+
+
+class HeartbeatRequest(BaseModel):
+    session_id: str
+    user_agent: Optional[str] = None
+
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -120,6 +141,33 @@ def record_swipe(req: SwipeRequest):
         "article_id": req.article_id,
         "action": req.action
     })
+
+
+@app.get("/analytics", response_class=HTMLResponse)
+def read_analytics_dashboard():
+    """Serve the VM Telemetry & Engagement Analytics Dashboard."""
+    template_path = os.path.join(os.path.dirname(__file__), "templates", "analytics.html")
+    if os.path.exists(template_path):
+        with open(template_path, "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    return HTMLResponse(content="<h1>Analytics template missing</h1>", status_code=404)
+
+
+@app.post("/api/v1/telemetry/heartbeat")
+def user_heartbeat(req: HeartbeatRequest, request: Request):
+    """Client ping endpoint to keep active session alive and track duration."""
+    client_ip = request.client.host if request.client else "unknown"
+    user_agent = req.user_agent or request.headers.get("user-agent", "")
+    db.record_session_heartbeat(req.session_id, user_agent=user_agent, ip_address=client_ip)
+    return JSONResponse(content={"status": "ok", "session_id": req.session_id})
+
+
+@app.get("/api/v1/telemetry/stats")
+def get_telemetry_stats():
+    """Get system telemetry (VM storage, active users, avg time connected, peak hours)."""
+    stats = db.get_telemetry_summary()
+    return JSONResponse(content=stats)
+
 
 
 def run_cli_mode():

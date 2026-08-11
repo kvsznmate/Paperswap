@@ -56,6 +56,29 @@ def init_db():
         )
     ''')
 
+    # Telemetry: User active sessions and heartbeats
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            session_id TEXT PRIMARY KEY,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            last_heartbeat TIMESTAMPTZ DEFAULT NOW(),
+            duration_seconds INTEGER DEFAULT 0,
+            user_agent TEXT,
+            ip_address TEXT
+        )
+    ''')
+
+    # Telemetry: Request logs for hourly peak usage distribution
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS request_logs (
+            id SERIAL PRIMARY KEY,
+            endpoint TEXT NOT NULL,
+            method TEXT NOT NULL,
+            hour_of_day INTEGER NOT NULL,
+            logged_at TIMESTAMPTZ DEFAULT NOW()
+        )
+    ''')
+
     conn.commit()
     cursor.close()
     conn.close()
@@ -176,3 +199,128 @@ def purge_old_articles(days: int = 7) -> int:
     conn.close()
     print(f"[DB Purge] Removed {removed} article(s) older than {days} days.")
     return removed
+
+
+def record_session_heartbeat(session_id: str, user_agent: str = None, ip_address: str = None):
+    """Record or refresh a user session heartbeat and update duration."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO user_sessions (session_id, user_agent, ip_address, created_at, last_heartbeat, duration_seconds)
+        VALUES (%s, %s, %s, NOW(), NOW(), 0)
+        ON CONFLICT (session_id) DO UPDATE SET
+            last_heartbeat = NOW(),
+            duration_seconds = GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - user_sessions.created_at))))
+    ''', (session_id, user_agent or '', ip_address or ''))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def log_request_event(endpoint: str, method: str):
+    """Log API request hit and extract hour of day (0-23) for peak hours analysis."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO request_logs (endpoint, method, hour_of_day)
+        VALUES (%s, %s, EXTRACT(HOUR FROM NOW())::INTEGER)
+    ''', (endpoint, method))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def get_active_users_count(window_seconds: int = 60) -> int:
+    """Return count of users with heartbeat recorded in the last `window_seconds`."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT COUNT(DISTINCT session_id) as active_count
+        FROM user_sessions
+        WHERE last_heartbeat >= NOW() - (%s || ' seconds')::interval
+    ''', (window_seconds,))
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return row['active_count'] if row else 0
+
+
+def get_avg_session_duration_minutes() -> float:
+    """Calculate average connected session duration in minutes."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT COALESCE(AVG(duration_seconds), 0) as avg_seconds
+        FROM user_sessions
+    ''')
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    avg_sec = float(row['avg_seconds']) if row else 0.0
+    return round(avg_sec / 60.0, 1)
+
+
+def get_hourly_usage_distribution() -> list:
+    """Return request counts grouped by hour of the day (0..23)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT hour_of_day, COUNT(*) as request_count
+        FROM request_logs
+        GROUP BY hour_of_day
+        ORDER BY hour_of_day ASC
+    ''')
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    counts_by_hour = {r['hour_of_day']: r['request_count'] for r in rows}
+    result = []
+    for h in range(24):
+        result.append({
+            "hour": h,
+            "label": f"{h:02d}:00",
+            "count": counts_by_hour.get(h, 0)
+        })
+    return result
+
+
+def get_telemetry_summary() -> dict:
+    """Combine system disk usage and user analytics."""
+    import shutil
+    total, used, free = shutil.disk_usage("/")
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) as total_articles FROM articles")
+    articles_count = cursor.fetchone()['total_articles']
+
+    cursor.execute("SELECT COUNT(*) as total_swipes FROM user_swipes")
+    swipes_count = cursor.fetchone()['total_swipes']
+
+    cursor.execute("SELECT COUNT(*) as total_sessions FROM user_sessions")
+    sessions_count = cursor.fetchone()['total_sessions']
+    cursor.close()
+    conn.close()
+
+    active_users = get_active_users_count(60)
+    avg_duration = get_avg_session_duration_minutes()
+    hourly_distribution = get_hourly_usage_distribution()
+
+    return {
+        "storage": {
+            "total_gb": round(total / (1024**3), 2),
+            "used_gb": round(used / (1024**3), 2),
+            "free_gb": round(free / (1024**3), 2),
+            "used_percent": round((used / total) * 100, 1)
+        },
+        "user_analytics": {
+            "currently_connected_users": active_users,
+            "avg_session_minutes": avg_duration,
+            "total_sessions": sessions_count,
+            "total_swipes": swipes_count,
+            "total_articles": articles_count
+        },
+        "hourly_distribution": hourly_distribution
+    }
+
