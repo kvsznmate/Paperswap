@@ -1,6 +1,6 @@
 import os
 import argparse
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -15,6 +15,8 @@ import database as db
 REFRESH_INTERVAL_HOURS = float(os.getenv("REFRESH_INTERVAL", "12"))
 # Articles older than this are purged on each refresh.
 PURGE_OLDER_THAN_DAYS = int(os.getenv("PURGE_OLDER_THAN_DAYS", "7"))
+# Default deck size served by /api/v1/feed (7 topics x ~10 cards).
+FEED_DEFAULT_LIMIT = int(os.getenv("FEED_DEFAULT_LIMIT", "70"))
 
 scheduler = BackgroundScheduler()
 
@@ -54,9 +56,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Tinder-Style Tech & Finance News Feed API",
-    description="Dockerized API serving 9:16 mobile swipe news cards backed by PostgreSQL. Cards are rendered on the phone.",
-    version="2.0.0",
+    title="PaperSwap Multi-Topic News Feed API",
+    description=(
+        "Dockerized API serving 9:16 mobile swipe news cards backed by PostgreSQL. "
+        "Topics: Tech, Finance, Sports, Politics, Programming, Science, Beauty. "
+        "Cards are rendered on the phone."
+    ),
+    version="3.0.0",
     lifespan=lifespan
 )
 
@@ -106,14 +112,53 @@ def read_mobile_app():
     return HTMLResponse(content="<h1>Mobile template missing</h1>", status_code=404)
 
 
+@app.get("/api/v1/categories")
+def get_categories():
+    """List every topic the feed can serve, with its brand colour and how many
+    articles are currently stored. Drives the client topic filter bar."""
+    categories = db.get_enabled_categories()
+    return JSONResponse(content={
+        "status": "ok",
+        "count": len(categories),
+        "categories": categories
+    })
+
+
 @app.get("/api/news")
 @app.get("/api/v1/feed")
-def get_news_feed():
-    """API endpoint serving latest 50 news card items from the database."""
-    articles = db.get_latest_articles(50)
+def get_news_feed(
+    categories: str = Query(
+        None,
+        description="Comma-separated topic filter, e.g. 'SPORTS,SCIENCE'. Omit for all topics."
+    ),
+    limit: int = Query(None, ge=1, le=300, description="Maximum cards to return."),
+    balanced: bool = Query(
+        True,
+        description="True interleaves topics round-robin; False returns strict newest-first."
+    ),
+):
+    """Serve the swipe deck. Defaults to a topic-balanced mix across all topics,
+    so the user never gets 12 Sports cards in a row before seeing anything else."""
+    selected = db.clean_category_filter(categories)
+    deck_limit = limit or FEED_DEFAULT_LIMIT
+
+    if balanced:
+        articles = db.get_balanced_feed(limit=deck_limit, categories=selected)
+    else:
+        articles = db.get_latest_articles(limit=deck_limit, categories=selected)
+
+    # Cold start: nothing stored yet, so pull a batch synchronously.
     if not articles:
-        articles = fetch_and_sync_news_to_db()
-    return JSONResponse(content={"status": "ok", "count": len(articles), "articles": articles})
+        fetch_and_sync_news_to_db(categories=selected or None)
+        articles = db.get_balanced_feed(limit=deck_limit, categories=selected)
+
+    return JSONResponse(content={
+        "status": "ok",
+        "count": len(articles),
+        "categories": selected or list(db.CATEGORIES.keys()),
+        "balanced": balanced,
+        "articles": articles
+    })
 
 
 @app.get("/api/cards/generate")
@@ -195,8 +240,10 @@ def get_telemetry_logs():
 
 def run_cli_mode():
     """CLI mode to fetch news and deduplicate in the database."""
+    topics = ", ".join(db.CATEGORIES.keys())
     print("=" * 60)
-    print(" TECH & FINANCE NEWS FEED SYNC (CLI + POSTGRESQL)")
+    print(" PAPERSWAP MULTI-TOPIC NEWS SYNC (CLI + POSTGRESQL)")
+    print(f" Topics: {topics}")
     print("=" * 60)
     print("[1/2] Initializing PostgreSQL Database...")
     db.init_db()
@@ -204,9 +251,12 @@ def run_cli_mode():
     print("[2/2] Fetching, syncing, and purging old news in the database...")
     fetch_and_sync_news_to_db()
     db.purge_old_articles(days=PURGE_OLDER_THAN_DAYS)
-    articles = db.get_latest_articles(50)
+    articles = db.get_balanced_feed(limit=FEED_DEFAULT_LIMIT)
+
     print("\n" + "=" * 60)
     print(f"SUCCESS! Database updated with {len(articles)} active news cards.")
+    for row in db.get_enabled_categories():
+        print(f"   - {row['label']:<20} {row['article_count']} article(s)")
     print("=" * 60)
 
 

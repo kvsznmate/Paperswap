@@ -19,6 +19,87 @@ def _database_url() -> str:
 DATABASE_URL = _database_url()
 
 
+# ---------------------------------------------------------------------------
+# TOPIC CATALOGUE
+# Single source of truth for every topic PaperSwap serves. Add a topic here and
+# give it a feed entry in news_fetcher.TOPIC_FEEDS -- init_db() syncs this dict
+# into the `categories` table on every boot.
+# ---------------------------------------------------------------------------
+CATEGORIES = {
+    "TECH":        {"label": "Tech Industry",     "accent": "#6366f1", "sort_order": 1},
+    "FINANCE":     {"label": "Finance & Markets", "accent": "#f59e0b", "sort_order": 2},
+    "SPORTS":      {"label": "Sports",            "accent": "#22c55e", "sort_order": 3},
+    "POLITICS":    {"label": "Politics",          "accent": "#ef4444", "sort_order": 4},
+    "PROGRAMMING": {"label": "Programming",       "accent": "#06b6d4", "sort_order": 5},
+    "SCIENCE":     {"label": "Science",           "accent": "#a855f7", "sort_order": 6},
+    "BEAUTY":      {"label": "Beauty & Style",    "accent": "#ec4899", "sort_order": 7},
+}
+
+DEFAULT_CATEGORY = "TECH"
+
+# Legacy / alternate spellings that old rows or clients might send.
+CATEGORY_ALIASES = {
+    "TECHNOLOGY": "TECH",
+    "BUSINESS": "FINANCE",
+    "MARKETS": "FINANCE",
+    "DEV": "PROGRAMMING",
+    "SOFTWARE": "PROGRAMMING",
+    "CODING": "PROGRAMMING",
+    "SPORT": "SPORTS",
+    "SKINCARE": "BEAUTY",
+    "FASHION": "BEAUTY",
+}
+
+
+def normalize_category(value: str) -> str:
+    """Map any incoming category string onto a known catalogue slug. Unknown
+    values fall back to DEFAULT_CATEGORY so a bad feed can never poison the
+    table with untracked topics."""
+    if not value:
+        return DEFAULT_CATEGORY
+    slug = str(value).strip().upper().replace(" ", "_")
+    slug = CATEGORY_ALIASES.get(slug, slug)
+    return slug if slug in CATEGORIES else DEFAULT_CATEGORY
+
+
+def clean_category_filter(categories) -> list:
+    """Turn a user-supplied filter ('sports,politics' or ['SPORTS']) into a
+    de-duplicated list of valid slugs. An empty list means 'no filter'."""
+    if not categories:
+        return []
+    if isinstance(categories, str):
+        categories = categories.split(",")
+
+    cleaned = []
+    for raw in categories:
+        slug = str(raw).strip().upper().replace(" ", "_")
+        slug = CATEGORY_ALIASES.get(slug, slug)
+        if slug in CATEGORIES and slug not in cleaned:
+            cleaned.append(slug)
+    return cleaned
+
+
+def _decorate_articles(rows: list) -> list:
+    """Shared post-processing: JSON-safe timestamps, feed index, and the topic
+    label/accent colour so clients don't need their own hardcoded colour map."""
+    articles = []
+    for idx, row in enumerate(rows, start=1):
+        item = dict(row)
+        item.pop('rank_in_category', None)
+
+        if item.get('created_at') is not None:
+            item['created_at'] = item['created_at'].isoformat()
+
+        slug = normalize_category(item.get('category'))
+        meta = CATEGORIES[slug]
+        item['category'] = slug
+        item['category_label'] = meta['label']
+        item['accent_color'] = meta['accent']
+        item['index'] = idx
+        articles.append(item)
+    return articles
+
+
 def get_db_connection():
     """Establish connection to PostgreSQL. RealDictCursor gives dict-like rows,
     matching the old sqlite3.Row behaviour the rest of the code relies on."""
@@ -79,9 +160,99 @@ def init_db():
         )
     ''')
 
+    # Topic catalogue table. Lets clients discover available topics (and their
+    # brand colours) instead of hardcoding a list that drifts from the backend.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS categories (
+            slug TEXT PRIMARY KEY,
+            label TEXT NOT NULL,
+            accent_color TEXT NOT NULL DEFAULT '#6366f1',
+            sort_order INTEGER NOT NULL DEFAULT 100,
+            enabled BOOLEAN NOT NULL DEFAULT TRUE
+        )
+    ''')
+
+    # Sync the CATEGORIES dict into the table on every boot so code stays the
+    # source of truth for labels/colours, while `enabled` stays operator-editable.
+    for slug, meta in CATEGORIES.items():
+        cursor.execute('''
+            INSERT INTO categories (slug, label, accent_color, sort_order)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (slug) DO UPDATE SET
+                label = EXCLUDED.label,
+                accent_color = EXCLUDED.accent_color,
+                sort_order = EXCLUDED.sort_order
+        ''', (slug, meta['label'], meta['accent'], meta['sort_order']))
+
+    # Per-topic feed queries hit these constantly once the deck is filtered.
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_articles_category_id
+        ON articles (category, id DESC)
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_articles_created_at
+        ON articles (created_at DESC)
+    ''')
+
+    # Migration: older rows may hold lowercase/legacy topic names.
+    cursor.execute("UPDATE articles SET category = UPPER(category) WHERE category <> UPPER(category)")
+    for legacy, slug in CATEGORY_ALIASES.items():
+        cursor.execute("UPDATE articles SET category = %s WHERE category = %s", (slug, legacy))
+
     conn.commit()
     cursor.close()
     conn.close()
+
+
+def get_enabled_categories() -> list:
+    """Return the topic catalogue with a live article count per topic.
+    Drives the client-side topic filter bar."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT c.slug, c.label, c.accent_color, c.sort_order,
+               COUNT(a.id) AS article_count
+        FROM categories c
+        LEFT JOIN articles a ON a.category = c.slug
+        WHERE c.enabled = TRUE
+        GROUP BY c.slug, c.label, c.accent_color, c.sort_order
+        ORDER BY c.sort_order ASC
+    ''')
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_category_stats() -> list:
+    """Article volume and swipe engagement broken down per topic, so the
+    analytics dashboard can show which topics actually earn right-swipes."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT c.slug, c.label, c.accent_color,
+               COUNT(DISTINCT a.id) AS article_count,
+               COUNT(CASE WHEN s.action = 'read' THEN 1 END) AS read_count,
+               COUNT(CASE WHEN s.action = 'pass' THEN 1 END) AS pass_count
+        FROM categories c
+        LEFT JOIN articles a ON a.category = c.slug
+        LEFT JOIN user_swipes s ON s.article_id = a.id
+        WHERE c.enabled = TRUE
+        GROUP BY c.slug, c.label, c.accent_color, c.sort_order
+        ORDER BY c.sort_order ASC
+    ''')
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    results = []
+    for r in rows:
+        item = dict(r)
+        total = item['read_count'] + item['pass_count']
+        item['total_swipes'] = total
+        item['read_ratio_percent'] = round(item['read_count'] / total * 100, 1) if total else 0.0
+        results.append(item)
+    return results
 
 
 def generate_article_key(title: str, url: str) -> str:
@@ -124,7 +295,7 @@ def save_article(article_data: dict) -> int:
         article_data.get('description', ''),
         article_data.get('source', 'News'),
         article_data.get('published_at', 'Recently'),
-        article_data.get('category', 'TECH'),
+        normalize_category(article_data.get('category')),
         article_data.get('image_url', ''),
         article_data.get('url', '#'),
     ))
@@ -143,30 +314,78 @@ def save_article(article_data: dict) -> int:
     return article_id
 
 
-def get_latest_articles(limit: int = 50) -> list:
-    """Retrieve latest articles from the database."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
+def get_latest_articles(limit: int = 50, categories=None) -> list:
+    """Retrieve the newest articles, optionally restricted to a set of topics.
+    `categories` accepts 'sports,politics' or ['SPORTS', 'POLITICS']."""
+    cats = clean_category_filter(categories)
+
+    sql = '''
         SELECT id, title, description, source, published_at, category, image_url, url, created_at
         FROM articles
-        ORDER BY id DESC
-        LIMIT %s
-    ''', (limit,))
+    '''
+    params = []
+    if cats:
+        sql += " WHERE category = ANY(%s)"
+        params.append(cats)
+    sql += " ORDER BY id DESC LIMIT %s"
+    params.append(limit)
 
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(sql, params)
     rows = cursor.fetchall()
     cursor.close()
     conn.close()
 
-    articles = []
-    for idx, row in enumerate(rows, start=1):
-        item = dict(row)
-        # created_at is a datetime in Postgres — make it JSON-serializable.
-        if item.get('created_at') is not None:
-            item['created_at'] = item['created_at'].isoformat()
-        item['index'] = idx
-        articles.append(item)
-    return articles
+    return _decorate_articles(rows)
+
+
+def get_balanced_feed(limit: int = 70, categories=None, per_category: int = None) -> list:
+    """Build a topic-interleaved swipe deck.
+
+    A plain 'ORDER BY id DESC' would hand the user every Sports card in a row,
+    then every Politics card, because articles land in the table topic by topic.
+    Instead we rank each topic's articles independently and emit them
+    round-robin: newest TECH, newest FINANCE, newest SPORTS, ... then the second
+    newest of each. The deck stays varied no matter how many topics are on.
+    """
+    cats = clean_category_filter(categories)
+    topic_count = len(cats) if cats else len(CATEGORIES)
+    if per_category is None:
+        # ceil(limit / topics) so every topic can contribute its fair share.
+        per_category = max(1, -(-limit // max(topic_count, 1)))
+
+    where_sql = ""
+    params = []
+    if cats:
+        where_sql = "WHERE category = ANY(%s)"
+        params.append(cats)
+
+    sql = f'''
+        WITH ranked AS (
+            SELECT id, title, description, source, published_at, category,
+                   image_url, url, created_at,
+                   ROW_NUMBER() OVER (PARTITION BY category ORDER BY id DESC) AS rank_in_category
+            FROM articles
+            {where_sql}
+        )
+        SELECT id, title, description, source, published_at, category,
+               image_url, url, created_at, rank_in_category
+        FROM ranked
+        WHERE rank_in_category <= %s
+        ORDER BY rank_in_category ASC, category ASC
+        LIMIT %s
+    '''
+    params.extend([per_category, limit])
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(sql, params)
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    return _decorate_articles(rows)
 
 
 def record_user_swipe(article_id: int, action: str):
@@ -510,6 +729,7 @@ def get_telemetry_summary() -> dict:
     total_gb = round(total / (1024**3), 2)
 
     db_analytics = get_database_detailed_analytics()
+    category_analytics = get_category_stats()
     top_articles = get_top_swiped_articles(6)
     top_endpoints = get_top_api_endpoints(6)
     folder_sizes = get_folder_storage_sizes()
@@ -535,6 +755,7 @@ def get_telemetry_summary() -> dict:
             "total_articles": db_analytics["total_articles"]
         },
         "hourly_distribution": hourly_distribution,
+        "category_analytics": category_analytics,
         "top_swiped_cards": top_articles,
         "top_api_endpoints": top_endpoints,
         "database_analytics": db_analytics
