@@ -292,6 +292,16 @@ def extract_rss_image(entry) -> str:
     return ""
 
 
+def _title_mentions(title_lower: str, keywords) -> bool:
+    """Word-boundary keyword test.
+
+    This used to be a plain `kw in title_lower` substring check, which meant the
+    "ai" rule fired on "campaign", "Ukraine", "said", "remain" and "air" -- so
+    politics and sports stories were handed the AI model-scaling blurb.
+    """
+    return any(re.search(r"\b" + re.escape(kw) + r"\b", title_lower) for kw in keywords)
+
+
 def generate_short_summary(title: str, category: str, raw_desc: str, source: str) -> str:
     """Generate a distinct short summary for a news item.
 
@@ -337,7 +347,7 @@ def generate_short_summary(title: str, category: str, raw_desc: str, source: str
     ]
 
     for keywords, summary in keyword_rules:
-        if any(kw in title_lower for kw in keywords):
+        if _title_mentions(title_lower, keywords):
             return summary
 
     return get_topic_config(category)["summary_fallback"]
@@ -381,6 +391,7 @@ def fetch_from_news_api(category: str, count: int = ARTICLES_PER_CATEGORY) -> li
             results.append({
                 "title": title,
                 "description": generate_short_summary(title, category, art.get("description", ""), src_name),
+                "raw_description": art.get("description", ""),
                 "source": src_name,
                 "published_at": pub_str,
                 "category": category,
@@ -420,6 +431,7 @@ def fetch_from_rss(category: str, count: int = ARTICLES_PER_CATEGORY) -> list:
             results.append({
                 "title": title,
                 "description": generate_short_summary(title, category, raw_desc, source),
+                "raw_description": raw_desc,
                 "source": source,
                 "published_at": pub_str,
                 "category": category,
@@ -483,6 +495,15 @@ def fetch_and_sync_news_to_db(categories=None) -> list:
             # filler, never a real photo the publisher supplied.
             if item.get('image_url') in _STOCK_IMAGES:
                 item['image_url'] = fallback_image(true_category, idx)
+
+        # Rebuild the blurb against the FINAL topic so a politics story can never
+        # keep a tech-flavoured fallback line.
+        item['description'] = generate_short_summary(
+            item['title'],
+            true_category,
+            item.get('raw_description', ''),
+            item.get('source', ''),
+        )
 
         article_key = db.generate_article_key(item['title'], item['url'])
 

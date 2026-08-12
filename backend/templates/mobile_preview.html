@@ -370,6 +370,9 @@
         let currentIndex = 0;
         let historyStack = [];
         let activeCardEl = null;
+        // Guards completeSwipe against re-entry, so one gesture can never advance
+        // the deck twice or open two tabs.
+        let isSwiping = false;
 
         // Topic filtering state. Empty selectedTopics = show every topic.
         let availableTopics = [];
@@ -530,15 +533,32 @@
         }
 
         function attachDragListeners(card, article) {
+            // pointermove/pointerup are bound to window ONLY for the duration of a
+            // drag. They used to be bound here at render time and torn down only
+            // inside handleDragEnd, so any render that didn't end in a completed
+            // drag (button swipe, undo, feed reload) leaked a handler pair closed
+            // over a stale card + article. Because the drag state below is shared,
+            // every leaked handler also fired on the next pointerup and opened the
+            // PREVIOUS article's URL.
+            function detach() {
+                window.removeEventListener('pointermove', handleDragMove);
+                window.removeEventListener('pointerup', handleDragEnd);
+                window.removeEventListener('pointercancel', handleDragEnd);
+            }
+
             card.addEventListener('pointerdown', handleDragStart);
-            window.addEventListener('pointermove', handleDragMove);
-            window.addEventListener('pointerup', handleDragEnd);
 
             function handleDragStart(e) {
+                if (card !== activeCardEl) return;   // only the front card drags
                 isDragging = true;
                 startX = e.clientX;
                 startY = e.clientY;
                 card.style.transition = 'none';
+
+                detach();                            // belt and braces
+                window.addEventListener('pointermove', handleDragMove);
+                window.addEventListener('pointerup', handleDragEnd);
+                window.addEventListener('pointercancel', handleDragEnd);
             }
 
             function handleDragMove(e) {
@@ -567,30 +587,29 @@
             function handleDragEnd(e) {
                 if (!isDragging) return;
                 isDragging = false;
+                detach();
                 card.style.transition = 'transform 0.35s cubic-bezier(0.175, 0.885, 0.32, 1.275)';
 
                 const threshold = 110;
-                if (currentX > threshold) {
-                    completeSwipe('right', article);
-                } else if (currentX < -threshold) {
-                    completeSwipe('left', article);
+                const dx = currentX;
+                currentX = 0;
+                currentY = 0;
+
+                if (dx > threshold) {
+                    completeSwipe('right');
+                } else if (dx < -threshold) {
+                    completeSwipe('left');
                 } else {
                     card.style.transform = 'translate(0px, 0px) rotate(0deg)';
                     card.querySelector('.badge-read').style.opacity = 0;
                     card.querySelector('.badge-pass').style.opacity = 0;
                 }
-
-                currentX = 0;
-                currentY = 0;
-                window.removeEventListener('pointermove', handleDragMove);
-                window.removeEventListener('pointerup', handleDragEnd);
             }
         }
 
         function triggerSwipe(direction) {
             if (!activeCardEl || currentIndex >= articlesQueue.length) return;
-            const article = articlesQueue[currentIndex];
-            completeSwipe(direction, article);
+            completeSwipe(direction);
         }
 
         function logSwipe(article, direction) {
@@ -603,9 +622,14 @@
             }).catch(err => console.error('swipe log failed:', err));
         }
 
-        function completeSwipe(direction, article) {
-            if (!activeCardEl) return;
+        function completeSwipe(direction) {
+            if (!activeCardEl || isSwiping) return;
+            // Resolve the article from the queue at swipe time rather than from a
+            // captured variable, so the URL always belongs to the visible card.
+            const article = articlesQueue[currentIndex];
+            if (!article) return;
 
+            isSwiping = true;
             logSwipe(article, direction);
 
             const flyX = direction === 'right' ? window.innerWidth : -window.innerWidth;
@@ -617,17 +641,21 @@
 
             historyStack.push({ index: currentIndex, direction: direction });
 
+            // Open the tab immediately: browsers block window.open from a timeout
+            // because it is no longer tied to the user's gesture.
+            if (direction === 'right') {
+                window.open(article.url, '_blank', 'noopener');
+            }
+
             setTimeout(() => {
-                if (direction === 'right') {
-                    window.open(article.url, '_blank');
-                }
                 currentIndex++;
+                isSwiping = false;
                 renderDeck();
             }, 300);
         }
 
         function undoSwipe() {
-            if (historyStack.length === 0) return;
+            if (historyStack.length === 0 || isSwiping) return;
             const last = historyStack.pop();
             currentIndex = last.index;
             renderDeck();
