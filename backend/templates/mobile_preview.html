@@ -152,8 +152,47 @@
             border-radius: 999px;
             color: #0b0f18;
         }
-        .cat-tech { background: linear-gradient(135deg, #818cf8, #6366f1); color: #0b0f18; }
-        .cat-finance { background: linear-gradient(135deg, #fbbf24, #f59e0b); color: #1a1206; }
+        /* Chip colour comes from the API (accent_color per topic) so the palette
+           lives in one place on the backend instead of drifting per client. */
+
+        /* ---- Topic filter bar ---- */
+        .topic-bar {
+            display: flex;
+            gap: 8px;
+            padding: 4px 16px 8px;
+            overflow-x: auto;
+            scrollbar-width: none;
+            -ms-overflow-style: none;
+            flex: 0 0 auto;
+            z-index: 20;
+        }
+        .topic-bar::-webkit-scrollbar { display: none; }
+
+        .topic-pill {
+            flex: 0 0 auto;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.3px;
+            padding: 7px 14px;
+            border-radius: 999px;
+            cursor: pointer;
+            white-space: nowrap;
+            color: var(--text-sub);
+            background: rgba(30, 41, 59, 0.55);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            transition: all 0.18s ease;
+        }
+        .topic-pill:active { transform: scale(0.94); }
+        .topic-pill.active {
+            color: #0b0f18;
+            border-color: transparent;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+        }
+        .topic-pill .pill-count {
+            opacity: 0.65;
+            font-weight: 600;
+            margin-left: 4px;
+        }
 
         .card-content {
             flex: 1;
@@ -309,10 +348,12 @@
             <div class="queue-counter" id="queue-counter">Card 1 / 50</div>
         </header>
 
+        <div class="topic-bar" id="topic-bar"></div>
+
         <div class="deck-container" id="deck-container">
             <div class="empty-state" id="empty-state">
                 <h3>All caught up!</h3>
-                <p>You've swiped every Tech &amp; Finance headline. Pull a fresh batch to keep going.</p>
+                <p id="empty-message">You've swiped every headline in this mix. Pull a fresh batch or switch topics to keep going.</p>
                 <button class="btn-reload" onclick="reloadFeed()">Reload Feed</button>
             </div>
         </div>
@@ -330,6 +371,10 @@
         let historyStack = [];
         let activeCardEl = null;
 
+        // Topic filtering state. Empty selectedTopics = show every topic.
+        let availableTopics = [];
+        let selectedTopics = [];
+
         let startX = 0, startY = 0;
         let currentX = 0, currentY = 0;
         let isDragging = false;
@@ -340,9 +385,76 @@
             return d.innerHTML;
         }
 
+        // Pick readable text for a topic accent colour (BT.601 perceived luminance),
+        // so amber and indigo chips are both legible without a hand-tuned map.
+        function contrastText(hex) {
+            const h = String(hex || '').replace('#', '');
+            if (h.length !== 6) return '#0b0f18';
+            const r = parseInt(h.slice(0, 2), 16);
+            const g = parseInt(h.slice(2, 4), 16);
+            const b = parseInt(h.slice(4, 6), 16);
+            return ((r * 299 + g * 587 + b * 114) / 1000) > 150 ? '#0b0f18' : '#ffffff';
+        }
+
+        async function loadTopics() {
+            try {
+                const response = await fetch('/api/v1/categories');
+                const data = await response.json();
+                availableTopics = data.categories || [];
+                renderTopicBar();
+            } catch (err) {
+                console.error("Failed to load topics:", err);
+            }
+        }
+
+        function renderTopicBar() {
+            const bar = document.getElementById('topic-bar');
+            const showingAll = selectedTopics.length === 0;
+
+            let html = `<div class="topic-pill ${showingAll ? 'active' : ''}"
+                             style="${showingAll ? 'background:#e2e8f0' : ''}"
+                             onclick="clearTopics()">All</div>`;
+
+            availableTopics.forEach(topic => {
+                const isOn = selectedTopics.includes(topic.slug);
+                const style = isOn
+                    ? `background:${topic.accent_color};color:${contrastText(topic.accent_color)}`
+                    : '';
+                html += `<div class="topic-pill ${isOn ? 'active' : ''}" style="${style}"
+                              onclick="toggleTopic('${topic.slug}')">
+                            ${escapeHtml(topic.label)}
+                            <span class="pill-count">${topic.article_count}</span>
+                         </div>`;
+            });
+
+            bar.innerHTML = html;
+        }
+
+        function toggleTopic(slug) {
+            const pos = selectedTopics.indexOf(slug);
+            if (pos === -1) {
+                selectedTopics.push(slug);
+            } else {
+                selectedTopics.splice(pos, 1);
+            }
+            renderTopicBar();
+            loadFeed();
+        }
+
+        function clearTopics() {
+            selectedTopics = [];
+            renderTopicBar();
+            loadFeed();
+        }
+
         async function loadFeed() {
             try {
-                const response = await fetch('/api/v1/feed');
+                const params = new URLSearchParams();
+                if (selectedTopics.length > 0) {
+                    params.set('categories', selectedTopics.join(','));
+                }
+                const qs = params.toString();
+                const response = await fetch('/api/v1/feed' + (qs ? '?' + qs : ''));
                 const data = await response.json();
                 articlesQueue = data.articles || [];
                 currentIndex = 0;
@@ -354,7 +466,8 @@
         }
 
         function buildCardInner(article) {
-            const cat = (article.category || 'TECH').toLowerCase();
+            const accent = article.accent_color || '#6366f1';
+            const label = article.category_label || article.category || 'TECH';
             const media = article.image_url
                 ? `<img src="${escapeHtml(article.image_url)}" alt="" onerror="this.style.display='none'">`
                 : '';
@@ -363,7 +476,7 @@
                 <div class="swipe-badge badge-pass">SKIP</div>
                 <div class="card-media">
                     ${media}
-                    <span class="cat-chip cat-${cat}">${escapeHtml(article.category || 'TECH')}</span>
+                    <span class="cat-chip" style="background:${accent};color:${contrastText(accent)}">${escapeHtml(label)}</span>
                 </div>
                 <div class="card-content">
                     <div class="card-title">${escapeHtml(article.title)}</div>
@@ -542,6 +655,7 @@
             setInterval(sendHeartbeat, 15000);
         })();
 
+        loadTopics();
         loadFeed();
     </script>
 </body>

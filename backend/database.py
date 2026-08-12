@@ -373,7 +373,10 @@ def get_balanced_feed(limit: int = 70, categories=None, per_category: int = None
                image_url, url, created_at, rank_in_category
         FROM ranked
         WHERE rank_in_category <= %s
-        ORDER BY rank_in_category ASC, category ASC
+        -- rank first (one card per topic, then the next round), then hash the
+        -- topic+rank so the within-round order reshuffles each cycle instead of
+        -- repeating the same alphabetical sequence over and over.
+        ORDER BY rank_in_category ASC, md5(category || rank_in_category::text) ASC
         LIMIT %s
     '''
     params.extend([per_category, limit])

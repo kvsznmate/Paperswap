@@ -130,6 +130,142 @@ def clean_html(text: str) -> str:
     return ' '.join(clean.split())
 
 
+# ---------------------------------------------------------------------------
+# Post-fetch topic classification
+#
+# The category used to be decided by WHICH QUERY returned the article, so a
+# beauty story that happened to match "market" was stored as FINANCE. These
+# keywords let us read the article text and label it properly instead.
+# Add a new topic by adding one entry here (plus CATEGORY_IMAGES below).
+# ---------------------------------------------------------------------------
+CATEGORY_KEYWORDS = {
+    "BEAUTY": [
+        "beauty", "cosmetic", "cosmetics", "skincare", "skin care", "makeup",
+        "make-up", "fragrance", "perfume", "haircare", "hair care", "shampoo",
+        "salon", "sephora", "ulta", "l'oreal", "loreal", "estee lauder",
+        "shiseido", "glossier", "mascara", "lipstick", "moisturizer", "serum",
+        "sunscreen", "retinol", "hyaluronic", "botox", "manicure",
+        "nail polish", "anti-aging", "dermatology", "dermatologist", "grooming",
+        "fashion", "runway", "couture", "beauty brand",
+    ],
+    "SPORTS": [
+        "sports", "football", "soccer", "basketball", "baseball", "tennis",
+        "golf", "cricket", "rugby", "hockey", "olympics", "olympic", "nba",
+        "nfl", "nhl", "mlb", "fifa", "uefa", "premier league", "championship",
+        "playoff", "playoffs", "tournament", "striker", "quarterback",
+        "midfielder", "athlete", "world cup", "formula 1", "grand prix",
+        "transfer window", "league title",
+    ],
+    "SCIENCE": [
+        "science", "scientific", "scientists", "researchers", "nasa", "spacex",
+        "orbit", "satellite", "telescope", "astronomy", "physics", "biology",
+        "chemistry", "genome", "dna", "species", "fossil", "vaccine",
+        "clinical trial", "peer-reviewed", "laboratory", "neuroscience",
+        "particle", "asteroid", "climate change",
+    ],
+    "PROGRAMMING": [
+        "programming", "python", "javascript", "typescript", "rust", "golang",
+        "kotlin", "open source", "open-source", "github", "gitlab",
+        "framework", "sdk", "compiler", "runtime", "devops", "kubernetes",
+        "docker", "linux", "codebase", "refactor", "npm", "react",
+        "node.js", "pull request", "software development", "developer tools",
+    ],
+    "POLITICS": [
+        "politics", "political", "election", "elections", "senate",
+        "congress", "parliament", "president", "prime minister", "governor",
+        "campaign", "ballot", "voter", "voters", "legislation", "lawmakers",
+        "democrat", "democrats", "republican", "republicans", "white house",
+        "diplomacy", "sanctions", "treaty", "referendum", "impeachment",
+    ],
+    "TECH": [
+        "technology", "tech", "ai", "artificial intelligence", "software",
+        "hardware", "chip", "chips", "semiconductor", "nvidia", "openai",
+        "anthropic", "microsoft", "google", "apple", "meta", "startup",
+        "cloud", "cyber", "cybersecurity", "data center", "datacenter",
+        "robot", "robotics", "quantum", "algorithm", "saas",
+        "smartphone", "iphone", "android", "gpu", "machine learning", "llm",
+        "neural network", "gadget", "silicon",
+    ],
+    "FINANCE": [
+        "stock", "stocks", "market", "markets", "earnings", "revenue",
+        "profit", "investor", "investors", "investment", "shares", "nasdaq",
+        "dow jones", "s&p", "bond", "bonds", "yield", "interest rate",
+        "federal reserve", "inflation", "ipo", "valuation", "dividend",
+        "hedge fund", "portfolio", "currency", "crypto", "bitcoin",
+        "trading", "trader", "bank", "banking", "economy", "economic",
+        "gdp", "tariff", "merger", "acquisition", "wall street", "recession",
+    ],
+}
+
+# Narrow, unambiguous topics outrank broad ones: "skincare" or "quarterback" is
+# a far stronger signal than "market" or "tech", which bleed into every business
+# story. Keep a weight for every key in CATEGORY_KEYWORDS.
+CATEGORY_WEIGHT = {
+    "BEAUTY": 3,
+    "SPORTS": 3,
+    "SCIENCE": 2,
+    "PROGRAMMING": 2,
+    "POLITICS": 2,
+    "TECH": 1,
+    "FINANCE": 1,
+}
+
+# How far the winning topic must beat the query's own label before we override
+# it. Each topic already has a dedicated query, so the query's guess is usually
+# right -- we only relabel on clear evidence, never on a narrow lead.
+MIN_OVERRIDE_MARGIN = 3
+
+# Word-boundary matching matters: bare "ai" would otherwise hit "said", "Dubai".
+_KEYWORD_PATTERNS = {
+    cat: [re.compile(r"\b" + re.escape(kw) + r"\b", re.IGNORECASE) for kw in kws]
+    for cat, kws in CATEGORY_KEYWORDS.items()
+}
+
+
+def score_categories(title: str, description: str) -> dict:
+    """Weighted keyword score per topic. Title matches count double, since a
+    headline is a much better signal of subject than a trailing summary."""
+    title_text = clean_html(title or "")
+    desc_text = clean_html(description or "")
+
+    scores = {}
+    for cat, patterns in _KEYWORD_PATTERNS.items():
+        title_hits = sum(1 for p in patterns if p.search(title_text))
+        desc_hits = sum(1 for p in patterns if p.search(desc_text))
+        if title_hits or desc_hits:
+            scores[cat] = CATEGORY_WEIGHT[cat] * (2 * title_hits + desc_hits)
+    return scores
+
+
+def classify_category(title: str, description: str, fallback: str) -> str:
+    """Infer an article's topic from its own text instead of trusting whichever
+    query returned it -- this is what stops a skincare story that mentions
+    "market" from being filed under FINANCE.
+
+    Deliberately conservative: every topic already has its own dedicated query,
+    so `fallback` (the query's label) is right most of the time. We only
+    override when another topic beats it by MIN_OVERRIDE_MARGIN, which keeps a
+    passing mention of "Apple" from dragging a sports story into TECH.
+    """
+    fallback = db.normalize_category(fallback)
+    scores = score_categories(title, description)
+    if not scores:
+        return fallback
+
+    winner = max(scores, key=lambda cat: (scores[cat], CATEGORY_WEIGHT[cat]))
+    if winner == fallback:
+        return fallback
+
+    if scores[winner] - scores.get(fallback, 0) >= MIN_OVERRIDE_MARGIN:
+        return winner
+    return fallback
+
+
+# Lets us tell "generic topic filler" apart from a real article photo, so that
+# relabelling an article swaps its filler image but never clobbers a real one.
+_STOCK_IMAGES = {url for urls in CATEGORY_IMAGES.values() for url in urls}
+
+
 def extract_rss_image(entry) -> str:
     """Pull a real article image out of an RSS entry when the publisher provides
     one (media:content, media:thumbnail, an image enclosure, or an <img> inside
@@ -329,9 +465,25 @@ def fetch_and_sync_news_to_db(categories=None) -> list:
 
     new_count = 0
     skipped_count = 0
+    reclassified_count = 0
 
     for idx, item in enumerate(raw_articles, start=1):
         item['index'] = idx
+
+        # Relabel by reading the article itself, so a beauty story that turned up
+        # in the finance query is stored as BEAUTY rather than FINANCE.
+        query_category = item['category']
+        true_category = classify_category(item['title'], item.get('description', ''), query_category)
+
+        if true_category != query_category:
+            item['category'] = true_category
+            reclassified_count += 1
+            print(f"[Reclassified] {query_category} -> {true_category}: {item['title'][:50]}...")
+            # Its filler hero image belonged to the old topic; only swap generic
+            # filler, never a real photo the publisher supplied.
+            if item.get('image_url') in _STOCK_IMAGES:
+                item['image_url'] = fallback_image(true_category, idx)
+
         article_key = db.generate_article_key(item['title'], item['url'])
 
         if db.is_article_in_db(article_key):
@@ -342,7 +494,8 @@ def fetch_and_sync_news_to_db(categories=None) -> list:
 
     breakdown = ", ".join(f"{cat} {count}" for cat, count in per_topic_counts.items())
     print(f"[DB Sync Summary] {len(raw_articles)} items across {len(target_categories)} topics "
-          f"({breakdown}): {new_count} NEW inserted, {skipped_count} ALREADY EXISTED.")
+          f"({breakdown}): {new_count} NEW inserted, {skipped_count} ALREADY EXISTED, "
+          f"{reclassified_count} RELABELLED by content.")
 
     feed_limit = ARTICLES_PER_CATEGORY * len(target_categories)
     return db.get_balanced_feed(limit=feed_limit, categories=target_categories)
