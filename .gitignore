@@ -1,0 +1,112 @@
+# =============================================================================
+# Paperswap — .gitignore
+#
+# Rule of thumb: if a tool generated it, it does not belong in git.
+# Source, configuration templates, and build *scripts* are tracked.
+# Build *output*, caches, IDE state, secrets, and databases are not.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Python
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Test & coverage output (arrives with PS-16 / PS-17)
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# -----------------------------------------------------------------------------
+# Secrets & local configuration
+# -----------------------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# ...but the template MUST stay tracked — it is the documentation for setup.
+!.env.example
+
+# -----------------------------------------------------------------------------
+# Databases & data dumps
+# -----------------------------------------------------------------------------
+# The backend runs on PostgreSQL in a container with a named volume (pgdata).
+# No database file should ever live in the repo.
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+*.sql.gz
+
+# -----------------------------------------------------------------------------
+# Android / Gradle
+# -----------------------------------------------------------------------------
+# NOTE: `build/` above already covers android/build and android/app/build.
+# `.gradle/` is the local Gradle cache; `gradle/wrapper/` is NOT the same thing
+# and MUST stay tracked so the project builds without a preinstalled Gradle.
+.gradle/
+!gradle/wrapper/gradle-wrapper.jar
+!gradle/wrapper/gradle-wrapper.properties
+
+# Machine-specific SDK path. Its own header says it must not be committed.
+local.properties
+
+# Build outputs and signing material
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+*.jks
+*.keystore
+captures/
+.cxx/
+release/
+
+# -----------------------------------------------------------------------------
+# IDE & editor state
+# -----------------------------------------------------------------------------
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+*.swp
+*~
+
+# Agent / assistant scratch artifacts
+.artifacts/
+
+# -----------------------------------------------------------------------------
+# Generated media
+# -----------------------------------------------------------------------------
+# Server-side card rendering was retired when rendering moved to the phone.
+# Kept as a guard so no PNG batch can be committed by accident.
+backend/output/cards/
+!backend/output/cards/.gitkeep
+
+# -----------------------------------------------------------------------------
+# OS cruft
+# -----------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
