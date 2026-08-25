@@ -49,8 +49,20 @@ android/
 ## 🛠 How to Open and Build in Android Studio
 
 1. **Open Android Studio**.
-2. Select **Open An Existing Project** and choose the `android/` directory inside `Antigrav_test`:
-   `c:\Users\matek_yulq090\Desktop\Antigrav_test\android`
+2. Select **Open an Existing Project** and choose the `android/` directory in this repository.
 3. Allow Gradle to sync dependencies automatically.
-4. Connect an Android phone (via USB with USB Debugging enabled) or start an Android Emulator.
-5. Click **Run ▶** (or press `Shift + F10`) to launch **NewsSwipe** on your Android device!
+4. Set the server address in `RetrofitInstance.kt` before building — it is not committed.
+5. Connect an Android phone (USB debugging enabled) or start an emulator.
+6. Click **Run ▶** (or `Shift + F10`).
+
+---
+
+## ⚠ Known issues
+
+- **Server URL is a compile-time constant** pointing at an ephemeral IP. When the address changes, installed builds break permanently. Should move to a `BuildConfig` field per build type.
+- **`usesCleartextTraffic="true"`** in the manifest — a workaround for the backend serving plain HTTP, not a decision. Removed once HTTPS lands.
+- **No repository layer.** `NewsViewModel` calls Retrofit directly, so there is no seam for a cache or a test fake.
+- **No offline support.** A cold start without connectivity shows only an error.
+- **Swipes are lost when offline.** The `POST` failure is swallowed silently, discarding the interaction data the project is meant to learn from.
+- **Topic filtering is unused.** The backend serves `/api/v1/categories` with labels, colours, and counts; the client never calls it.
+- **OkHttp body logging is unconditional**, so release builds log every payload to logcat.
