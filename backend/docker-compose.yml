@@ -3,13 +3,17 @@ services:
     image: postgres:16-alpine
     container_name: news_cards_db
     environment:
-      POSTGRES_USER: newsuser
-      POSTGRES_PASSWORD: newspass
-      POSTGRES_DB: newsdb
+      # Credentials come from backend/.env (gitignored). The :? form fails the
+      # container start with a clear message rather than silently booting on a
+      # weak default that is public in this repo's history.
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in backend/.env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in backend/.env}
+      POSTGRES_DB: ${POSTGRES_DB:-newsdb}
     volumes:
       - pgdata:/var/lib/postgresql/data      # durable — survives restarts & redeploys
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U newsuser -d newsdb"]
+      # $$ escapes compose substitution so the shell expands these inside the container
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -24,8 +28,8 @@ services:
       - "8000:8000"
     environment:
       # host is the compose service name "db", not localhost
-      DATABASE_URL: postgresql://newsuser:newspass@db:5432/newsdb
-      NEWS_API_KEY: ${NEWS_API_KEY:-your_news_api_key_here}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-newsdb}
+      NEWS_API_KEY: ${NEWS_API_KEY:?set NEWS_API_KEY in backend/.env}
       REFRESH_INTERVAL: ${REFRESH_INTERVAL:-12}       # hours between auto-refreshes
       PURGE_OLDER_THAN_DAYS: ${PURGE_OLDER_THAN_DAYS:-7}  # delete articles older than this
     depends_on:
