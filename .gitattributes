@@ -1,0 +1,74 @@
+# =============================================================================
+# Paperswap — .gitattributes
+#
+# Purpose: keep line endings consistent between Windows development and Linux
+# CI/containers, and stop git from trying to diff or convert binary assets.
+#
+# Without this, `gradlew` (a shell script authored on Windows) can be committed
+# or checked out with CRLF, and a Linux runner then fails with:
+#     ./gradlew: /bin/sh^M: bad interpreter: No such file or directory
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Default: detect text automatically, store and check out with LF
+# -----------------------------------------------------------------------------
+* text=auto eol=lf
+
+# -----------------------------------------------------------------------------
+# Windows-only scripts MUST keep CRLF or cmd.exe mis-parses them
+# -----------------------------------------------------------------------------
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# -----------------------------------------------------------------------------
+# Unix scripts MUST keep LF (this is the one that protects gradlew)
+# -----------------------------------------------------------------------------
+gradlew    text eol=lf
+*.sh       text eol=lf
+Dockerfile text eol=lf
+Caddyfile  text eol=lf
+
+# -----------------------------------------------------------------------------
+# Binary assets — never convert, never attempt a text diff
+# -----------------------------------------------------------------------------
+*.jar      binary
+*.webp     binary
+*.png      binary
+*.jpg      binary
+*.jpeg     binary
+*.gif      binary
+*.ico      binary
+*.woff     binary
+*.woff2    binary
+*.ttf      binary
+*.apk      binary
+*.aab      binary
+*.keystore binary
+*.jks      binary
+*.db       binary
+
+# -----------------------------------------------------------------------------
+# GitHub language statistics
+#
+# backend/templates/analytics.html is a bundler export, not hand-authored: the
+# real dashboard is stored JSON-escaped inside a <script type="__bundler/template">
+# block and unpacked at runtime, alongside generated @font-face CSS. At ~222 KB
+# it is by far the largest file in the repo and would otherwise make GitHub
+# label this project as "HTML" rather than Python/Kotlin.
+#
+# `linguist-generated` excludes it from the language bar AND collapses it in
+# diffs, which is what you want for a file whose contents are machine-produced.
+# Remove this line if you later hand-author the dashboard (see PS-04 / PS-11).
+# -----------------------------------------------------------------------------
+backend/templates/analytics.html linguist-generated=true
+
+# Documentation shouldn't count toward the language breakdown either.
+*.md linguist-documentation
+
+# -----------------------------------------------------------------------------
+# Diff hints — makes `git diff` show meaningful function context in hunk headers
+# -----------------------------------------------------------------------------
+*.py   diff=python
+*.html diff=html
+*.md   diff=markdown

@@ -21,7 +21,6 @@ data class NewsArticle(
     @SerializedName("accent_color") val accentColor: String? = null,
     @SerializedName("image_url") val imageUrl: String,
     @SerializedName("url") val url: String,
-    @SerializedName("card_filename") val cardFilename: String? = null,
     @SerializedName("index") val index: Int? = 1
 )
 

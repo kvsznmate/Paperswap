@@ -20,18 +20,33 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.newsswipe.app.data.model.NewsArticle
-import com.newsswipe.app.data.remote.RetrofitInstance
 import com.newsswipe.app.ui.theme.*
+
+/**
+ * Parses a backend-supplied hex colour such as "#6366f1".
+ * Never throws: a malformed or missing value from the server falls back to a
+ * theme colour rather than crashing the card.
+ */
+private fun parseAccent(hex: String?, fallback: Color): Color =
+    runCatching { Color(android.graphics.Color.parseColor(hex)) }.getOrDefault(fallback)
 
 @Composable
 fun NewsCard(
     article: NewsArticle,
     modifier: Modifier = Modifier
 ) {
-    val isTech = article.category.equals("TECH", ignoreCase = true)
-    val badgeColor = if (isTech) TechIndigo else FinanceEmerald
-    val categoryLabel = if (isTech) "TECH INDUSTRY" else "FINANCE & MARKETS"
-    val accentColor = if (isTech) TechIndigoGlow else FinanceEmeraldGlow
+    // Topic label and accent colour are supplied per-article by the backend
+    // (NewsArticle.categoryLabel / accentColor) so adding a topic server-side
+    // needs no Android release. The fallbacks below only apply to older API
+    // responses that omit those fields.
+    val fallbackAccent = if (article.category.equals("TECH", ignoreCase = true)) {
+        TechIndigo
+    } else {
+        FinanceEmerald
+    }
+    val badgeColor = parseAccent(article.accentColor, fallbackAccent)
+    val accentColor = badgeColor
+    val categoryLabel = (article.categoryLabel ?: article.category).uppercase()
 
     Card(
         modifier = modifier
@@ -93,9 +108,8 @@ fun NewsCard(
                         .clip(RoundedCornerShape(20.dp))
                         .border(1.dp, Color(0xFF2C364A), RoundedCornerShape(20.dp))
                 ) {
-                    val fullImgUrl = RetrofitInstance.getFullImageUrl(article.imageUrl)
                     AsyncImage(
-                        model = fullImgUrl,
+                        model = article.imageUrl,
                         contentDescription = article.title,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()

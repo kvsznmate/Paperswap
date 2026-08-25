@@ -29,12 +29,4 @@ object RetrofitInstance {
             .build()
             .create(NewsApiService::class.java)
     }
-
-    fun getFullImageUrl(imagePath: String): String {
-        return if (imagePath.startsWith("http")) {
-            imagePath
-        } else {
-            "${BASE_URL}output/cards/${imagePath.removePrefix("/")}"
-        }
-    }
 }
