@@ -20,7 +20,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.newsswipe.app.data.model.NewsArticle
-import com.newsswipe.app.data.remote.RetrofitInstance
 import com.newsswipe.app.ui.theme.*
 
 @Composable
@@ -93,9 +92,8 @@ fun NewsCard(
                         .clip(RoundedCornerShape(20.dp))
                         .border(1.dp, Color(0xFF2C364A), RoundedCornerShape(20.dp))
                 ) {
-                    val fullImgUrl = RetrofitInstance.getFullImageUrl(article.imageUrl)
                     AsyncImage(
-                        model = fullImgUrl,
+                        model = article.imageUrl,
                         contentDescription = article.title,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
