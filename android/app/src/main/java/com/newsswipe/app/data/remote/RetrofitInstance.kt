@@ -8,8 +8,11 @@ import java.util.concurrent.TimeUnit
 
 object RetrofitInstance {
 
-    // Oracle VM Server Address provided by user
-    private const val BASE_URL = "http://141.148.226.251:8000/"
+    // Tailscale address of the backend VM. Stable across Oracle's ephemeral
+    // public-IP rotations, and reachable from any network the phone is on as
+    // long as Tailscale is connected. Requires the device to be signed into
+    // the same tailnet -- the app will not work for anyone outside it.
+    private const val BASE_URL = "http://100.67.178.57:8000/"
 
     private val loggingInterceptor = HttpLoggingInterceptor().apply {
         level = HttpLoggingInterceptor.Level.BODY
@@ -17,8 +20,10 @@ object RetrofitInstance {
 
     private val client = OkHttpClient.Builder()
         .addInterceptor(loggingInterceptor)
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(12, TimeUnit.SECONDS)
+        // Tailscale adds a little latency on first connect while the tunnel
+        // is established, so allow more headroom than a plain LAN call.
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
         .build()
 
     val api: NewsApiService by lazy {
