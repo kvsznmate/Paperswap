@@ -436,7 +436,7 @@
             const statusText = document.getElementById('status-text');
             statusText.innerText = "Loading articles…";
             try {
-                const response = await fetch('/api/news');
+                const response = await fetch('/api/v1/feed');
                 const data = await response.json();
                 allArticles = data.articles || [];
                 renderCards(allArticles);
@@ -447,16 +447,60 @@
             }
         }
 
+        // Admin key for state-changing calls. Held in sessionStorage so it lives
+        // only for this tab and is never written to disk.
+        function getAdminKey(forcePrompt) {
+            let key = sessionStorage.getItem('paperswap_admin_key');
+            if (!key || forcePrompt) {
+                key = window.prompt('Admin API key (X-API-Key) to trigger a refresh:') || '';
+                if (key) sessionStorage.setItem('paperswap_admin_key', key);
+            }
+            return key;
+        }
+
         // Re-sync on the server (dedup + fresh fetch), then reload the grid.
+        // The endpoint is POST + admin key and returns 202: the fetch runs in the
+        // background, so we wait before re-reading the feed rather than expecting
+        // fresh rows the moment the call returns.
         async function refreshNews() {
             const statusText = document.getElementById('status-text');
-            statusText.innerText = "Refreshing feed…";
+            const key = getAdminKey(false);
+            if (!key) {
+                statusText.innerText = "Refresh cancelled - no admin key provided";
+                return;
+            }
+
+            statusText.innerText = "Requesting refresh…";
             try {
-                await fetch('/api/v1/cards/refresh');
+                const res = await fetch('/api/v1/cards/refresh', {
+                    method: 'POST',
+                    headers: { 'X-API-Key': key }
+                });
+
+                if (res.status === 401) {
+                    sessionStorage.removeItem('paperswap_admin_key');
+                    statusText.innerText = "Refresh rejected - invalid admin key";
+                    return;
+                }
+                if (res.status === 429) {
+                    statusText.innerText = "Rate limited - refresh allows 2 per hour";
+                    return;
+                }
+                if (res.status === 503) {
+                    statusText.innerText = "ADMIN_API_KEY is not configured on the server";
+                    return;
+                }
+                if (!res.ok) {
+                    statusText.innerText = `Refresh failed (HTTP ${res.status})`;
+                    return;
+                }
+
+                statusText.innerText = "Refresh running in the background…";
+                setTimeout(fetchNews, 8000);
             } catch (e) {
                 console.error("Refresh failed:", e);
+                statusText.innerText = "Refresh failed";
             }
-            fetchNews();
         }
 
         function renderCards(articles) {

@@ -37,13 +37,14 @@ htmlcov/
 # -----------------------------------------------------------------------------
 # Secrets & local configuration
 # -----------------------------------------------------------------------------
-.env
-.env.local
-.env.*.local
+# Anything .env-shaped: .env, .env.local, .env.bak, .env.prod, .env.save ...
+# The wildcard matters -- a `.env.bak` holding live credentials is one
+# `git add -A` away from being committed.
+.env*
 *.pem
 *.key
 
-# ...but the template MUST stay tracked — it is the documentation for setup.
+# ...but the template MUST stay tracked -- it is the documentation for setup.
 !.env.example
 
 # -----------------------------------------------------------------------------

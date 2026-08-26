@@ -22,7 +22,7 @@ Instead of buying a physical computer, plugging it in at home, and leaving it on
 
 ### What OCI gives us
 OCI is Oracle's version of this service. We used it to rent:
-- **A VM** (our server, `141.148.226.251`) — a small Linux computer that's always on.
+- **A VM** (our server) — a small Linux computer that's always on.
 - **Networking** — a virtual network, a public IP address, and a firewall.
 - **Storage** — the VM's disk.
 
@@ -83,7 +83,7 @@ Every piece of the stack was a deliberate choice. Here's what each is and *why*.
 - For a personal app, none of that applies — SQLite is exactly right.
 
 ### 🌐 Why an Ephemeral public IP
-**What it is:** the public IP (`141.148.226.251`) is the internet address that lets you reach the VM. "Ephemeral" means it's tied to the VM's lifetime (vs. "Reserved," which persists independently).
+**What it is:** the public IP is the internet address that lets you reach the VM. "Ephemeral" means it's tied to the VM's lifetime (vs. "Reserved," which persists independently). The actual address is not recorded in this repo — look it up in the OCI console.
 
 **Why we chose it:** ephemeral IPs are **free**, and we don't need the address to survive the VM being deleted. A Reserved IP would cost money when unattached, for no benefit here.
 
@@ -120,7 +120,7 @@ Because the database lives **inside a Docker container**, there's a small extra 
 ### Step 1 — Connect to the VM
 From your Windows machine (PowerShell):
 ```powershell
-ssh -i C:\Users\matek_yulq090\Downloads\private_key_paperswap.key ubuntu@141.148.226.251
+ssh -i <PATH_TO_PRIVATE_KEY> ubuntu@<VM_IP>
 ```
 You should land at `ubuntu@paperswap-primary-vnic:~$`.
 
@@ -210,7 +210,7 @@ This returns you to the normal shell. Since you were working on a *copy*, nothin
 ### Step 10 (optional) — Keep it as a backup
 That `~/news_database_copy.db` file is a **full snapshot** of your data. To pull it all the way down to your Windows machine as a backup, run this **from Windows** (not the VM):
 ```powershell
-scp -i C:\Users\matek_yulq090\Downloads\private_key_paperswap.key ubuntu@141.148.226.251:~/news_database_copy.db C:\Users\matek_yulq090\Desktop\news_database_backup.db
+scp -i <PATH_TO_PRIVATE_KEY> ubuntu@<VM_IP>:~/news_database_copy.db C:\path\to\news_database_backup.db
 ```
 
 ---

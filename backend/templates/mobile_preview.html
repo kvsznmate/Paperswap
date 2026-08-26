@@ -619,7 +619,37 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ article_id: article.id, action })
+            }).then(res => {
+                if (res.ok) return;
+                // A swallowed failure here is invisible: the deck keeps working
+                // because swiping is client-side, so the only symptom would be
+                // silently missing engagement data. Surface it instead.
+                if (res.status === 429) {
+                    console.warn('swipe rate limited (429) - this swipe was NOT recorded');
+                    showSwipeWarning('Swiping faster than the server accepts - some swipes are not being recorded.');
+                } else {
+                    console.error(`swipe log failed: HTTP ${res.status}`);
+                }
             }).catch(err => console.error('swipe log failed:', err));
+        }
+
+        // Non-blocking notice; the deck stays usable either way.
+        let swipeWarningTimer = null;
+        function showSwipeWarning(msg) {
+            let el = document.getElementById('swipe-warning');
+            if (!el) {
+                el = document.createElement('div');
+                el.id = 'swipe-warning';
+                el.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:24px;'
+                    + 'max-width:88%;background:#2a1414;border:1px solid #5a2626;color:#ffb4b4;'
+                    + 'padding:10px 14px;border-radius:10px;font-size:12px;line-height:1.45;'
+                    + 'z-index:9999;text-align:center;';
+                document.body.appendChild(el);
+            }
+            el.textContent = msg;
+            el.style.display = 'block';
+            clearTimeout(swipeWarningTimer);
+            swipeWarningTimer = setTimeout(() => { el.style.display = 'none'; }, 5000);
         }
 
         function completeSwipe(direction) {

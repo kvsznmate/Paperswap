@@ -30,6 +30,9 @@ services:
       # host is the compose service name "db", not localhost
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-newsdb}
       NEWS_API_KEY: ${NEWS_API_KEY:?set NEWS_API_KEY in backend/.env}
+      # Guards refresh + telemetry. The :? form fails the container start with a
+      # clear message rather than booting with those endpoints returning 503.
+      ADMIN_API_KEY: ${ADMIN_API_KEY:?set ADMIN_API_KEY in backend/.env (openssl rand -hex 32)}
       REFRESH_INTERVAL: ${REFRESH_INTERVAL:-12}       # hours between auto-refreshes
       PURGE_OLDER_THAN_DAYS: ${PURGE_OLDER_THAN_DAYS:-7}  # delete articles older than this
     depends_on:

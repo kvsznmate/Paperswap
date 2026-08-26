@@ -4,7 +4,7 @@
 
 You've built and deployed the entire **backend half** of the project. This is real, working infrastructure — not throwaway:
 
-- **FastAPI backend** running in Docker on an Oracle Cloud VM (`141.148.226.251`, Ubuntu, E2.1.Micro).
+- **FastAPI backend** running in Docker on an Oracle Cloud VM (Ubuntu, E2.1.Micro). Address not recorded here — see the OCI console.
 - **SQLite database** with news articles, MD5 deduplication, and swipe logging.
 - **Pillow card generator** producing 9:16 (720×1280) PNG cards.
 - **News fetcher** pulling Tech + Finance stories in batches.
@@ -45,7 +45,7 @@ A native Android app has stricter requirements than a browser. Two things must b
 Android **blocks plaintext HTTP traffic by default** (cleartext is disabled unless you explicitly allow it, which you shouldn't for production). So the DuckDNS + Caddy setup we discussed becomes a hard prerequisite.
 
 Steps:
-1. **Get a free subdomain** at [duckdns.org](https://www.duckdns.org) → e.g. `paperswap.duckdns.org`, pointed at `141.148.226.251`.
+1. **Get a free subdomain** at [duckdns.org](https://www.duckdns.org) → e.g. `paperswap.duckdns.org`, pointed at the VM's public IP.
 2. **Install Caddy** on the VM as a reverse proxy. A minimal `Caddyfile`:
    ```
    paperswap.duckdns.org {

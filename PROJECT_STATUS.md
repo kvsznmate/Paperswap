@@ -22,14 +22,14 @@ This is the big one. We took the project from "code on a laptop" to "live servic
 | 2 | **OCI account created**, home region selected | ✅ |
 | 3 | **Compute VM provisioned** — navigated `A1.Flex` capacity errors, landed on **E2.1.Micro** (x86, Always Free, 956 MB RAM) | ✅ |
 | 4 | **Networking stood up** — VCN, public regional subnet, internet gateway, route table, security list | ✅ |
-| 5 | **Public IP attached** — ephemeral, `141.148.226.251` | ✅ |
+| 5 | **Public IP attached** — ephemeral (address not recorded here; see the OCI console) | ✅ |
 | 6 | **SSH access established** — key-based auth; sorted Windows key path + permissions | ✅ |
 | 7 | **Docker + Compose installed** — v29.7.0, daemon enabled, non-root usage working | ✅ |
 | 8 | **2 GB swap file added** — critical: the 956 MB box couldn't build Pillow without it; made persistent via `fstab` | ✅ |
 | 9 | **Code uploaded to VM** — via `scp` from Windows | ✅ |
 | 10 | **Docker image built** — Pillow via prebuilt wheels to survive low RAM; container `news_cards_backend` running | ✅ |
 | 11 | **App verified serving** — `uvicorn` on `0.0.0.0:8000`, DB initialized, news synced, dedup engine confirmed (9 new / 41 existing) | ✅ |
-| 12 | **Firewall configured** — OCI Security List ingress rules; port 8000 scoped toward own IP (`84.80.68.54/32`) | ✅ |
+| 12 | **Firewall configured** — OCI Security List ingress rules; port 8000 scoped toward a single home `/32` | ✅ |
 | 13 | **Tested end-to-end from phone** — swipe UI loads and works over the network | ✅ |
 | 14 | **Cost guardrail** — OCI Budget alert set up for spend monitoring | ✅ (verify) |
 
@@ -96,13 +96,16 @@ Full detail in `paperswap_android_implementation_plan.md`. Summary of remaining 
 
 ## 📌 Quick Reference
 
+> Host addresses are deliberately not recorded in this repo — it is public.
+> Look them up in the OCI console, or on the VM in `backend/.env` (gitignored).
+
 | Item | Value |
 |---|---|
-| VM public IP | `141.148.226.251` |
+| VM public IP | see OCI console |
 | SSH user | `ubuntu` |
 | App port (internal) | `8000` |
-| App entry (web preview) | `http://141.148.226.251:8000/mobile` |
-| Gallery | `http://141.148.226.251:8000` |
+| App entry (web preview) | `http://<VM_IP>:8000/mobile` |
+| Gallery | `http://<VM_IP>:8000` |
 | Container name | `news_cards_backend` |
 | Compose location on VM | `~/paperswap` |
 | Start / stop app | `docker compose up -d` / `docker compose down` |

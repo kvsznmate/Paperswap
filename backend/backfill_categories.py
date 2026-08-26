@@ -69,13 +69,12 @@ def plan_changes(rows: list) -> list:
 
 
 def backfill(apply_changes: bool = False) -> None:
-    conn = db.get_db_connection()
-    cursor = conn.cursor()
+    with db.db_cursor() as cursor:
+        cursor.execute(
+            "SELECT id, title, description, category, image_url FROM articles ORDER BY id"
+        )
+        rows = cursor.fetchall()
 
-    cursor.execute(
-        "SELECT id, title, description, category, image_url FROM articles ORDER BY id"
-    )
-    rows = cursor.fetchall()
     changes = plan_changes(rows)
 
     print(f"Scanned {len(rows)} article(s); {len(changes)} need relabelling.\n")
@@ -84,35 +83,31 @@ def backfill(apply_changes: bool = False) -> None:
 
     if not changes:
         print("Nothing to do.")
-        cursor.close()
-        conn.close()
         return
 
     if not apply_changes:
         print("\nDRY RUN - nothing written. Re-run with --apply to commit.")
-        cursor.close()
-        conn.close()
         return
 
-    for c in changes:
-        cursor.execute(
-            "UPDATE articles SET category = %s, description = %s, image_url = %s WHERE id = %s",
-            (c["new"], c["description"], c["image_url"], c["id"]),
-        )
-    conn.commit()
+    # One transaction for the whole relabel: either every row moves or none do.
+    # Previously a crash mid-loop left the table half-migrated.
+    with db.db_cursor(commit=True) as cursor:
+        for c in changes:
+            cursor.execute(
+                "UPDATE articles SET category = %s, description = %s, image_url = %s WHERE id = %s",
+                (c["new"], c["description"], c["image_url"], c["id"]),
+            )
 
     print(f"\nUpdated {len(changes)} row(s).")
 
     # Show the resulting spread so the outcome is easy to eyeball.
-    cursor.execute(
-        "SELECT category, COUNT(*) AS n FROM articles GROUP BY category ORDER BY n DESC"
-    )
-    print("\nArticles per topic after backfill:")
-    for row in cursor.fetchall():
-        print(f"  {row['category']:<12} {row['n']}")
-
-    cursor.close()
-    conn.close()
+    with db.db_cursor() as cursor:
+        cursor.execute(
+            "SELECT category, COUNT(*) AS n FROM articles GROUP BY category ORDER BY n DESC"
+        )
+        print("\nArticles per topic after backfill:")
+        for row in cursor.fetchall():
+            print(f"  {row['category']:<12} {row['n']}")
 
 
 if __name__ == "__main__":
@@ -125,4 +120,10 @@ if __name__ == "__main__":
         help="Write the changes (default is a dry run that only prints them).",
     )
     args = parser.parse_args()
-    backfill(apply_changes=args.apply)
+
+    # Script entry point: owns the pool lifecycle, since lifespan() never runs here.
+    db.init_pool(minconn=1, maxconn=4)
+    try:
+        backfill(apply_changes=args.apply)
+    finally:
+        db.close_pool()
