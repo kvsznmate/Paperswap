@@ -1,6 +1,8 @@
 import os
+import time
 import secrets
 import argparse
+import threading
 from typing import Literal, Optional
 from contextlib import asynccontextmanager
 
@@ -12,6 +14,7 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
     status,
 )
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -56,28 +59,100 @@ _api_key_header = APIKeyHeader(
     description="Admin key. Set ADMIN_API_KEY in backend/.env and send it as X-API-Key.",
 )
 
+# --- Browser sessions -------------------------------------------------------
+# /analytics is a page, not an API call. A browser cannot attach X-API-Key to a
+# top-level navigation, so header auth alone would make the dashboard
+# unreachable. Instead the page is gated: an unauthenticated GET returns a small
+# key-entry form, which POSTs to /api/v1/auth/session and receives an opaque
+# session cookie.
+#
+# The cookie is a random token, never the key itself, and is held in memory only
+# -- a restart invalidates every session, which is the right default for an
+# admin surface on a single-container deployment.
+SESSION_COOKIE = "paperswap_admin_session"
+SESSION_TTL_SECONDS = int(os.getenv("ADMIN_SESSION_TTL", "43200"))   # 12 h
+# Set true once HTTPS is in front (see PROJECT_STATUS.md, Caddy). Left false by
+# default because a Secure cookie is silently dropped over plain HTTP, which
+# would present as "the login form just reloads forever".
+COOKIE_SECURE = os.getenv("ADMIN_COOKIE_SECURE", "false").lower() == "true"
 
-def require_admin_key(provided: Optional[str] = Depends(_api_key_header)) -> None:
-    """Reject the request unless it carries the configured admin key.
+_sessions: dict = {}          # token -> expiry epoch seconds
+_sessions_lock = threading.Lock()
 
-    Fails CLOSED: if ADMIN_API_KEY is unset the endpoint is unavailable rather
-    than open, so a missing env var can never silently publish these routes.
-    """
+
+def _new_session() -> str:
+    token = secrets.token_urlsafe(32)
+    now = time.time()
+    with _sessions_lock:
+        # Opportunistic prune; the dict is tiny and only admins create entries.
+        for t in [t for t, exp in _sessions.items() if exp < now]:
+            _sessions.pop(t, None)
+        _sessions[token] = now + SESSION_TTL_SECONDS
+    return token
+
+
+def _valid_session(token: Optional[str]) -> bool:
+    if not token:
+        return False
+    with _sessions_lock:
+        expiry = _sessions.get(token)
+        if expiry is None:
+            return False
+        if expiry < time.time():
+            _sessions.pop(token, None)
+            return False
+    return True
+
+
+def _require_key_configured() -> None:
+    """Fail CLOSED: an unset key makes admin routes unavailable, never open."""
     if not ADMIN_API_KEY:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "ADMIN_API_KEY is not configured on the server.",
         )
-    # compare_digest is constant-time, so response latency does not leak how many
-    # leading characters of a guess were correct. It needs bytes to be safe
-    # against non-ASCII input, which would raise TypeError on the str form.
-    if not provided or not secrets.compare_digest(
+
+
+def _key_matches(provided: Optional[str]) -> bool:
+    """Constant-time comparison, so response latency does not leak how many
+    leading characters of a guess were correct. Encoded to bytes because the str
+    form of compare_digest raises TypeError on non-ASCII input -- which would
+    turn a malformed key into a 500."""
+    if not provided:
+        return False
+    return secrets.compare_digest(
         provided.encode("utf-8"), ADMIN_API_KEY.encode("utf-8")
-    ):
-        raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED,
-            "Invalid or missing X-API-Key.",
-        )
+    )
+
+
+def require_admin_key(provided: Optional[str] = Depends(_api_key_header)) -> None:
+    """Header-only auth. Used for state-changing admin endpoints.
+
+    Deliberately does NOT accept the session cookie: cookies are attached by the
+    browser automatically, so a cookie-authenticated POST is CSRF-reachable from
+    another site. Requiring an explicit header means an attacker's page cannot
+    forge the request even while the admin is logged in.
+    """
+    _require_key_configured()
+    if not _key_matches(provided):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or missing X-API-Key.")
+
+
+def require_admin_session(
+    request: Request,
+    provided: Optional[str] = Depends(_api_key_header),
+) -> None:
+    """Header OR session cookie. Used for read-only admin endpoints, so the
+    browser dashboard works after logging in while curl can still pass a key."""
+    _require_key_configured()
+    if _key_matches(provided):
+        return
+    if _valid_session(request.cookies.get(SESSION_COOKIE)):
+        return
+    raise HTTPException(
+        status.HTTP_401_UNAUTHORIZED,
+        "Invalid or missing credentials. Send X-API-Key, or sign in at /analytics.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +294,65 @@ class HeartbeatRequest(BaseModel):
     user_agent: Optional[str] = None
 
 
+class AdminLogin(BaseModel):
+    key: str = Field(min_length=1, max_length=512,
+                     description="The value of ADMIN_API_KEY.")
+
+
+# Minimal, self-contained sign-in page. Kept inline rather than as a template so
+# an unauthenticated visitor never touches the dashboard file at all.
+_GATE_PAGE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PaperSwap Analytics - Sign in</title>
+<style>
+  body{background:#000;color:#e8e9ea;font-family:system-ui,sans-serif;display:flex;
+       align-items:center;justify-content:center;min-height:100vh;margin:0}
+  .box{background:#0a0a0a;border:1px solid #1c1c1c;border-radius:12px;padding:28px;
+       width:min(380px,90vw)}
+  h1{font-size:17px;margin:0 0 6px}
+  p{font-size:12px;color:#6b6f78;margin:0 0 18px;line-height:1.5}
+  input{width:100%;padding:11px 12px;border-radius:8px;border:1px solid #262626;
+        background:#050505;color:#e8e9ea;font-family:ui-monospace,monospace;font-size:13px}
+  button{width:100%;margin-top:12px;padding:11px;border:0;border-radius:8px;
+         background:#c4f542;color:#000;font-weight:700;font-size:13px;cursor:pointer}
+  .err{color:#f87171;font-size:12px;margin-top:12px;min-height:16px}
+</style></head><body>
+<div class="box">
+  <h1>Analytics access</h1>
+  <p>This dashboard exposes operational data. Enter the admin API key
+     (<code>ADMIN_API_KEY</code>) to continue.</p>
+  <input id="k" type="password" placeholder="admin api key" autocomplete="off" autofocus>
+  <button id="go">Sign in</button>
+  <div class="err" id="e"></div>
+</div>
+<script>
+  const e = document.getElementById('e');
+  async function submit() {
+    const key = document.getElementById('k').value.trim();
+    if (!key) { e.textContent = 'Enter a key.'; return; }
+    e.textContent = 'Checking...';
+    try {
+      const r = await fetch('/api/v1/auth/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key })
+      });
+      if (r.ok) { location.reload(); return; }
+      if (r.status === 401) e.textContent = 'Incorrect key.';
+      else if (r.status === 429) e.textContent = 'Too many attempts. Wait a minute.';
+      else if (r.status === 503) e.textContent = 'ADMIN_API_KEY is not configured on the server.';
+      else e.textContent = 'Sign-in failed (HTTP ' + r.status + ').';
+    } catch (err) { e.textContent = 'Network error.'; }
+  }
+  document.getElementById('go').addEventListener('click', submit);
+  document.getElementById('k').addEventListener('keydown', ev => {
+    if (ev.key === 'Enter') submit();
+  });
+</script>
+</body></html>"""
+
+
 @app.get("/", response_class=HTMLResponse, tags=["pages"])
 def read_root():
     """Serve the desktop/gallery dashboard."""
@@ -345,16 +479,55 @@ def record_swipe(request: Request, req: SwipeRequest):
     }
 
 
-@app.get("/analytics", response_class=HTMLResponse, tags=["pages"])
-def read_analytics_dashboard():
-    """Serve the VM Telemetry & Engagement Analytics Dashboard.
+@app.post("/api/v1/auth/session", tags=["admin"])
+@limiter.limit("10/minute")
+def create_admin_session(request: Request, body: AdminLogin, response: Response):
+    """Exchange the admin key for a browser session cookie.
 
-    Intentionally NOT behind require_admin_key: a browser cannot attach an
-    X-API-Key header to a top-level navigation, so gating this route would make
-    the dashboard unreachable. The page itself is an empty shell — every figure
-    it displays comes from /api/v1/telemetry/*, which IS protected. The page
-    prompts for the key and sends it as a header on those fetches.
+    Exists so /analytics can be gated at all: a top-level navigation cannot
+    carry a header. Rate limited tightly because this is the one endpoint where
+    guessing the key is the whole point.
     """
+    _require_key_configured()
+    if not _key_matches(body.key):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Incorrect key.")
+
+    response.set_cookie(
+        SESSION_COOKIE,
+        _new_session(),
+        max_age=SESSION_TTL_SECONDS,
+        httponly=True,       # not readable from JS, so XSS cannot exfiltrate it
+        samesite="strict",   # not sent on cross-site requests
+        secure=COOKIE_SECURE,
+        path="/",
+    )
+    return {"status": "ok", "expires_in_seconds": SESSION_TTL_SECONDS}
+
+
+@app.post("/api/v1/auth/logout", tags=["admin"])
+def end_admin_session(request: Request, response: Response):
+    """Invalidate the current session server-side and clear the cookie."""
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        with _sessions_lock:
+            _sessions.pop(token, None)
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"status": "ok"}
+
+
+@app.get("/analytics", response_class=HTMLResponse, tags=["pages"])
+def read_analytics_dashboard(request: Request):
+    """Serve the VM Telemetry & Engagement Analytics Dashboard, behind a gate.
+
+    A browser cannot attach X-API-Key to a top-level navigation, so this route
+    cannot use header auth. Instead an unauthenticated GET returns the sign-in
+    form with 401, and the dashboard file is only read once a valid session
+    cookie is present -- so the shell, including the schema tables it renders,
+    is never served to an anonymous visitor.
+    """
+    if not (ADMIN_API_KEY and _valid_session(request.cookies.get(SESSION_COOKIE))):
+        return HTMLResponse(content=_GATE_PAGE, status_code=status.HTTP_401_UNAUTHORIZED)
+
     template_path = os.path.join(os.path.dirname(__file__), "templates", "analytics.html")
     if os.path.exists(template_path):
         with open(template_path, "r", encoding="utf-8") as f:
@@ -390,7 +563,7 @@ add_log_entry("Application process initialized. Telemetry system online.", "SYST
 
 @app.get(
     "/api/v1/telemetry/stats",
-    dependencies=[Depends(require_admin_key)],
+    dependencies=[Depends(require_admin_session)],
     tags=["admin"],
 )
 @limiter.limit("30/minute")
@@ -406,7 +579,7 @@ def get_telemetry_stats(request: Request):
 
 @app.get(
     "/api/v1/telemetry/logs",
-    dependencies=[Depends(require_admin_key)],
+    dependencies=[Depends(require_admin_session)],
     tags=["admin"],
 )
 @limiter.limit("30/minute")

@@ -9,6 +9,7 @@ Run them from inside the backend container:
 docker compose exec news-cards-backend python tests/test_pool.py
 docker compose exec news-cards-backend python tests/test_live_pg.py
 docker compose exec news-cards-backend python tests/test_telemetry_provenance.py
+docker compose exec news-cards-backend python tests/test_admin_auth.py
 docker compose exec news-cards-backend python tests/test_api_security.py
 docker compose exec news-cards-backend python tests/test_swipe_logging.py
 ```
@@ -24,6 +25,7 @@ docker compose exec news-cards-backend sh -c 'for t in tests/test_*.py; do echo 
 | `test_pool.py` | no | Connection lifecycle: no leak on any error path, bounded acquisition, thread-safe init |
 | `test_live_pg.py` | yes | The same guarantees against a real server, incl. the 500-bad-swipes scenario |
 | `test_telemetry_provenance.py` | yes | No fabricated metrics; every field declares `measured` |
+| `test_admin_auth.py` | yes | The /analytics gate, session cookies, CSRF posture, fail-closed behaviour |
 | `test_api_security.py` | yes | Safe methods, admin auth, input validation, rate limits |
 | `test_swipe_logging.py` | yes | Swipes written once, charts still complete, real status codes logged |
 
@@ -33,8 +35,9 @@ docker compose exec news-cards-backend sh -c 'for t in tests/test_*.py; do echo 
 records swipes. Point `DATABASE_URL` at a scratch database if you do not want
 production rows; the volumes are small (tens of rows) but they are real.
 
-**`test_api_security.py` and `test_swipe_logging.py` set `ADMIN_API_KEY`
-themselves** and reload `main`, so they do not depend on your `.env`.
+**`test_api_security.py`, `test_admin_auth.py` and `test_swipe_logging.py` set
+`ADMIN_API_KEY` themselves** and reload `main`, so they do not depend on your
+`.env`.
 
 **They bypass `lifespan()`** and open the pool directly. That is deliberate:
 running `lifespan()` would trigger a real news fetch and spend NewsAPI quota on

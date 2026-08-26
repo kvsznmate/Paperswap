@@ -70,10 +70,12 @@ for path in ("/api/v1/telemetry/stats", "/api/v1/telemetry/logs"):
     check(f"GET {path} with key -> 200",
           c.get(path, headers=KEY).status_code == 200)
 
-# A browser cannot attach a header to a top-level navigation, so gating this
-# route would make the dashboard unreachable. The shell holds no data.
+# /analytics is gated: an anonymous GET returns the sign-in form, not the
+# dashboard. Full session-flow coverage lives in test_admin_auth.py.
 _an = c.get("/analytics").status_code
-check("/analytics shell is NOT key-gated", _an not in (401, 403), f"({_an})")
+check("/analytics anonymous -> 401 sign-in gate", _an == 401, f"({_an})")
+check("/analytics does not leak the dashboard shell",
+      "public.user_swipes" not in c.get("/analytics").text)
 check("public feed still anonymous", c.get("/api/v1/feed").status_code == 200)
 check("public categories still anonymous", c.get("/api/v1/categories").status_code == 200)
 
