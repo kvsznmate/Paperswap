@@ -212,6 +212,59 @@ Removes an entire class of silent failure. **The better fix is structural** — 
 
 ---
 
+## ADR-010 — Telemetry reports provenance, and reports nothing it cannot measure
+
+**Status:** Accepted · **Supersedes:** the estimated storage tree and the hardcoded quota panel
+
+### Context
+
+The analytics dashboard presented figures that were not measurements.
+
+`get_folder_storage_sizes()` ran `du` against `/var` and `/usr`. Inside a container those paths are the *container's* — not the host's Docker image store or the Postgres volume — so the numbers came back small. The code treated "small" as "unreadable" and substituted fixed shares of total disk usage: `int(used_bytes * 0.62)` for `/var`, `int(used_bytes * 0.32)` for `/usr`. The docstring claimed this "ensures 100% of the 7.7 GB VM disk usage is accounted for." It did — by construction, not by measurement. The dashboard then rendered `percent_of_used_disk` to one decimal place, projecting a precision that did not exist.
+
+`get_oracle_quota_status()` returned constants shaped like readings: 1 OCPU of 2, 2.0 GB of 12 GB RAM, 0.5 GB of egress, each tagged `"Safe"`. Three problems compounded. The values were never measured. The *limits* described an Ampere A1 (Arm) instance, while this project runs `VM.Standard.E2.1.Micro` (x86) — see ADR-003. And the memory figure claimed 2.0 GB in use on a machine with 956 MB of RAM, a number that could not be true.
+
+The frontend carried its own untruths: a subtitle reading `oracle cloud arm vm`, and a quota row labelled `Block Storage (44 GB Max)` contradicting the backend's 200 GB.
+
+A reviewer who opens the dashboard, is impressed, and then reads `int(used_bytes * 0.62)` has cause to discount every other number in the project. For work aimed at data roles this is not a coding defect; it is a data-integrity defect, and it is the more serious of the two.
+
+### Decision
+
+**Every numeric telemetry field declares its provenance.** The contract is two-valued:
+
+| `measured` | Meaning |
+|---|---|
+| `true` | Read from the OS, the filesystem, or Postgres at request time. `source` names the mechanism. |
+| `false` | Not observable from inside the container. Value is `null` and `unavailable_reason` says why. |
+
+There is no third state. Nothing is estimated, interpolated, or inferred from a ratio.
+
+**Published allowances are the one permitted constant.** A documented quota is a fact about Oracle's pricing, not a claim about this machine. Those live in `ALWAYS_FREE`, carry `is_limit`, a `source_url`, and a `verified_on` date, and are never rendered as though they were observed usage.
+
+What is now measured: container directory sizes via `du -sb`; disk totals via `shutil.disk_usage`; memory and swap from `/proc/meminfo` (falling back to the cgroup limit when one is set); load average from `/proc/loadavg`; and database and per-table sizes from `pg_database_size()` and `pg_total_relation_size()`.
+
+What is now declared unmeasurable: OCPU allowance consumption and outbound data transfer. Both require the OCI Monitoring API — an instance cannot observe its own tenancy-wide quota use.
+
+The portion of the disk the container cannot see is reported as a single explicit `unaccounted_bytes` remainder with a note naming its likely occupants, rather than being divided among invented shares.
+
+### Consequences
+
+The storage panel now measures the container and the database instead of pretending to see the host, and it is honest about the remainder. The free-tier panel shows two measured rows and two greyed rows marked NOT MEASURABLE with the reason and the published allowance. The dashboard is smaller and less impressive at a glance. Every number on it is defensible, which is the trade this ADR makes deliberately.
+
+One subtlety worth recording: the storage allowance compares **provisioned** volume size against the 200 GB limit, not bytes used. What consumes an Always Free block-volume allowance is the size of the volumes you have created, not how full they are. The previous code compared used bytes, which measured the wrong quantity even before the fabrication is considered.
+
+A second subtlety: the memory reading is taken **once** per request and shared between the system panel and the quota panel. Two panels disagreeing about current memory use — because each took its own reading moments apart — looks indistinguishable from the fabrication this ADR removes.
+
+### The measurement boundary, stated plainly
+
+The backend runs in a container. It can see its own filesystem, its own `/proc`, and the database over the network. It cannot see the host filesystem, the Docker image store, the Postgres volume, or the OCI control plane. Granting that visibility is possible — mounting `/:/host:ro` plus the Docker socket — and was rejected: a read-only host-root mount hands any RCE in an internet-facing container the contents of `/etc/shadow`, the SSH keys, and `backend/.env`, and a read-only `docker.sock` mount is effectively host root, since it still permits creating privileged containers. ADR-002 records that Postgres is deliberately unpublished; undercutting that posture to fill in a bar chart is a poor trade. The honest dashboard is the cheaper and safer one.
+
+### Enforcement
+
+`backend/tests/test_telemetry_provenance.py` guards the boundary from three directions. Static checks reject the specific fabricating patterns and any float multiplier applied to a measured byte count. Schema checks assert every field carries `measured`, that unmeasured fields are null with a stated reason, and that the two memory panels report one shared reading. The responsiveness check is the one that actually catches fabrication: it writes 5 MB into the measured directory and asserts the reported size moves by 5 MB, then deletes it and asserts the figure returns. A constant cannot respond to a change in the world.
+
+---
+
 ## Failure modes we've hit
 
 Hard-won operational facts. Each of these caused a real outage.

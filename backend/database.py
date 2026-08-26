@@ -1,7 +1,9 @@
 import os
 import time
+import shutil
 import hashlib
 import threading
+import subprocess
 from contextlib import contextmanager
 
 from psycopg2.extras import RealDictCursor
@@ -324,6 +326,16 @@ def init_db():
         for legacy, slug in CATEGORY_ALIASES.items():
             cursor.execute("UPDATE articles SET category = %s WHERE category = %s", (slug, legacy))
 
+        # Migration: swipes are no longer written to request_logs, because
+        # user_swipes.swiped_at already carries that timestamp. Rows logged under
+        # the old behaviour are now exact duplicates of user_swipes entries, and
+        # the analytics panels union both sources -- so leaving them would make
+        # every historical swipe count twice. Delete them once, here.
+        cursor.execute("DELETE FROM request_logs WHERE endpoint = '/api/v1/swipe'")
+        if cursor.rowcount:
+            print(f"[DB Migration] Removed {cursor.rowcount} duplicate swipe row(s) "
+                  f"from request_logs (now derived from user_swipes).")
+
 
 def get_enabled_categories() -> list:
     """Return the topic catalogue with a live article count per topic.
@@ -548,11 +560,19 @@ def record_session_heartbeat(session_id: str, user_agent: str = None, ip_address
 
 
 def log_request_event(endpoint: str, method: str):
-    """Log API request hit and extract hour of day (0-23) for peak hours analysis."""
+    """Log an API request hit with its UTC hour, for peak-hours analysis.
+
+    Swipes are deliberately NOT logged here — user_swipes.swiped_at already
+    carries that timestamp, so a row here would duplicate it. See
+    main.LOG_EXCLUDED_PREFIXES.
+    """
     with db_cursor(commit=True) as cursor:
+        # Explicit UTC: the dashboard labels this axis "utc", and the swipe-derived
+        # half of the same chart is converted the same way, so the two sources
+        # cannot land in different buckets.
         cursor.execute('''
             INSERT INTO request_logs (endpoint, method, hour_of_day)
-            VALUES (%s, %s, EXTRACT(HOUR FROM NOW())::INTEGER)
+            VALUES (%s, %s, EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'UTC'))::INTEGER)
         ''', (endpoint, method))
 
 
@@ -589,15 +609,32 @@ def get_avg_session_duration_minutes() -> float:
 
 
 def _hourly_usage_distribution(cursor) -> list:
+    """Request counts per UTC hour, combining two measured sources.
+
+    Swipes are not written to request_logs (they would duplicate
+    user_swipes.swiped_at), so this unions the two tables. Both are real counts
+    of real events — nothing here is scaled, sampled or estimated.
+    """
     cursor.execute('''
-        SELECT hour_of_day, COUNT(*) as request_count
-        FROM request_logs
-        GROUP BY hour_of_day
-        ORDER BY hour_of_day ASC
+        SELECT hour, SUM(n)::BIGINT AS request_count
+        FROM (
+            SELECT hour_of_day AS hour, COUNT(*) AS n
+            FROM request_logs
+            GROUP BY hour_of_day
+
+            UNION ALL
+
+            SELECT EXTRACT(HOUR FROM (swiped_at AT TIME ZONE 'UTC'))::INTEGER AS hour,
+                   COUNT(*) AS n
+            FROM user_swipes
+            GROUP BY 1
+        ) combined
+        GROUP BY hour
+        ORDER BY hour ASC
     ''')
     rows = cursor.fetchall()
 
-    counts_by_hour = {r['hour_of_day']: r['request_count'] for r in rows}
+    counts_by_hour = {r['hour']: r['request_count'] for r in rows}
     result = []
     for h in range(24):
         result.append({
@@ -646,19 +683,40 @@ def get_top_swiped_articles(limit: int = 6) -> list:
 
 
 def _top_api_endpoints(cursor, limit: int = 6) -> list:
+    """Most-hit endpoints, combining request_logs with the swipe count.
+
+    /api/v1/swipe is the highest-traffic endpoint but is not written to
+    request_logs, so it is counted from user_swipes and folded in here. Omitting
+    it would leave the busiest route missing from a panel titled 'Most Frequent
+    API Endpoints'.
+    """
     cursor.execute('''
-        SELECT endpoint, method, COUNT(*) as hit_count
-        FROM request_logs
+        WITH combined AS (
+            SELECT endpoint, method, COUNT(*) AS hit_count
+            FROM request_logs
+            GROUP BY endpoint, method
+
+            UNION ALL
+
+            SELECT '/api/v1/swipe' AS endpoint, 'POST' AS method, COUNT(*) AS hit_count
+            FROM user_swipes
+            HAVING COUNT(*) > 0
+        )
+        SELECT endpoint, method, SUM(hit_count)::BIGINT AS hit_count
+        FROM combined
         GROUP BY endpoint, method
         ORDER BY hit_count DESC
         LIMIT %s
     ''', (limit,))
     rows = cursor.fetchall()
 
-    cursor.execute("SELECT COUNT(*) as total_requests FROM request_logs")
+    # Denominator must span BOTH sources or the percentages will not sum sanely.
+    cursor.execute('''
+        SELECT (SELECT COUNT(*) FROM request_logs)
+             + (SELECT COUNT(*) FROM user_swipes) AS total_requests
+    ''')
     total_row = cursor.fetchone()
-    total_reqs = total_row['total_requests'] if total_row else 1
-    total_reqs = max(total_reqs, 1)
+    total_reqs = max(total_row['total_requests'] if total_row else 1, 1)
 
     results = []
     for r in rows:
@@ -674,80 +732,275 @@ def get_top_api_endpoints(limit: int = 6) -> list:
         return _top_api_endpoints(cursor, limit)
 
 
-def get_folder_storage_sizes() -> dict:
-    """Scan filesystem and container storage layers, ensuring 100% of the 7.7 GB VM disk usage is accounted for."""
-    import shutil
-    import subprocess
+# ---------------------------------------------------------------------------
+# TELEMETRY MEASUREMENT — PROVENANCE RULES
+#
+# Every numeric field this module reports carries a `measured` flag:
+#   measured=True   -> read from the OS, the filesystem, or Postgres at call time.
+#   measured=False  -> not observable from inside this container; value is None
+#                      and `unavailable_reason` says why.
+#
+# There is no third category. Nothing is estimated, inferred from a ratio, or
+# hardcoded to a plausible-looking constant. An earlier version of this file
+# manufactured host directory sizes as fixed 62%/32% shares of disk usage and
+# reported invented CPU/RAM/egress figures as if they were readings; both are
+# gone. See docs/ARCHITECTURE.md (ADR-010).
+#
+# Published ALLOWANCES are a legitimate exception: a documented quota is a fact,
+# not a measurement. Those live in ALWAYS_FREE below, carry `is_limit`, and are
+# never presented as though they were observed usage.
+# ---------------------------------------------------------------------------
 
-    total, used, free = shutil.disk_usage("/")
-    used_bytes = max(used, 1)
-    used_gb = round(used_bytes / (1024**3), 2)
-    total_gb = round(total / (1024**3), 2)
-    free_gb = round(free / (1024**3), 2)
+def _human_bytes(n) -> str:
+    """Format a byte count. Returns 'unknown' for None so an unmeasured value can
+    never be rendered as '0 B', which would read as a measurement of zero."""
+    if n is None:
+        return "unknown"
+    step = 1024.0
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(n) < step or unit == "TB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= step
+    return f"{n:.1f} TB"
 
-    measured_folders = [
-        {"name": "/var (Docker Containers, Images & Database Volume)", "path": "/var"},
-        {"name": "/usr (Linux OS Runtime & Python Binaries)", "path": "/usr"},
-        {"name": "/lib & /lib64 (Shared System Libraries)", "path": "/lib"},
-        {"name": "/app/output (Generated Cards & Media Cache)", "path": os.path.join(os.path.dirname(__file__), "output")},
-        {"name": "/app (PaperSwap Backend Code & Configs)", "path": os.path.dirname(__file__)},
-        {"name": "/tmp (Temporary Cache Buffer)", "path": "/tmp"},
-        {"name": "/var/log (System & Application Logs)", "path": "/var/log"}
+
+def _du_bytes(path: str, timeout: float = 2.0):
+    """Real recursive size of `path` in bytes, or None if it cannot be measured.
+
+    Returning None is the whole point: a path we cannot read is reported as
+    unmeasured, never back-filled with a guess.
+    """
+    if not os.path.isdir(path):
+        return None
+    try:
+        res = subprocess.run(["du", "-sb", path],
+                             capture_output=True, text=True, timeout=timeout)
+        if res.returncode == 0 and res.stdout.split():
+            return int(res.stdout.split()[0])
+    except Exception:
+        pass
+    # `du` unavailable or timed out: walk instead, but only report a total if the
+    # walk completes, so a partial traversal never masquerades as a full one.
+    try:
+        total = 0
+        for root, _dirs, files in os.walk(path):
+            for f in files:
+                fp = os.path.join(root, f)
+                try:
+                    if not os.path.islink(fp):
+                        total += os.path.getsize(fp)
+                except OSError:
+                    pass
+        return total
+    except Exception:
+        return None
+
+
+def _measured_paths() -> list:
+    """Paths this container genuinely owns and can therefore measure.
+
+    Deliberately excludes host directories. The backend runs in a container, so
+    `/var` here is the *container's* /var, not the host's Docker image store or
+    the Postgres volume. Measuring those and labelling them as host figures was
+    the original bug.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    return [
+        {"name": "Application code", "path": here},
+        {"name": "Generated output & media cache", "path": os.path.join(here, "output")},
+        {"name": "Python runtime & site-packages", "path": "/usr"},
+        {"name": "Container state", "path": "/var/lib"},
+        {"name": "Temporary buffer", "path": "/tmp"},
     ]
 
-    folder_nodes = []
-    for item in measured_folders:
-        p = item["path"]
-        size_bytes = 0
-        if os.path.exists(p):
-            try:
-                res = subprocess.run(["du", "-sb", p], capture_output=True, text=True, timeout=2)
-                if res.returncode == 0 and res.stdout:
-                    size_bytes = int(res.stdout.split()[0])
-            except Exception:
-                pass
 
-            if size_bytes == 0 and os.path.isdir(p):
-                try:
-                    for root, dirs, files in os.walk(p):
-                        for f in files:
-                            try:
-                                fp = os.path.join(root, f)
-                                if not os.path.islink(fp):
-                                    size_bytes += os.path.getsize(fp)
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
+def get_folder_storage_sizes() -> dict:
+    """Real `du` measurements of paths inside THIS container.
 
-        # If Docker container permission isolation blocks reading host /var or /usr, calculate system layer delta
-        if p == "/var" and size_bytes < (100 * 1024 * 1024):
-            size_bytes = int(used_bytes * 0.62)  # ~4.8 GB for Docker images, containers & postgres volume
-        elif p == "/usr" and size_bytes < (100 * 1024 * 1024):
-            size_bytes = int(used_bytes * 0.32)  # ~2.4 GB for Linux runtime binaries & libraries
+    Scope: the container filesystem only. Host-level consumers of the disk (the
+    Docker image store, the Postgres volume, the host OS) are not visible from
+    here, so they are reported as an explicit `unaccounted_bytes` remainder
+    rather than divided up among invented shares.
+    """
+    total, used, free = shutil.disk_usage("/")
 
-        size_mb = round(size_bytes / (1024 * 1024), 2)
-        size_gb = round(size_bytes / (1024**3), 2)
-        display = f"{size_gb} GB" if size_gb >= 0.1 else f"{size_mb} MB"
-
-        folder_nodes.append({
+    folders, unmeasured = [], []
+    for item in _measured_paths():
+        size = _du_bytes(item["path"])
+        if size is None:
+            unmeasured.append({
+                "name": item["name"],
+                "path": item["path"],
+                "measured": False,
+                "unavailable_reason": "Path is not readable from inside the container.",
+            })
+            continue
+        folders.append({
             "name": item["name"],
-            "path": p,
-            "size_bytes": size_bytes,
-            "size_mb": size_mb,
-            "size_gb": size_gb,
-            "display_size": display,
-            "percent_of_used_disk": round((size_bytes / used_bytes) * 100, 1),
-            "children": []
+            "path": item["path"],
+            "size_bytes": size,
+            "display_size": _human_bytes(size),
+            "percent_of_disk_used": round(size / used * 100, 1) if used else 0.0,
+            "measured": True,
+            "source": "du -sb",
         })
 
-    folder_nodes.sort(key=lambda x: x["size_bytes"], reverse=True)
+    folders.sort(key=lambda x: x["size_bytes"], reverse=True)
+    measured_bytes = sum(f["size_bytes"] for f in folders)
+    unaccounted = max(used - measured_bytes, 0)
+
     return {
-        "used_gb": used_gb,
-        "total_gb": total_gb,
-        "free_gb": free_gb,
-        "folders": folder_nodes
+        "scope": "Container filesystem only — host directories are not visible from here.",
+        "measured": True,
+        "source": "shutil.disk_usage('/') + du -sb",
+        "disk_total_bytes": total,
+        "disk_used_bytes": used,
+        "disk_free_bytes": free,
+        "disk_total_display": _human_bytes(total),
+        "disk_used_display": _human_bytes(used),
+        "disk_free_display": _human_bytes(free),
+        "folders": folders,
+        "unmeasured": unmeasured,
+        "measured_bytes": measured_bytes,
+        "measured_display": _human_bytes(measured_bytes),
+        "unaccounted_bytes": unaccounted,
+        "unaccounted_display": _human_bytes(unaccounted),
+        "unaccounted_note": (
+            "Disk consumed by the host OS, Docker image layers and the Postgres "
+            "volume. Not visible from inside this container and deliberately not "
+            "estimated."
+        ),
     }
+
+
+def _read_meminfo() -> dict:
+    """Parse /proc/meminfo into bytes. Empty dict if unreadable."""
+    values = {}
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                key, _, rest = line.partition(":")
+                parts = rest.split()
+                if parts and parts[0].isdigit():
+                    values[key] = int(parts[0]) * 1024   # /proc reports kB
+    except Exception:
+        return {}
+    return values
+
+
+def _cgroup_memory_limit():
+    """The container's memory ceiling if one is set, else None.
+
+    None means no limit, in which case /proc/meminfo reports the host's memory —
+    which for this deployment is the real VM figure we want.
+    """
+    for path in ("/sys/fs/cgroup/memory.max",
+                 "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            with open(path) as fh:
+                raw = fh.read().strip()
+            if raw == "max":
+                return None
+            value = int(raw)
+            # cgroup v1 uses a huge sentinel to mean 'unlimited'.
+            return None if value >= (1 << 62) else value
+        except Exception:
+            continue
+    return None
+
+
+def get_system_metrics() -> dict:
+    """Live CPU and memory readings, taken at call time from /proc."""
+    mem = _read_meminfo()
+    cgroup_limit = _cgroup_memory_limit()
+
+    mem_total = cgroup_limit if cgroup_limit is not None else mem.get("MemTotal")
+    mem_available = mem.get("MemAvailable")
+    mem_used = (mem_total - mem_available
+                if mem_total is not None and mem_available is not None else None)
+
+    memory = {
+        "measured": mem_total is not None,
+        "source": ("/sys/fs/cgroup (container limit)" if cgroup_limit is not None
+                   else "/proc/meminfo:MemTotal (no cgroup limit — host total)"),
+        "total_bytes": mem_total,
+        "available_bytes": mem_available,
+        "used_bytes": mem_used,
+        "total_display": _human_bytes(mem_total),
+        "used_display": _human_bytes(mem_used),
+        "used_percent": (round(mem_used / mem_total * 100, 1)
+                         if mem_used is not None and mem_total else None),
+    }
+    if mem_total is None:
+        memory["unavailable_reason"] = "/proc/meminfo could not be read."
+
+    swap_total = mem.get("SwapTotal")
+    swap_free = mem.get("SwapFree")
+    swap = {
+        "measured": swap_total is not None,
+        "source": "/proc/meminfo:SwapTotal",
+        "total_bytes": swap_total,
+        "used_bytes": (swap_total - swap_free
+                       if swap_total is not None and swap_free is not None else None),
+        "total_display": _human_bytes(swap_total),
+    }
+
+    try:
+        with open("/proc/loadavg") as fh:
+            one, five, fifteen = fh.read().split()[:3]
+        load = {"measured": True, "source": "/proc/loadavg",
+                "load_1m": float(one), "load_5m": float(five), "load_15m": float(fifteen)}
+    except Exception:
+        load = {"measured": False, "source": "/proc/loadavg",
+                "load_1m": None, "load_5m": None, "load_15m": None,
+                "unavailable_reason": "/proc/loadavg could not be read."}
+
+    cpu_count = os.cpu_count()
+    return {
+        "memory": memory,
+        "swap": swap,
+        "load_average": load,
+        "cpu": {
+            "measured": cpu_count is not None,
+            "source": "os.cpu_count()",
+            "visible_cpus": cpu_count,
+            "note": "Logical CPUs visible to the container, not an OCPU allowance figure.",
+        },
+    }
+
+
+def _database_storage_sizes(cursor) -> dict:
+    """Real on-disk size of the database and each table, straight from Postgres."""
+    cursor.execute("SELECT pg_database_size(current_database()) AS total_bytes")
+    total = cursor.fetchone()["total_bytes"]
+
+    cursor.execute('''
+        SELECT c.relname AS table_name, pg_total_relation_size(c.oid) AS size_bytes
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relkind = 'r'
+        ORDER BY 2 DESC
+    ''')
+    tables = [{
+        "name": r["table_name"],
+        "size_bytes": r["size_bytes"],
+        "display_size": _human_bytes(r["size_bytes"]),
+        "measured": True,
+    } for r in cursor.fetchall()]
+
+    return {
+        "measured": True,
+        "source": "pg_database_size() / pg_total_relation_size()",
+        "total_bytes": total,
+        "total_display": _human_bytes(total),
+        "tables": tables,
+    }
+
+
+def get_database_storage_sizes() -> dict:
+    """Standalone wrapper around _database_storage_sizes()."""
+    with db_cursor() as cursor:
+        return _database_storage_sizes(cursor)
 
 
 def _database_detailed_analytics(cursor) -> dict:
@@ -760,7 +1013,12 @@ def _database_detailed_analytics(cursor) -> dict:
     cursor.execute("SELECT COUNT(*) as total_sessions FROM user_sessions")
     sess_stats = cursor.fetchone() or {}
 
-    cursor.execute("SELECT COUNT(*) as total_requests FROM request_logs")
+    # Swipes are no longer written to request_logs, so counting that table alone
+    # would understate traffic by roughly the swipe volume (the largest share).
+    cursor.execute('''
+        SELECT (SELECT COUNT(*) FROM request_logs)
+             + (SELECT COUNT(*) FROM user_swipes) AS total_requests
+    ''')
     req_stats = cursor.fetchone() or {}
 
     oldest_str = art_stats.get('oldest').isoformat() if art_stats.get('oldest') else 'N/A'
@@ -789,55 +1047,136 @@ def get_database_detailed_analytics() -> dict:
         return _database_detailed_analytics(cursor)
 
 
-def get_oracle_quota_status(used_gb: float) -> dict:
-    """Calculate usage against Oracle Cloud Always Free allowances."""
-    # Always free block storage limit: 200 GB
-    # Always free ARM OCPU limit: 2 OCPUs
-    # Always free ARM RAM limit: 12 GB
-    # Always free Egress limit: 10,000 GB (10 TB/month)
-    storage_limit_gb = 200.0
-    storage_quota_percent = round((used_gb / storage_limit_gb) * 100, 1)
+# Oracle Cloud Always Free published allowances.
+#
+# These are LIMITS, not measurements — documented facts with a verification date,
+# which is why they are allowed to be constants. They are never rendered as
+# though they were observed usage.
+#
+# Source:  https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm
+# Verified: 2026-08-26
+#
+# IMPORTANT: this deployment runs VM.Standard.E2.1.Micro (x86) per
+# PROJECT_STATUS.md — the AMD micro allowance. A previous version of this file
+# used the Ampere A1 (Arm) allowance of 2 OCPU / 12 GB, which describes a
+# machine this project does not have. The micro shape gets 1/8 OCPU and 1 GB of
+# memory per instance, two instances per tenancy.
+ALWAYS_FREE = {
+    "is_limit": True,
+    "verified_on": "2026-08-26",
+    "source_url": ("https://docs.oracle.com/en-us/iaas/Content/FreeTier/"
+                   "freetier_topic-Always_Free_Resources.htm"),
+    "shape": "VM.Standard.E2.1.Micro (x86)",
+    "micro_instances": 2,
+    "ocpu_per_micro_instance": 0.125,
+    "memory_gb_per_micro_instance": 1,
+    "block_volume_total_gb": 200,
+    "outbound_transfer_tb_per_month": 10,
+}
+
+
+def get_free_tier_allowances(system: dict = None) -> dict:
+    """Published Always Free allowances alongside what can actually be measured.
+
+    Pass `system` (from get_system_metrics()) when the caller has already taken a
+    reading, so the quota panel and the system panel report the *same* reading
+    rather than two measurements taken moments apart — two panels disagreeing
+    about current memory use looks exactly like the fabrication this replaced.
+
+    Only two of these are observable from inside the VM, and one only partially:
+
+      memory   — measurable (/proc/meminfo, see get_system_metrics).
+      storage  — the *provisioned* size of this volume is measurable. Note that
+                 what counts against the 200 GB account allowance is provisioned
+                 size across every volume in the tenancy, not how full any one
+                 of them is. The old code compared *used* bytes against the
+                 allowance, which measured the wrong quantity.
+      ocpu     — not observable; requires the OCI Monitoring API.
+      egress   — not observable; requires the OCI Monitoring API.
+
+    The two unobservable items are reported with measured=False and a null
+    value rather than a plausible-looking number.
+    """
+    total, _used, _free = shutil.disk_usage("/")
+    if system is None:
+        system = get_system_metrics()
+    memory = system["memory"]
+
+    provisioned_gb = round(total / (1024 ** 3), 1)
+    allowance_gb = ALWAYS_FREE["block_volume_total_gb"]
 
     return {
-        "ocpu": {
-            "used": 1,
-            "limit": 2,
-            "unit": "OCPU",
-            "percent": 50.0,
-            "status": "Safe (50% of 2 OCPU Free Allowance)"
-        },
-        "memory": {
-            "used_gb": 2.0,
-            "limit_gb": 12.0,
-            "unit": "GB RAM",
-            "percent": 16.7,
-            "status": "Safe (16.7% of 12 GB Free Allowance)"
-        },
-        "storage": {
-            "used_gb": used_gb,
-            "limit_gb": storage_limit_gb,
-            "percent": storage_quota_percent,
-            "status": f"{storage_quota_percent}% of 200 GB Free Allowance Used"
-        },
-        "egress": {
-            "estimated_used_gb": 0.5,
-            "limit_gb": 10000.0,
-            "percent": 0.005,
-            "status": "Safe (<0.1% of 10 TB/mo Egress Free Allowance)"
-        }
+        "reference": ALWAYS_FREE,
+        "items": [
+            {
+                "key": "memory",
+                "label": "Memory (this instance)",
+                "measured": memory["measured"],
+                "used_bytes": memory["used_bytes"],
+                "total_bytes": memory["total_bytes"],
+                "used_display": memory["used_display"],
+                "total_display": memory["total_display"],
+                "percent": memory["used_percent"],
+                "source": memory["source"],
+                "limit_note": (
+                    f"Always Free allows "
+                    f"{ALWAYS_FREE['memory_gb_per_micro_instance']} GB per micro instance."
+                ),
+            },
+            {
+                "key": "block_storage",
+                "label": "Block volume (this volume only)",
+                "measured": True,
+                "provisioned_gb": provisioned_gb,
+                "allowance_gb": allowance_gb,
+                "percent": round(provisioned_gb / allowance_gb * 100, 1),
+                "source": "shutil.disk_usage('/') total",
+                "limit_note": (
+                    f"{allowance_gb} GB allowance is account-wide across all volumes; "
+                    "only this volume is visible from inside the VM."
+                ),
+            },
+            {
+                "key": "ocpu",
+                "label": "OCPU allowance consumption",
+                "measured": False,
+                "percent": None,
+                "unavailable_reason": (
+                    "Requires the OCI Monitoring API. An instance cannot observe how "
+                    "much of a tenancy-wide OCPU allowance it consumes."
+                ),
+                "limit_note": (
+                    f"Always Free allows {ALWAYS_FREE['micro_instances']} micro instances at "
+                    f"{ALWAYS_FREE['ocpu_per_micro_instance']} OCPU each."
+                ),
+            },
+            {
+                "key": "outbound_transfer",
+                "label": "Outbound data transfer",
+                "measured": False,
+                "percent": None,
+                "unavailable_reason": (
+                    "Requires the OCI Monitoring API. Per-tenancy egress is not "
+                    "derivable from container network counters."
+                ),
+                "limit_note": (
+                    f"Always Free allows "
+                    f"{ALWAYS_FREE['outbound_transfer_tb_per_month']} TB per month."
+                ),
+            },
+        ],
     }
 
 
 def get_telemetry_summary() -> dict:
-    """Combine system disk usage, folder sizes, top swiped articles, API endpoints, Oracle free quota, and DB analytics."""
-    import shutil
-    total, used, free = shutil.disk_usage("/")
-    used_gb = round(used / (1024**3), 2)
-    total_gb = round(total / (1024**3), 2)
+    """Combine engagement analytics with live system measurements.
 
-    # All seven DB-backed panels share ONE pooled connection. Previously each
-    # helper opened its own, so a single dashboard render cost 7 connect/auth
-    # cycles.
+    Provenance contract: every numeric field below is either read at call time
+    (`measured: true`) or reported as unavailable (`measured: false` with a null
+    value and an `unavailable_reason`). Nothing here is estimated or hardcoded.
+    Documented in docs/ARCHITECTURE.md, ADR-010.
+    """
+    # All DB-backed panels share ONE pooled connection.
     with db_cursor() as cursor:
         db_analytics = _database_detailed_analytics(cursor)
         category_analytics = _category_stats(cursor)
@@ -846,22 +1185,42 @@ def get_telemetry_summary() -> dict:
         active_users = _active_users_count(cursor, 60)
         avg_duration = _avg_session_duration_minutes(cursor)
         hourly_distribution = _hourly_usage_distribution(cursor)
+        database_storage = _database_storage_sizes(cursor)
 
-    # Deliberately outside the `with`: this shells out to `du` seven times with a
-    # 2 s timeout each, and holding a pooled connection for that long starves
-    # real queries.
+    # Filesystem and /proc reads happen outside the `with`: du can take seconds
+    # and holding a pooled connection across it would starve real queries.
+    system = get_system_metrics()
     folder_sizes = get_folder_storage_sizes()
-    oracle_quota = get_oracle_quota_status(used_gb)
+    free_tier = get_free_tier_allowances(system)   # reuse the same reading
+
+    disk_total = folder_sizes["disk_total_bytes"]
+    disk_used = folder_sizes["disk_used_bytes"]
 
     return {
-        "storage": {
-            "total_gb": total_gb,
-            "used_gb": used_gb,
-            "free_gb": round(free / (1024**3), 2),
-            "used_percent": round((used / total) * 100, 1)
+        "provenance": {
+            "contract": (
+                "Every numeric field carries `measured`. Fields that cannot be read "
+                "from inside the container are measured=false with a null value and "
+                "an unavailable_reason. No field is estimated or hardcoded."
+            ),
+            "documented_in": "docs/ARCHITECTURE.md (ADR-010)",
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         },
+        "storage": {
+            "measured": True,
+            "source": folder_sizes["source"],
+            "total_bytes": disk_total,
+            "used_bytes": disk_used,
+            "free_bytes": folder_sizes["disk_free_bytes"],
+            "total_display": folder_sizes["disk_total_display"],
+            "used_display": folder_sizes["disk_used_display"],
+            "free_display": folder_sizes["disk_free_display"],
+            "used_percent": round(disk_used / disk_total * 100, 1) if disk_total else None,
+        },
+        "system": system,
         "folder_analytics": folder_sizes,
-        "oracle_quota": oracle_quota,
+        "database_storage": database_storage,
+        "free_tier": free_tier,
         "user_analytics": {
             "currently_connected_users": active_users,
             "avg_session_minutes": avg_duration,
