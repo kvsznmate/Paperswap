@@ -523,6 +523,11 @@ def fetch_and_sync_news_to_db(categories=None) -> list:
 
 
 if __name__ == "__main__":
-    db.init_db()
-    articles = fetch_and_sync_news_to_db()
-    print(f"Total articles in balanced deck: {len(articles)}")
+    # Standalone run: no lifespan(), so open and close the pool here.
+    db.init_pool(minconn=1, maxconn=4)
+    try:
+        db.init_db()
+        articles = fetch_and_sync_news_to_db()
+        print(f"Total articles in balanced deck: {len(articles)}")
+    finally:
+        db.close_pool()

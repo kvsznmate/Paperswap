@@ -1,8 +1,11 @@
 import os
+import time
 import hashlib
+import threading
+from contextlib import contextmanager
 
-import psycopg2
 from psycopg2.extras import RealDictCursor
+from psycopg2.pool import PoolError, ThreadedConnectionPool
 
 
 def _database_url() -> str:
@@ -100,135 +103,248 @@ def _decorate_articles(rows: list) -> list:
     return articles
 
 
-def get_db_connection():
-    """Establish connection to PostgreSQL. RealDictCursor gives dict-like rows,
-    matching the old sqlite3.Row behaviour the rest of the code relies on."""
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+# ---------------------------------------------------------------------------
+# CONNECTION POOL
+#
+# Every query in this module borrows a connection from one process-wide pool and
+# returns it in a `finally`, so no error path can leak one. Before this, each
+# function opened a raw connection and closed it on the happy path only -- a
+# single ForeignKeyViolation in record_user_swipe() stranded that connection
+# permanently, and enough of them exhausted Postgres's max_connections (100) and
+# took the box down until the container was restarted.
+#
+# ThreadedConnectionPool (not SimpleConnectionPool) because two thread sources
+# touch the database: APScheduler's BackgroundScheduler runs refresh_pipeline in
+# its own thread, and FastAPI dispatches sync endpoints onto a worker threadpool.
+# ---------------------------------------------------------------------------
+
+# minconn connections are opened eagerly and kept warm. This is load-bearing:
+# psycopg2's _putconn does `if len(self._pool) < self.minconn ... else:
+# conn.close()`, so a returned connection is only kept when the idle count is
+# below minconn -- above it, the connection is closed outright. minconn=3
+# therefore means up to 3 concurrent queries reuse warm connections; sustained
+# concurrency above that still pays a TCP + auth handshake per query. Raise this
+# if the box shows steady parallel load (each warm connection costs a few MB of
+# Postgres RSS).
+POOL_MIN_CONN = int(os.getenv("DB_POOL_MIN", "3"))
+# Ceiling on simultaneous Postgres backends. Each costs several MB of server
+# RSS, and the app shares a 956 MB VM with Postgres itself, so this stays well
+# under the default max_connections=100.
+POOL_MAX_CONN = int(os.getenv("DB_POOL_MAX", "20"))
+# psycopg2's getconn() raises immediately when the pool is drained rather than
+# waiting, which would turn a brief burst into 500s. Wait up to this long for a
+# connection to come back before giving up.
+POOL_ACQUIRE_TIMEOUT = float(os.getenv("DB_POOL_TIMEOUT", "5.0"))
+
+_pool: ThreadedConnectionPool | None = None
+_pool_lock = threading.Lock()
+
+
+def init_pool(minconn: int = None, maxconn: int = None) -> None:
+    """Create the process-wide connection pool. Call exactly once per process,
+    before any query: lifespan() does this for the API server, and the CLI /
+    script entry points do it for themselves.
+
+    Safe to call twice -- the second call is a no-op. The lock matters because
+    the scheduler thread and a request thread can both reach first-query at the
+    same moment during startup.
+    """
+    global _pool
+    with _pool_lock:
+        if _pool is not None:
+            return
+        lo = POOL_MIN_CONN if minconn is None else minconn
+        hi = POOL_MAX_CONN if maxconn is None else maxconn
+        _pool = ThreadedConnectionPool(
+            lo, hi, DATABASE_URL, cursor_factory=RealDictCursor
+        )
+        print(f"[DB Pool] Opened (min={lo}, max={hi}, acquire_timeout={POOL_ACQUIRE_TIMEOUT}s).")
+
+
+def close_pool() -> None:
+    """Close every pooled connection. Call on shutdown so Postgres reclaims the
+    backends immediately instead of waiting for TCP timeouts."""
+    global _pool
+    with _pool_lock:
+        if _pool is None:
+            return
+        _pool.closeall()
+        _pool = None
+        print("[DB Pool] Closed.")
+
+
+def _acquire(pool: ThreadedConnectionPool):
+    """getconn() with a bounded wait. psycopg2 raises PoolError the instant the
+    pool is exhausted, so retry briefly with backoff -- queries here run in
+    single-digit milliseconds, so a connection almost always frees up long
+    before the timeout."""
+    deadline = time.monotonic() + POOL_ACQUIRE_TIMEOUT
+    delay = 0.01
+    while True:
+        try:
+            return pool.getconn()
+        except PoolError:
+            # A closed pool will never yield a connection; fail fast.
+            if getattr(pool, "closed", False) or time.monotonic() >= deadline:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.1)
+
+
+@contextmanager
+def db_cursor(commit: bool = False):
+    """Borrow a pooled connection and yield a cursor.
+
+    The connection is always returned to the pool, and the transaction is always
+    ended -- committed on success when commit=True, rolled back otherwise. The
+    rollback on the read path is not redundant: without it a pooled connection
+    goes back 'idle in transaction', holding a snapshot and any locks it took.
+    """
+    pool = _pool
+    if pool is None:
+        raise RuntimeError(
+            "Database pool is not initialised -- call database.init_pool() at "
+            "process start (main.lifespan does this for the API server)."
+        )
+
+    conn = _acquire(pool)
+    try:
+        with conn.cursor() as cur:
+            yield cur
+        if commit:
+            conn.commit()
+        else:
+            conn.rollback()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            # Connection is already dead; putconn discards it below.
+            pass
+        raise
+    finally:
+        try:
+            pool.putconn(conn)
+        except PoolError:
+            # close_pool() ran while this query was in flight (shutdown races an
+            # in-flight request). closeall() already closed this connection, so
+            # nothing leaks -- but putconn on a closed pool raises, and letting
+            # that escape from `finally` would mask the real result or exception.
+            pass
 
 
 def init_db():
     """Initialize PostgreSQL tables."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    # Unique news articles. No card_filename any more — cards are rendered on the phone.
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS articles (
-            id SERIAL PRIMARY KEY,
-            article_key TEXT UNIQUE NOT NULL,
-            title TEXT NOT NULL,
-            description TEXT,
-            source TEXT,
-            published_at TEXT,
-            category TEXT NOT NULL,
-            image_url TEXT,
-            url TEXT NOT NULL,
-            created_at TIMESTAMPTZ DEFAULT NOW()
-        )
-    ''')
-
-    # User swipe actions (Read / Pass).
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_swipes (
-            id SERIAL PRIMARY KEY,
-            article_id INTEGER NOT NULL REFERENCES articles (id) ON DELETE CASCADE,
-            action TEXT NOT NULL CHECK (action IN ('read', 'pass')),
-            swiped_at TIMESTAMPTZ DEFAULT NOW()
-        )
-    ''')
-
-    # Telemetry: User active sessions and heartbeats
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_sessions (
-            session_id TEXT PRIMARY KEY,
-            created_at TIMESTAMPTZ DEFAULT NOW(),
-            last_heartbeat TIMESTAMPTZ DEFAULT NOW(),
-            duration_seconds INTEGER DEFAULT 0,
-            user_agent TEXT,
-            ip_address TEXT
-        )
-    ''')
-
-    # Telemetry: Request logs for hourly peak usage distribution
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS request_logs (
-            id SERIAL PRIMARY KEY,
-            endpoint TEXT NOT NULL,
-            method TEXT NOT NULL,
-            hour_of_day INTEGER NOT NULL,
-            logged_at TIMESTAMPTZ DEFAULT NOW()
-        )
-    ''')
-
-    # Topic catalogue table. Lets clients discover available topics (and their
-    # brand colours) instead of hardcoding a list that drifts from the backend.
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS categories (
-            slug TEXT PRIMARY KEY,
-            label TEXT NOT NULL,
-            accent_color TEXT NOT NULL DEFAULT '#6366f1',
-            sort_order INTEGER NOT NULL DEFAULT 100,
-            enabled BOOLEAN NOT NULL DEFAULT TRUE
-        )
-    ''')
-
-    # Sync the CATEGORIES dict into the table on every boot so code stays the
-    # source of truth for labels/colours, while `enabled` stays operator-editable.
-    for slug, meta in CATEGORIES.items():
+    with db_cursor(commit=True) as cursor:
+        # Unique news articles. No card_filename any more — cards are rendered on the phone.
         cursor.execute('''
-            INSERT INTO categories (slug, label, accent_color, sort_order)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (slug) DO UPDATE SET
-                label = EXCLUDED.label,
-                accent_color = EXCLUDED.accent_color,
-                sort_order = EXCLUDED.sort_order
-        ''', (slug, meta['label'], meta['accent'], meta['sort_order']))
+            CREATE TABLE IF NOT EXISTS articles (
+                id SERIAL PRIMARY KEY,
+                article_key TEXT UNIQUE NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                source TEXT,
+                published_at TEXT,
+                category TEXT NOT NULL,
+                image_url TEXT,
+                url TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        ''')
 
-    # Per-topic feed queries hit these constantly once the deck is filtered.
-    cursor.execute('''
-        CREATE INDEX IF NOT EXISTS idx_articles_category_id
-        ON articles (category, id DESC)
-    ''')
-    cursor.execute('''
-        CREATE INDEX IF NOT EXISTS idx_articles_created_at
-        ON articles (created_at DESC)
-    ''')
+        # User swipe actions (Read / Pass).
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_swipes (
+                id SERIAL PRIMARY KEY,
+                article_id INTEGER NOT NULL REFERENCES articles (id) ON DELETE CASCADE,
+                action TEXT NOT NULL CHECK (action IN ('read', 'pass')),
+                swiped_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        ''')
 
-    # Migration: older rows may hold lowercase/legacy topic names.
-    cursor.execute("UPDATE articles SET category = UPPER(category) WHERE category <> UPPER(category)")
-    for legacy, slug in CATEGORY_ALIASES.items():
-        cursor.execute("UPDATE articles SET category = %s WHERE category = %s", (slug, legacy))
+        # Telemetry: User active sessions and heartbeats
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                session_id TEXT PRIMARY KEY,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                last_heartbeat TIMESTAMPTZ DEFAULT NOW(),
+                duration_seconds INTEGER DEFAULT 0,
+                user_agent TEXT,
+                ip_address TEXT
+            )
+        ''')
 
-    conn.commit()
-    cursor.close()
-    conn.close()
+        # Telemetry: Request logs for hourly peak usage distribution
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS request_logs (
+                id SERIAL PRIMARY KEY,
+                endpoint TEXT NOT NULL,
+                method TEXT NOT NULL,
+                hour_of_day INTEGER NOT NULL,
+                logged_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        ''')
+
+        # Topic catalogue table. Lets clients discover available topics (and their
+        # brand colours) instead of hardcoding a list that drifts from the backend.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS categories (
+                slug TEXT PRIMARY KEY,
+                label TEXT NOT NULL,
+                accent_color TEXT NOT NULL DEFAULT '#6366f1',
+                sort_order INTEGER NOT NULL DEFAULT 100,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE
+            )
+        ''')
+
+        # Sync the CATEGORIES dict into the table on every boot so code stays the
+        # source of truth for labels/colours, while `enabled` stays operator-editable.
+        for slug, meta in CATEGORIES.items():
+            cursor.execute('''
+                INSERT INTO categories (slug, label, accent_color, sort_order)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (slug) DO UPDATE SET
+                    label = EXCLUDED.label,
+                    accent_color = EXCLUDED.accent_color,
+                    sort_order = EXCLUDED.sort_order
+            ''', (slug, meta['label'], meta['accent'], meta['sort_order']))
+
+        # Per-topic feed queries hit these constantly once the deck is filtered.
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_articles_category_id
+            ON articles (category, id DESC)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_articles_created_at
+            ON articles (created_at DESC)
+        ''')
+
+        # Migration: older rows may hold lowercase/legacy topic names.
+        cursor.execute("UPDATE articles SET category = UPPER(category) WHERE category <> UPPER(category)")
+        for legacy, slug in CATEGORY_ALIASES.items():
+            cursor.execute("UPDATE articles SET category = %s WHERE category = %s", (slug, legacy))
 
 
 def get_enabled_categories() -> list:
     """Return the topic catalogue with a live article count per topic.
     Drives the client-side topic filter bar."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT c.slug, c.label, c.accent_color, c.sort_order,
-               COUNT(a.id) AS article_count
-        FROM categories c
-        LEFT JOIN articles a ON a.category = c.slug
-        WHERE c.enabled = TRUE
-        GROUP BY c.slug, c.label, c.accent_color, c.sort_order
-        ORDER BY c.sort_order ASC
-    ''')
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
+    with db_cursor() as cursor:
+        cursor.execute('''
+            SELECT c.slug, c.label, c.accent_color, c.sort_order,
+                   COUNT(a.id) AS article_count
+            FROM categories c
+            LEFT JOIN articles a ON a.category = c.slug
+            WHERE c.enabled = TRUE
+            GROUP BY c.slug, c.label, c.accent_color, c.sort_order
+            ORDER BY c.sort_order ASC
+        ''')
+        rows = cursor.fetchall()
     return [dict(r) for r in rows]
 
 
-def get_category_stats() -> list:
-    """Article volume and swipe engagement broken down per topic, so the
-    analytics dashboard can show which topics actually earn right-swipes."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
+def _category_stats(cursor) -> list:
+    """Core of get_category_stats(), operating on a caller-supplied cursor so
+    get_telemetry_summary() can run all its panels on one connection."""
     cursor.execute('''
         SELECT c.slug, c.label, c.accent_color,
                COUNT(DISTINCT a.id) AS article_count,
@@ -242,8 +358,6 @@ def get_category_stats() -> list:
         ORDER BY c.sort_order ASC
     ''')
     rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
 
     results = []
     for r in rows:
@@ -255,6 +369,13 @@ def get_category_stats() -> list:
     return results
 
 
+def get_category_stats() -> list:
+    """Article volume and swipe engagement broken down per topic, so the
+    analytics dashboard can show which topics actually earn right-swipes."""
+    with db_cursor() as cursor:
+        return _category_stats(cursor)
+
+
 def generate_article_key(title: str, url: str) -> str:
     """Generate unique MD5 hash key for title and URL to prevent duplicates."""
     raw = f"{title.strip().lower()}_{url.strip().lower()}"
@@ -263,13 +384,9 @@ def generate_article_key(title: str, url: str) -> str:
 
 def is_article_in_db(article_key: str) -> bool:
     """Check if article already exists in the database."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM articles WHERE article_key = %s", (article_key,))
-    exists = cursor.fetchone() is not None
-    cursor.close()
-    conn.close()
-    return exists
+    with db_cursor() as cursor:
+        cursor.execute("SELECT 1 FROM articles WHERE article_key = %s", (article_key,))
+        return cursor.fetchone() is not None
 
 
 def save_article(article_data: dict) -> int:
@@ -280,36 +397,32 @@ def save_article(article_data: dict) -> int:
     """
     article_key = generate_article_key(article_data['title'], article_data['url'])
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    with db_cursor(commit=True) as cursor:
+        cursor.execute('''
+            INSERT INTO articles
+                (article_key, title, description, source, published_at, category, image_url, url)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (article_key) DO NOTHING
+            RETURNING id
+        ''', (
+            article_key,
+            article_data['title'],
+            article_data.get('description', ''),
+            article_data.get('source', 'News'),
+            article_data.get('published_at', 'Recently'),
+            normalize_category(article_data.get('category')),
+            article_data.get('image_url', ''),
+            article_data.get('url', '#'),
+        ))
 
-    cursor.execute('''
-        INSERT INTO articles
-            (article_key, title, description, source, published_at, category, image_url, url)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (article_key) DO NOTHING
-        RETURNING id
-    ''', (
-        article_key,
-        article_data['title'],
-        article_data.get('description', ''),
-        article_data.get('source', 'News'),
-        article_data.get('published_at', 'Recently'),
-        normalize_category(article_data.get('category')),
-        article_data.get('image_url', ''),
-        article_data.get('url', '#'),
-    ))
-
-    row = cursor.fetchone()
-    if row is None:
-        # Duplicate — the row already existed, so look up its id.
-        cursor.execute("SELECT id FROM articles WHERE article_key = %s", (article_key,))
         row = cursor.fetchone()
+        if row is None:
+            # Duplicate — the row already existed, so look up its id.
+            cursor.execute("SELECT id FROM articles WHERE article_key = %s", (article_key,))
+            row = cursor.fetchone()
 
-    article_id = row['id']
-    conn.commit()
-    cursor.close()
-    conn.close()
+        article_id = row['id']
+
     print(f"[DB] Article ID #{article_id}: {article_data['title'][:40]}...")
     return article_id
 
@@ -330,12 +443,9 @@ def get_latest_articles(limit: int = 50, categories=None) -> list:
     sql += " ORDER BY id DESC LIMIT %s"
     params.append(limit)
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(sql, params)
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
+    with db_cursor() as cursor:
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
 
     return _decorate_articles(rows)
 
@@ -381,27 +491,32 @@ def get_balanced_feed(limit: int = 70, categories=None, per_category: int = None
     '''
     params.extend([per_category, limit])
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(sql, params)
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
+    with db_cursor() as cursor:
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
 
     return _decorate_articles(rows)
 
 
-def record_user_swipe(article_id: int, action: str):
-    """Record user swipe action (read or pass)."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO user_swipes (article_id, action) VALUES (%s, %s)",
-        (article_id, action),
-    )
-    conn.commit()
-    cursor.close()
-    conn.close()
+def record_user_swipe(article_id: int, action: str) -> None:
+    """Record user swipe action (read or pass).
+
+    An unknown article_id raises ForeignKeyViolation here. That now rolls back
+    and returns the connection instead of stranding it -- see db_cursor().
+    """
+    with db_cursor(commit=True) as cursor:
+        cursor.execute(
+            "INSERT INTO user_swipes (article_id, action) VALUES (%s, %s)",
+            (article_id, action),
+        )
+
+
+def article_exists(article_id: int) -> bool:
+    """Cheap existence check for a numeric article id. Lets callers reject an
+    unknown id with a 404 rather than letting it become a 500 from the FK."""
+    with db_cursor() as cursor:
+        cursor.execute("SELECT 1 FROM articles WHERE id = %s", (article_id,))
+        return cursor.fetchone() is not None
 
 
 def purge_old_articles(days: int = 7) -> int:
@@ -409,83 +524,71 @@ def purge_old_articles(days: int = 7) -> int:
     number of rows removed. Related user_swipes rows are removed automatically
     via ON DELETE CASCADE. Card 'images' are hotlinked URLs stored in the row,
     so deleting the row is all the cleanup required."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "DELETE FROM articles WHERE created_at < NOW() - (%s || ' days')::interval",
-        (days,),
-    )
-    removed = cursor.rowcount
-    conn.commit()
-    cursor.close()
-    conn.close()
+    with db_cursor(commit=True) as cursor:
+        cursor.execute(
+            "DELETE FROM articles WHERE created_at < NOW() - (%s || ' days')::interval",
+            (days,),
+        )
+        removed = cursor.rowcount
+
     print(f"[DB Purge] Removed {removed} article(s) older than {days} days.")
     return removed
 
 
 def record_session_heartbeat(session_id: str, user_agent: str = None, ip_address: str = None):
     """Record or refresh a user session heartbeat and update duration."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO user_sessions (session_id, user_agent, ip_address, created_at, last_heartbeat, duration_seconds)
-        VALUES (%s, %s, %s, NOW(), NOW(), 0)
-        ON CONFLICT (session_id) DO UPDATE SET
-            last_heartbeat = NOW(),
-            duration_seconds = GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - user_sessions.created_at))))
-    ''', (session_id, user_agent or '', ip_address or ''))
-    conn.commit()
-    cursor.close()
-    conn.close()
+    with db_cursor(commit=True) as cursor:
+        cursor.execute('''
+            INSERT INTO user_sessions (session_id, user_agent, ip_address, created_at, last_heartbeat, duration_seconds)
+            VALUES (%s, %s, %s, NOW(), NOW(), 0)
+            ON CONFLICT (session_id) DO UPDATE SET
+                last_heartbeat = NOW(),
+                duration_seconds = GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - user_sessions.created_at))))
+        ''', (session_id, user_agent or '', ip_address or ''))
 
 
 def log_request_event(endpoint: str, method: str):
     """Log API request hit and extract hour of day (0-23) for peak hours analysis."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO request_logs (endpoint, method, hour_of_day)
-        VALUES (%s, %s, EXTRACT(HOUR FROM NOW())::INTEGER)
-    ''', (endpoint, method))
-    conn.commit()
-    cursor.close()
-    conn.close()
+    with db_cursor(commit=True) as cursor:
+        cursor.execute('''
+            INSERT INTO request_logs (endpoint, method, hour_of_day)
+            VALUES (%s, %s, EXTRACT(HOUR FROM NOW())::INTEGER)
+        ''', (endpoint, method))
 
 
-def get_active_users_count(window_seconds: int = 60) -> int:
-    """Return count of users with heartbeat recorded in the last `window_seconds`."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
+def _active_users_count(cursor, window_seconds: int = 60) -> int:
     cursor.execute('''
         SELECT COUNT(DISTINCT session_id) as active_count
         FROM user_sessions
         WHERE last_heartbeat >= NOW() - (%s || ' seconds')::interval
     ''', (window_seconds,))
     row = cursor.fetchone()
-    cursor.close()
-    conn.close()
     return row['active_count'] if row else 0
 
 
-def get_avg_session_duration_minutes() -> float:
-    """Calculate average connected session duration in minutes."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
+def get_active_users_count(window_seconds: int = 60) -> int:
+    """Return count of users with heartbeat recorded in the last `window_seconds`."""
+    with db_cursor() as cursor:
+        return _active_users_count(cursor, window_seconds)
+
+
+def _avg_session_duration_minutes(cursor) -> float:
     cursor.execute('''
         SELECT COALESCE(AVG(duration_seconds), 0) as avg_seconds
         FROM user_sessions
     ''')
     row = cursor.fetchone()
-    cursor.close()
-    conn.close()
     avg_sec = float(row['avg_seconds']) if row else 0.0
     return round(avg_sec / 60.0, 1)
 
 
-def get_hourly_usage_distribution() -> list:
-    """Return request counts grouped by hour of the day (0..23)."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
+def get_avg_session_duration_minutes() -> float:
+    """Calculate average connected session duration in minutes."""
+    with db_cursor() as cursor:
+        return _avg_session_duration_minutes(cursor)
+
+
+def _hourly_usage_distribution(cursor) -> list:
     cursor.execute('''
         SELECT hour_of_day, COUNT(*) as request_count
         FROM request_logs
@@ -493,8 +596,6 @@ def get_hourly_usage_distribution() -> list:
         ORDER BY hour_of_day ASC
     ''')
     rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
 
     counts_by_hour = {r['hour_of_day']: r['request_count'] for r in rows}
     result = []
@@ -507,10 +608,13 @@ def get_hourly_usage_distribution() -> list:
     return result
 
 
-def get_top_swiped_articles(limit: int = 6) -> list:
-    """Retrieve articles with the highest number of 'read' (swipe right) actions."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
+def get_hourly_usage_distribution() -> list:
+    """Return request counts grouped by hour of the day (0..23)."""
+    with db_cursor() as cursor:
+        return _hourly_usage_distribution(cursor)
+
+
+def _top_swiped_articles(cursor, limit: int = 6) -> list:
     cursor.execute('''
         SELECT a.id, a.title, a.source, a.category, a.image_url, a.url, a.published_at,
                COUNT(CASE WHEN s.action = 'read' THEN 1 END) as read_count,
@@ -524,8 +628,6 @@ def get_top_swiped_articles(limit: int = 6) -> list:
         LIMIT %s
     ''', (limit,))
     rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
 
     results = []
     for r in rows:
@@ -537,10 +639,13 @@ def get_top_swiped_articles(limit: int = 6) -> list:
     return results
 
 
-def get_top_api_endpoints(limit: int = 6) -> list:
-    """Retrieve top API endpoints by total request hits and percentage distribution."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
+def get_top_swiped_articles(limit: int = 6) -> list:
+    """Retrieve articles with the highest number of 'read' (swipe right) actions."""
+    with db_cursor() as cursor:
+        return _top_swiped_articles(cursor, limit)
+
+
+def _top_api_endpoints(cursor, limit: int = 6) -> list:
     cursor.execute('''
         SELECT endpoint, method, COUNT(*) as hit_count
         FROM request_logs
@@ -555,15 +660,18 @@ def get_top_api_endpoints(limit: int = 6) -> list:
     total_reqs = total_row['total_requests'] if total_row else 1
     total_reqs = max(total_reqs, 1)
 
-    cursor.close()
-    conn.close()
-
     results = []
     for r in rows:
         item = dict(r)
         item['percentage'] = round((item['hit_count'] / total_reqs) * 100, 1)
         results.append(item)
     return results
+
+
+def get_top_api_endpoints(limit: int = 6) -> list:
+    """Retrieve top API endpoints by total request hits and percentage distribution."""
+    with db_cursor() as cursor:
+        return _top_api_endpoints(cursor, limit)
 
 
 def get_folder_storage_sizes() -> dict:
@@ -642,14 +750,7 @@ def get_folder_storage_sizes() -> dict:
     }
 
 
-
-
-
-def get_database_detailed_analytics() -> dict:
-    """Retrieve database stats: oldest entry, newest entry, total reads vs passes, article counts."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
+def _database_detailed_analytics(cursor) -> dict:
     cursor.execute("SELECT COUNT(*) as total_articles, MIN(created_at) as oldest, MAX(created_at) as newest FROM articles")
     art_stats = cursor.fetchone() or {}
 
@@ -661,9 +762,6 @@ def get_database_detailed_analytics() -> dict:
 
     cursor.execute("SELECT COUNT(*) as total_requests FROM request_logs")
     req_stats = cursor.fetchone() or {}
-
-    cursor.close()
-    conn.close()
 
     oldest_str = art_stats.get('oldest').isoformat() if art_stats.get('oldest') else 'N/A'
     newest_str = art_stats.get('newest').isoformat() if art_stats.get('newest') else 'N/A'
@@ -683,6 +781,12 @@ def get_database_detailed_analytics() -> dict:
         "total_sessions": sess_stats.get('total_sessions', 0),
         "total_requests": req_stats.get('total_requests', 0)
     }
+
+
+def get_database_detailed_analytics() -> dict:
+    """Retrieve database stats: oldest entry, newest entry, total reads vs passes, article counts."""
+    with db_cursor() as cursor:
+        return _database_detailed_analytics(cursor)
 
 
 def get_oracle_quota_status(used_gb: float) -> dict:
@@ -731,15 +835,23 @@ def get_telemetry_summary() -> dict:
     used_gb = round(used / (1024**3), 2)
     total_gb = round(total / (1024**3), 2)
 
-    db_analytics = get_database_detailed_analytics()
-    category_analytics = get_category_stats()
-    top_articles = get_top_swiped_articles(6)
-    top_endpoints = get_top_api_endpoints(6)
+    # All seven DB-backed panels share ONE pooled connection. Previously each
+    # helper opened its own, so a single dashboard render cost 7 connect/auth
+    # cycles.
+    with db_cursor() as cursor:
+        db_analytics = _database_detailed_analytics(cursor)
+        category_analytics = _category_stats(cursor)
+        top_articles = _top_swiped_articles(cursor, 6)
+        top_endpoints = _top_api_endpoints(cursor, 6)
+        active_users = _active_users_count(cursor, 60)
+        avg_duration = _avg_session_duration_minutes(cursor)
+        hourly_distribution = _hourly_usage_distribution(cursor)
+
+    # Deliberately outside the `with`: this shells out to `du` seven times with a
+    # 2 s timeout each, and holding a pooled connection for that long starves
+    # real queries.
     folder_sizes = get_folder_storage_sizes()
     oracle_quota = get_oracle_quota_status(used_gb)
-    active_users = get_active_users_count(60)
-    avg_duration = get_avg_session_duration_minutes()
-    hourly_distribution = get_hourly_usage_distribution()
 
     return {
         "storage": {
@@ -763,5 +875,3 @@ def get_telemetry_summary() -> dict:
         "top_api_endpoints": top_endpoints,
         "database_analytics": db_analytics
     }
-
-

@@ -30,7 +30,11 @@ def refresh_pipeline():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize the database, run an initial refresh, and start the 12-hour scheduler."""
+    """Open the connection pool, initialize the database, run an initial refresh,
+    and start the 12-hour scheduler. The pool is closed on shutdown so Postgres
+    reclaims the backends immediately."""
+    print("[Server Startup] Opening PostgreSQL connection pool...")
+    db.init_pool()
     print("[Server Startup] Initializing PostgreSQL database...")
     db.init_db()
     print("[Server Startup] Running initial fetch + purge...")
@@ -53,6 +57,7 @@ async def lifespan(app: FastAPI):
     yield
 
     scheduler.shutdown(wait=False)
+    db.close_pool()
 
 
 app = FastAPI(
@@ -239,25 +244,34 @@ def get_telemetry_logs():
 
 
 def run_cli_mode():
-    """CLI mode to fetch news and deduplicate in the database."""
+    """CLI mode to fetch news and deduplicate in the database.
+
+    This path never runs lifespan(), so it owns the pool lifecycle itself.
+    A small pool is plenty -- the CLI is single-threaded.
+    """
     topics = ", ".join(db.CATEGORIES.keys())
     print("=" * 60)
     print(" PAPERSWAP MULTI-TOPIC NEWS SYNC (CLI + POSTGRESQL)")
     print(f" Topics: {topics}")
     print("=" * 60)
-    print("[1/2] Initializing PostgreSQL Database...")
-    db.init_db()
 
-    print("[2/2] Fetching, syncing, and purging old news in the database...")
-    fetch_and_sync_news_to_db()
-    db.purge_old_articles(days=PURGE_OLDER_THAN_DAYS)
-    articles = db.get_balanced_feed(limit=FEED_DEFAULT_LIMIT)
+    db.init_pool(minconn=1, maxconn=4)
+    try:
+        print("[1/2] Initializing PostgreSQL Database...")
+        db.init_db()
 
-    print("\n" + "=" * 60)
-    print(f"SUCCESS! Database updated with {len(articles)} active news cards.")
-    for row in db.get_enabled_categories():
-        print(f"   - {row['label']:<20} {row['article_count']} article(s)")
-    print("=" * 60)
+        print("[2/2] Fetching, syncing, and purging old news in the database...")
+        fetch_and_sync_news_to_db()
+        db.purge_old_articles(days=PURGE_OLDER_THAN_DAYS)
+        articles = db.get_balanced_feed(limit=FEED_DEFAULT_LIMIT)
+
+        print("\n" + "=" * 60)
+        print(f"SUCCESS! Database updated with {len(articles)} active news cards.")
+        for row in db.get_enabled_categories():
+            print(f"   - {row['label']:<20} {row['article_count']} article(s)")
+        print("=" * 60)
+    finally:
+        db.close_pool()
 
 
 if __name__ == "__main__":
