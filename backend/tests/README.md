@@ -27,7 +27,7 @@ docker compose exec news-cards-backend sh -c 'for t in tests/test_*.py; do echo 
 | `test_telemetry_provenance.py` | yes | No fabricated metrics; every field declares `measured` |
 | `test_admin_auth.py` | yes | The /analytics gate, session cookies, CSRF posture, fail-closed behaviour |
 | `test_api_security.py` | yes | Safe methods, admin auth, input validation, rate limits |
-| `test_swipe_logging.py` | yes | Swipes written once, charts still complete, real status codes logged |
+| `test_swipe_logging.py` | yes | Swipes written once, charts still complete, real status codes logged, request logs buffered off the request path and bounded by retention |
 
 ## Notes
 

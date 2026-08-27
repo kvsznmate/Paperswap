@@ -6,7 +6,7 @@ import threading
 import subprocess
 from contextlib import contextmanager
 
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, execute_values
 from psycopg2.pool import PoolError, ThreadedConnectionPool
 
 
@@ -276,15 +276,27 @@ def init_db():
             )
         ''')
 
-        # Telemetry: Request logs for hourly peak usage distribution
+        # Telemetry: Request logs for hourly peak usage distribution.
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS request_logs (
                 id SERIAL PRIMARY KEY,
                 endpoint TEXT NOT NULL,
                 method TEXT NOT NULL,
+                status_code INTEGER,
                 hour_of_day INTEGER NOT NULL,
                 logged_at TIMESTAMPTZ DEFAULT NOW()
             )
+        ''')
+
+        # Migration for databases created before status_code existed.
+        #
+        # Nullable, and old rows are deliberately NOT backfilled to 200. Those
+        # requests were logged BEFORE the response existed, so their status was
+        # never observed -- writing 200 now would manufacture a measurement,
+        # which is the exact failure ADR-010 exists to prevent. NULL reads as
+        # "not measured", consistent with the provenance contract below.
+        cursor.execute('''
+            ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS status_code INTEGER
         ''')
 
         # Topic catalogue table. Lets clients discover available topics (and their
@@ -319,6 +331,13 @@ def init_db():
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_articles_created_at
             ON articles (created_at DESC)
+        ''')
+
+        # Supports the retention purge below. The analytics panels scan the whole
+        # table anyway, but the nightly DELETE should not have to.
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_request_logs_logged_at
+            ON request_logs (logged_at)
         ''')
 
         # Migration: older rows may hold lowercase/legacy topic names.
@@ -547,6 +566,35 @@ def purge_old_articles(days: int = 7) -> int:
     return removed
 
 
+def purge_old_request_logs(days: int = 7) -> int:
+    """Delete request_logs rows older than `days`, returning the number removed.
+
+    This table previously had no retention policy at all: it grew for the life of
+    the deployment, on a 956 MB VM whose disk is shared with the Postgres volume.
+    An unbounded analytics table is a slow leak with no ceiling.
+
+    The window MUST match the article purge, and the reason is not tidiness.
+    _hourly_usage_distribution and _top_api_endpoints are each a UNION of this
+    table and user_swipes, and user_swipes rows vanish by ON DELETE CASCADE when
+    their article is purged. So user_swipes is already capped at the article
+    retention window. If request_logs were kept longer, the two halves of that
+    union would cover different periods -- swipes would under-represent against
+    every other endpoint, and the distortion would read as a genuine drop in
+    swipe traffic rather than as a retention artefact.
+
+    main.REQUEST_LOG_RETENTION_DAYS therefore defaults to PURGE_OLDER_THAN_DAYS.
+    """
+    with db_cursor(commit=True) as cursor:
+        cursor.execute(
+            "DELETE FROM request_logs WHERE logged_at < NOW() - (%s || ' days')::interval",
+            (days,),
+        )
+        removed = cursor.rowcount
+
+    print(f"[DB Purge] Removed {removed} request log row(s) older than {days} days.")
+    return removed
+
+
 def record_session_heartbeat(session_id: str, user_agent: str = None, ip_address: str = None):
     """Record or refresh a user session heartbeat and update duration."""
     with db_cursor(commit=True) as cursor:
@@ -559,21 +607,42 @@ def record_session_heartbeat(session_id: str, user_agent: str = None, ip_address
         ''', (session_id, user_agent or '', ip_address or ''))
 
 
-def log_request_event(endpoint: str, method: str):
-    """Log an API request hit with its UTC hour, for peak-hours analysis.
+def log_request_events_bulk(rows: list) -> int:
+    """Write a batch of request events in ONE round trip. Returns rows written.
 
-    Swipes are deliberately NOT logged here — user_swipes.swiped_at already
+    `rows` is a list of (endpoint, method, status_code, timestamp) tuples, where
+    timestamp is a timezone-aware UTC datetime captured when the response was
+    produced -- not when the flush ran. That distinction matters: batching means
+    a row can be written up to a flush interval after the request happened, and
+    stamping it with NOW() would smear traffic across hour boundaries in the
+    peak-hours chart.
+
+    Called from main.flush_request_logs() on the scheduler thread. It is never
+    called from the request path: this is a blocking call, and the middleware
+    that used to make it per-request ran on the event loop.
+
+    Swipes are deliberately NOT logged here -- user_swipes.swiped_at already
     carries that timestamp, so a row here would duplicate it. See
     main.LOG_EXCLUDED_PREFIXES.
     """
+    if not rows:
+        return 0
+
+    # hour_of_day is derived from the tuple's own UTC timestamp. The dashboard
+    # labels this axis "utc" and the swipe-derived half of the same chart is
+    # converted the same way, so the two sources cannot land in different buckets.
+    values = [(endpoint, method, status_code, ts.hour, ts)
+              for endpoint, method, status_code, ts in rows]
+
     with db_cursor(commit=True) as cursor:
-        # Explicit UTC: the dashboard labels this axis "utc", and the swipe-derived
-        # half of the same chart is converted the same way, so the two sources
-        # cannot land in different buckets.
-        cursor.execute('''
-            INSERT INTO request_logs (endpoint, method, hour_of_day)
-            VALUES (%s, %s, EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'UTC'))::INTEGER)
-        ''', (endpoint, method))
+        execute_values(
+            cursor,
+            '''INSERT INTO request_logs (endpoint, method, status_code, hour_of_day, logged_at)
+               VALUES %s''',
+            values,
+        )
+
+    return len(values)
 
 
 def _active_users_count(cursor, window_seconds: int = 60) -> int:

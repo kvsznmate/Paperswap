@@ -1,8 +1,11 @@
 import os
 import time
+import logging
 import secrets
 import argparse
+import datetime
 import threading
+import collections
 from typing import Literal, Optional
 from contextlib import asynccontextmanager
 
@@ -33,8 +36,18 @@ import database as db
 REFRESH_INTERVAL_HOURS = float(os.getenv("REFRESH_INTERVAL", "12"))
 # Articles older than this are purged on each refresh.
 PURGE_OLDER_THAN_DAYS = int(os.getenv("PURGE_OLDER_THAN_DAYS", "7"))
+# Retention for the request_logs analytics table. Defaults to the article window
+# deliberately: user_swipes is already capped at that window by ON DELETE CASCADE,
+# and both tables are UNIONed in the hourly-usage and top-endpoint panels. Keeping
+# request_logs longer would make swipes under-represent against every other
+# endpoint -- see database.purge_old_request_logs.
+REQUEST_LOG_RETENTION_DAYS = int(
+    os.getenv("REQUEST_LOG_RETENTION_DAYS", str(PURGE_OLDER_THAN_DAYS))
+)
 # Default deck size served by /api/v1/feed (7 topics x ~10 cards).
 FEED_DEFAULT_LIMIT = int(os.getenv("FEED_DEFAULT_LIMIT", "70"))
+# How often buffered request events are drained into Postgres.
+LOG_FLUSH_INTERVAL_SECONDS = int(os.getenv("LOG_FLUSH_INTERVAL", "10"))
 
 scheduler = BackgroundScheduler()
 
@@ -170,10 +183,89 @@ limiter = Limiter(key_func=get_remote_address)
 
 
 def refresh_pipeline():
-    """One full refresh cycle: fetch + dedup new news, then purge week-old rows
-    (and their cascaded swipes). Run on startup and on the scheduled interval."""
+    """One full refresh cycle: fetch + dedup new news, then purge week-old rows.
+
+    The two purges are one unit on purpose. purge_old_articles cascades into
+    user_swipes, and purge_old_request_logs trims the other half of the same
+    analytics union -- running one without the other leaves the panels reading
+    two different time windows. Run on startup and on the scheduled interval.
+    """
     fetch_and_sync_news_to_db()
     db.purge_old_articles(days=PURGE_OLDER_THAN_DAYS)
+    db.purge_old_request_logs(days=REQUEST_LOG_RETENTION_DAYS)
+
+
+# ---------------------------------------------------------------------------
+# REQUEST LOG BUFFERING
+#
+# log_requests_middleware() appends to _LOG_BUFFER -- an in-memory deque, no
+# I/O -- and flush_request_logs() drains it into Postgres from the scheduler
+# thread every LOG_FLUSH_INTERVAL_SECONDS.
+#
+# Before this, the middleware called db.log_request_event() directly. That is a
+# synchronous connection checkout + INSERT + COMMIT, and the middleware is an
+# `async def`, so it ran ON the event loop: every other in-flight request in the
+# process stalled behind that round trip. Excluding /api/v1/swipe cut the volume
+# but not the mechanism -- one blocking write on the loop is still one too many.
+#
+# Net effect: ~1 INSERT per request becomes 1 INSERT per flush interval, and the
+# request path does no database work at all.
+# ---------------------------------------------------------------------------
+logger = logging.getLogger("paperswap.request_log")
+
+# Bounded, so a traffic spike costs a fixed slice of memory instead of growing
+# until this 956 MB VM starts swapping. At a 10 s interval, 10k slots absorbs a
+# sustained ~1000 req/s. Overflow evicts the OLDEST entry -- which is counted and
+# reported, never swallowed, because silently losing rows would under-report the
+# very panels this table feeds.
+_LOG_BUFFER = collections.deque(maxlen=10_000)
+_LOG_DROPPED = 0
+
+
+def flush_request_logs() -> int:
+    """Drain the buffer into Postgres in one round trip. Returns rows written.
+
+    Runs on the APScheduler thread, where a blocking database call is the right
+    thing rather than the bug.
+
+    Drains at most the length observed on entry, so events arriving mid-drain
+    are left for the next tick instead of letting this loop chase a buffer that
+    is being refilled under it.
+    """
+    global _LOG_DROPPED
+
+    batch = []
+    for _ in range(len(_LOG_BUFFER)):
+        try:
+            batch.append(_LOG_BUFFER.popleft())
+        except IndexError:      # drained by a concurrent flush; nothing left
+            break
+
+    if not batch:
+        return 0
+
+    try:
+        written = db.log_request_events_bulk(batch)
+    except Exception:
+        # Deliberately NOT `except Exception: pass`. The old middleware swallowed
+        # database failures on every single request, so a Postgres outage looked
+        # exactly like an idle server. Surface it.
+        #
+        # The batch is dropped rather than re-queued: telemetry must never be the
+        # reason the process runs out of memory during an outage.
+        logger.warning("Failed to flush %d request log row(s); batch discarded.",
+                       len(batch), exc_info=True)
+        return 0
+
+    if _LOG_DROPPED:
+        logger.warning(
+            "Request log buffer overflowed: %d event(s) dropped before this flush. "
+            "Raise LOG_FLUSH_INTERVAL frequency or the deque maxlen if this recurs.",
+            _LOG_DROPPED,
+        )
+        _LOG_DROPPED = 0
+
+    return written
 
 
 @asynccontextmanager
@@ -202,13 +294,32 @@ async def lifespan(app: FastAPI):
         max_instances=1,   # never let a slow run overlap the next tick
         coalesce=True,     # collapse missed runs into a single execution
     )
+    scheduler.add_job(
+        flush_request_logs,
+        "interval",
+        seconds=LOG_FLUSH_INTERVAL_SECONDS,
+        id="flush_request_logs",
+        replace_existing=True,
+        max_instances=1,   # one drainer at a time
+        coalesce=True,
+    )
     scheduler.start()
-    print(f"[Scheduler] Auto-refresh every {REFRESH_INTERVAL_HOURS} h; "
-          f"purging articles older than {PURGE_OLDER_THAN_DAYS} days.")
+    print(f"[Scheduler] Auto-refresh every {REFRESH_INTERVAL_HOURS} h; purging "
+          f"articles older than {PURGE_OLDER_THAN_DAYS} d and request logs older "
+          f"than {REQUEST_LOG_RETENTION_DAYS} d.")
+    print(f"[Scheduler] Flushing buffered request logs every "
+          f"{LOG_FLUSH_INTERVAL_SECONDS} s.")
 
     yield
 
+    # Stop the scheduler first so no new flush starts, then take the final drain
+    # here. Without it, every deploy silently loses up to one interval's worth of
+    # request events -- and a gap that only ever appears at shutdown is the kind
+    # of artefact that later gets misread as a traffic dip.
     scheduler.shutdown(wait=False)
+    flushed = flush_request_logs()
+    if flushed:
+        print(f"[Server Shutdown] Flushed {flushed} buffered request log row(s).")
     db.close_pool()
 
 
@@ -246,31 +357,51 @@ LOG_EXCLUDED_PREFIXES = ("/static", "/api/v1/telemetry", "/api/v1/swipe")
 
 @app.middleware("http")
 async def log_requests_middleware(request: Request, call_next):
-    """Record request frequency for the peak-hours analytics.
+    """Record request frequency and outcome for the peak-hours analytics.
 
-    Logging happens AFTER call_next so the recorded status is the real one. The
-    previous version wrote a hardcoded "200 OK" before the response existed,
-    which meant every 401, 404 and 422 was reported to the dashboard as a
-    success -- a fabricated measurement of exactly the kind ADR-010 removed.
+    Two rules here, both learned the hard way:
 
-    Rejected requests are surfaced in the live console but NOT written to
-    request_logs: a flood of 401s should not become a flood of INSERTs.
+    1. Logging happens AFTER call_next, so the recorded status is the real one.
+       The original wrote a hardcoded "200 OK" BEFORE the response existed,
+       which reported every 401, 404 and 422 to the dashboard as a success --
+       a fabricated measurement of exactly the kind ADR-010 removed.
+
+    2. Nothing here touches the database. This coroutine runs on the event loop,
+       so the synchronous INSERT it used to make blocked every other in-flight
+       request for the duration of a connection checkout and a round trip.
+       Events go into _LOG_BUFFER; flush_request_logs() drains them on the
+       scheduler thread. See the REQUEST LOG BUFFERING block above.
+
+    Errors ARE persisted now, with their real status. Under the old per-request
+    INSERT they were skipped to stop an error burst becoming a write storm;
+    batching removes that concern, and a status_code column whose rows are all
+    <400 by construction would be decorative.
     """
+    global _LOG_DROPPED
+
     response = await call_next(request)
 
     path = request.url.path
     status_code = response.status_code
-    skip = path.startswith(LOG_EXCLUDED_PREFIXES) or path.endswith(".ico")
 
-    if status_code >= 400:
-        # In-memory only (bounded deque), so an error burst costs no disk.
-        add_log_entry(f"{request.method} {path} - {status_code}", "ERROR")
-    elif not skip:
-        try:
-            db.log_request_event(path, request.method)
-            add_log_entry(f"{request.method} {path} - {status_code}", "HTTP")
-        except Exception:
-            pass  # DB might still be initializing
+    if path.startswith(LOG_EXCLUDED_PREFIXES) or path.endswith(".ico"):
+        # Excluded from the table, but a burst of 401s against the telemetry
+        # routes is worth seeing live -- that is someone probing the admin API.
+        if status_code >= 400:
+            add_log_entry(f"{request.method} {path} - {status_code}", "ERROR")
+        return response
+
+    if len(_LOG_BUFFER) == _LOG_BUFFER.maxlen:
+        _LOG_DROPPED += 1
+    _LOG_BUFFER.append((
+        path,
+        request.method,
+        status_code,
+        datetime.datetime.now(datetime.timezone.utc),
+    ))
+
+    add_log_entry(f"{request.method} {path} - {status_code}",
+                  "ERROR" if status_code >= 400 else "HTTP")
 
     return response
 
@@ -545,9 +676,6 @@ def user_heartbeat(request: Request, req: HeartbeatRequest):
     return JSONResponse(content={"status": "ok", "session_id": req.session_id})
 
 
-import collections
-import datetime
-
 RECENT_LOGS = collections.deque(maxlen=100)
 
 def add_log_entry(message: str, level: str = "INFO"):
@@ -606,9 +734,10 @@ def run_cli_mode():
         print("[1/2] Initializing PostgreSQL Database...")
         db.init_db()
 
-        print("[2/2] Fetching, syncing, and purging old news in the database...")
-        fetch_and_sync_news_to_db()
-        db.purge_old_articles(days=PURGE_OLDER_THAN_DAYS)
+        print("[2/2] Fetching, syncing, and purging expired rows in the database...")
+        # Call the pipeline rather than repeating its steps, so the CLI can never
+        # drift from what the scheduler actually runs.
+        refresh_pipeline()
         articles = db.get_balanced_feed(limit=FEED_DEFAULT_LIMIT)
 
         print("\n" + "=" * 60)
