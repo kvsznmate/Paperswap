@@ -2,12 +2,15 @@ import os
 import time
 import shutil
 import hashlib
+import logging
 import threading
 import subprocess
 from contextlib import contextmanager
 
 from psycopg2.extras import RealDictCursor, execute_values
 from psycopg2.pool import PoolError, ThreadedConnectionPool
+
+logger = logging.getLogger("paperswap.database")
 
 
 def _database_url() -> str:
@@ -340,6 +343,14 @@ def init_db():
             ON request_logs (logged_at)
         ''')
 
+        # Serves two callers: the session retention purge, and
+        # _active_users_count -- which the dashboard polls every 8 seconds with a
+        # 60-second window, so this one earns its keep on reads alone.
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_user_sessions_last_heartbeat
+            ON user_sessions (last_heartbeat)
+        ''')
+
         # Migration: older rows may hold lowercase/legacy topic names.
         cursor.execute("UPDATE articles SET category = UPPER(category) WHERE category <> UPPER(category)")
         for legacy, slug in CATEGORY_ALIASES.items():
@@ -413,18 +424,22 @@ def generate_article_key(title: str, url: str) -> str:
     return hashlib.md5(raw.encode('utf-8')).hexdigest()
 
 
-def is_article_in_db(article_key: str) -> bool:
-    """Check if article already exists in the database."""
-    with db_cursor() as cursor:
-        cursor.execute("SELECT 1 FROM articles WHERE article_key = %s", (article_key,))
-        return cursor.fetchone() is not None
+def save_article(article_data: dict) -> tuple[int, bool]:
+    """Insert the article if its key is new. Returns (article_id, was_inserted).
 
+    `was_inserted` is decided by whether RETURNING produced a row, which
+    Postgres resolves inside this INSERT's own transaction. That is the only way
+    to count new articles correctly.
 
-def save_article(article_data: dict) -> int:
-    """
-    Save a new article if not already present, using Postgres ON CONFLICT for
-    deduplication (replaces SQLite's INSERT OR IGNORE / manual pre-check).
-    Returns the article's database ID.
+    Callers used to ask is_article_in_db() first and treat a False as "this will
+    be an insert". Between that read and this write, another thread could insert
+    the same key; ON CONFLICT absorbed the collision so the stored data stayed
+    right, but the caller's new_count silently over-reported. Three paths reach
+    here concurrently with no mutual exclusion between them -- the scheduler's
+    refresh job, the cold-start fetch inside GET /api/v1/feed, and the
+    background task behind POST /api/v1/cards/refresh.
+
+    The pre-check is gone. This is the only path.
     """
     article_key = generate_article_key(article_data['title'], article_data['url'])
 
@@ -447,15 +462,25 @@ def save_article(article_data: dict) -> int:
         ))
 
         row = cursor.fetchone()
+        if row is not None:
+            # debug, not print: a refresh touches 84 articles, and a per-article
+            # line buries the [DB Sync Summary] that actually carries the result.
+            logger.debug("Inserted article #%s: %.40s", row['id'], article_data['title'])
+            return row['id'], True
+
+        # Key already present, so DO NOTHING returned nothing -- look up the id.
+        cursor.execute("SELECT id FROM articles WHERE article_key = %s", (article_key,))
+        row = cursor.fetchone()
         if row is None:
-            # Duplicate — the row already existed, so look up its id.
-            cursor.execute("SELECT id FROM articles WHERE article_key = %s", (article_key,))
-            row = cursor.fetchone()
-
-        article_id = row['id']
-
-    print(f"[DB] Article ID #{article_id}: {article_data['title'][:40]}...")
-    return article_id
+            # The conflicting row was purged between the INSERT and this SELECT.
+            # READ COMMITTED makes a concurrent purge_old_articles visible
+            # mid-transaction, so this is reachable, if rare. Raise something
+            # legible rather than letting None['id'] surface as a TypeError.
+            raise RuntimeError(
+                f"article_key {article_key} conflicted on INSERT but was gone on "
+                f"re-read; a concurrent purge most likely removed it."
+            )
+        return row['id'], False
 
 
 def get_latest_articles(limit: int = 50, categories=None) -> list:
@@ -542,14 +567,6 @@ def record_user_swipe(article_id: int, action: str) -> None:
         )
 
 
-def article_exists(article_id: int) -> bool:
-    """Cheap existence check for a numeric article id. Lets callers reject an
-    unknown id with a 404 rather than letting it become a 500 from the FK."""
-    with db_cursor() as cursor:
-        cursor.execute("SELECT 1 FROM articles WHERE id = %s", (article_id,))
-        return cursor.fetchone() is not None
-
-
 def purge_old_articles(days: int = 7) -> int:
     """Delete articles older than `days` (based on created_at), returning the
     number of rows removed. Related user_swipes rows are removed automatically
@@ -592,6 +609,37 @@ def purge_old_request_logs(days: int = 7) -> int:
         removed = cursor.rowcount
 
     print(f"[DB Purge] Removed {removed} request log row(s) older than {days} days.")
+    return removed
+
+
+def purge_old_sessions(days: int = 7) -> int:
+    """Delete user_sessions whose last heartbeat is older than `days`.
+
+    Keyed on last_heartbeat, NOT created_at, and that choice is load-bearing.
+    record_session_heartbeat recomputes duration_seconds as NOW() - created_at on
+    every beat, so deleting a row that is still receiving heartbeats would not
+    end that session -- the next beat would re-insert it with a fresh created_at
+    and its duration would silently restart at zero. Purging on last_heartbeat
+    means only sessions that have already gone quiet are removed, and their
+    duration_seconds was final before we touched them.
+
+    Note what this does to the reported figures: total_sessions and
+    avg_session_minutes become "within the retention window" rather than
+    all-time. That is why SESSION_RETENTION_DAYS defaults to the same window as
+    the article purge -- total_swipes is already capped there by ON DELETE
+    CASCADE, and those three numbers sit in the same panel. Three counters in one
+    block covering three different periods is the kind of thing that gets read as
+    a trend.
+    """
+    with db_cursor(commit=True) as cursor:
+        cursor.execute(
+            "DELETE FROM user_sessions "
+            "WHERE last_heartbeat < NOW() - (%s || ' days')::interval",
+            (days,),
+        )
+        removed = cursor.rowcount
+
+    print(f"[DB Purge] Removed {removed} session(s) idle for more than {days} days.")
     return removed
 
 

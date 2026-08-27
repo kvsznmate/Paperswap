@@ -9,11 +9,12 @@ Claims under test:
   5. The swipe limit clears realistic human swipe speed.
   6. The middleware performs NO database I/O; flush_request_logs() does it in
      batches off the request path.
-  7. request_logs is bounded by a retention purge, on the same window as the
-     article purge that caps user_swipes.
+  7. request_logs and user_sessions are bounded by retention purges, on the same
+     window as the article purge that caps user_swipes.
 
 Run:  python tests/test_swipe_logging.py
 """
+import ast
 import os
 import sys
 
@@ -48,9 +49,9 @@ def counts():
         return r["rl"], r["us"]
 
 
-AID = db.save_article({"title": "log rework fixture", "url": "https://example.com/lr",
-                       "description": "d", "source": "s", "published_at": "n",
-                       "category": "TECH"})
+AID, _ = db.save_article({"title": "log rework fixture", "url": "https://example.com/lr",
+                          "description": "d", "source": "s", "published_at": "n",
+                          "category": "TECH"})
 c = TestClient(m.app, raise_server_exceptions=False)
 
 print("--- 1. One swipe writes one row, not two ---")
@@ -160,23 +161,48 @@ check("rows landed in one batch", counts()[0] - rl6 == 2)
 # per-request INSERT; these are what stop it coming back.
 MAIN_SRC = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                              "main.py"), encoding="utf-8").read()
+
+
+def module_calls(src):
+    """Every `name.attr(...)` call in the source, via AST.
+
+    Deliberately not a substring grep: main.py carries a comment explaining what
+    db.log_request_event() used to do and why it went, and a grep for the name
+    matches that comment -- failing the check precisely because the fix is
+    documented. Only real Call nodes count.
+    """
+    return {
+        f"{n.func.value.id}.{n.func.attr}"
+        for n in ast.walk(ast.parse(src))
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and isinstance(n.func.value, ast.Name)
+    }
+
+
 check("static: no per-request DB write left in main.py",
-      "db.log_request_event(" not in MAIN_SRC)
+      "db.log_request_event" not in module_calls(MAIN_SRC))
 check("static: flush job registered on the scheduler",
       'id="flush_request_logs"' in MAIN_SRC)
 check("static: no `except Exception: pass` swallowing DB failures",
       "except Exception:\n            pass" not in MAIN_SRC)
 
-print("\n--- 7. request_logs retention ---")
-# Both halves of the hourly-usage / top-endpoint union must cover the same
-# period. user_swipes is capped by ON DELETE CASCADE at the article window; if
-# request_logs outlives it, swipes silently under-represent on those panels.
-check("retention defaults to the article purge window",
-      os.getenv("REQUEST_LOG_RETENTION_DAYS") is not None
-      or m.REQUEST_LOG_RETENTION_DAYS == m.PURGE_OLDER_THAN_DAYS,
-      f"({m.REQUEST_LOG_RETENTION_DAYS} vs {m.PURGE_OLDER_THAN_DAYS})")
-check("the refresh job runs both purges together",
-      "purge_old_request_logs" in MAIN_SRC.split("def refresh_pipeline")[1][:600])
+print("\n--- 7. Retention ---")
+# Every counter rendered in the same panel must cover the same period.
+# user_swipes is capped by ON DELETE CASCADE at the article window; if
+# request_logs or user_sessions outlive it, the panel mixes time windows.
+for name, actual, expected, env in [
+    ("request log", m.REQUEST_LOG_RETENTION_DAYS, m.PURGE_OLDER_THAN_DAYS, "REQUEST_LOG_RETENTION_DAYS"),
+    ("session", m.SESSION_RETENTION_DAYS, m.PURGE_OLDER_THAN_DAYS, "SESSION_RETENTION_DAYS"),
+]:
+    check(f"{name} retention defaults to the article purge window",
+          os.getenv(env) is not None or actual == expected,
+          f"({actual} vs {expected})")
+
+refresh_src = MAIN_SRC.split("def refresh_pipeline")[1][:900]
+check("the refresh job runs all three purges together",
+      all(p in refresh_src for p in
+          ("purge_old_articles", "purge_old_request_logs", "purge_old_sessions")))
 
 with db.db_cursor(commit=True) as cur:
     cur.execute("INSERT INTO request_logs "
@@ -195,6 +221,35 @@ with db.db_cursor() as cur:
     check("stale row is gone", cur.fetchone()["n"] == 0)
     cur.execute("SELECT COUNT(*) n FROM request_logs WHERE endpoint = '/api/v1/feed'")
     check("rows inside the window survive", cur.fetchone()["n"] > 0)
+
+print("\n--- 7b. Session retention purges on last_heartbeat, not created_at ---")
+# The distinction that matters: a session created long ago but STILL beating is
+# live and must survive. Purging on created_at would delete it, and the next
+# heartbeat would re-insert it with duration_seconds restarted at zero.
+with db.db_cursor(commit=True) as cur:
+    cur.execute(
+        "INSERT INTO user_sessions "
+        "(session_id, created_at, last_heartbeat, duration_seconds) VALUES "
+        "('probe-idle',  NOW() - INTERVAL '400 days', NOW() - INTERVAL '400 days', 60),"
+        "('probe-live',  NOW() - INTERVAL '400 days', NOW(),                       60),"
+        "('probe-fresh', NOW(),                       NOW(),                       10) "
+        "ON CONFLICT (session_id) DO UPDATE SET "
+        "  created_at = EXCLUDED.created_at, last_heartbeat = EXCLUDED.last_heartbeat"
+    )
+
+removed_s = db.purge_old_sessions(days=m.SESSION_RETENTION_DAYS)
+check("purge removed the idle session", removed_s >= 1, f"({removed_s})")
+
+with db.db_cursor() as cur:
+    cur.execute("SELECT session_id FROM user_sessions "
+                "WHERE session_id LIKE 'probe-%' ORDER BY session_id")
+    survivors = [r["session_id"] for r in cur.fetchall()]
+check("long-lived but STILL BEATING session survives", "probe-live" in survivors, f"{survivors}")
+check("fresh session survives", "probe-fresh" in survivors, f"{survivors}")
+check("session idle past the window is gone", "probe-idle" not in survivors, f"{survivors}")
+
+with db.db_cursor(commit=True) as cur:
+    cur.execute("DELETE FROM user_sessions WHERE session_id LIKE 'probe-%'")
 
 m.flush_request_logs()
 db.close_pool()

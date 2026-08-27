@@ -44,6 +44,13 @@ PURGE_OLDER_THAN_DAYS = int(os.getenv("PURGE_OLDER_THAN_DAYS", "7"))
 REQUEST_LOG_RETENTION_DAYS = int(
     os.getenv("REQUEST_LOG_RETENTION_DAYS", str(PURGE_OLDER_THAN_DAYS))
 )
+# Retention for user_sessions, measured from last_heartbeat. Same default and
+# the same reason: total_sessions, total_swipes and total_articles are rendered
+# side by side, and total_swipes is already capped at the article window by
+# ON DELETE CASCADE.
+SESSION_RETENTION_DAYS = int(
+    os.getenv("SESSION_RETENTION_DAYS", str(PURGE_OLDER_THAN_DAYS))
+)
 # Default deck size served by /api/v1/feed (7 topics x ~10 cards).
 FEED_DEFAULT_LIMIT = int(os.getenv("FEED_DEFAULT_LIMIT", "70"))
 # How often buffered request events are drained into Postgres.
@@ -185,14 +192,15 @@ limiter = Limiter(key_func=get_remote_address)
 def refresh_pipeline():
     """One full refresh cycle: fetch + dedup new news, then purge week-old rows.
 
-    The two purges are one unit on purpose. purge_old_articles cascades into
-    user_swipes, and purge_old_request_logs trims the other half of the same
-    analytics union -- running one without the other leaves the panels reading
-    two different time windows. Run on startup and on the scheduled interval.
+    The three purges are one unit on purpose. purge_old_articles cascades into
+    user_swipes; the other two trim the tables that are reported alongside it.
+    Running one without the others leaves the analytics panels reading different
+    time windows in the same view. Run on startup and on the scheduled interval.
     """
     fetch_and_sync_news_to_db()
     db.purge_old_articles(days=PURGE_OLDER_THAN_DAYS)
     db.purge_old_request_logs(days=REQUEST_LOG_RETENTION_DAYS)
+    db.purge_old_sessions(days=SESSION_RETENTION_DAYS)
 
 
 # ---------------------------------------------------------------------------
@@ -305,8 +313,9 @@ async def lifespan(app: FastAPI):
     )
     scheduler.start()
     print(f"[Scheduler] Auto-refresh every {REFRESH_INTERVAL_HOURS} h; purging "
-          f"articles older than {PURGE_OLDER_THAN_DAYS} d and request logs older "
-          f"than {REQUEST_LOG_RETENTION_DAYS} d.")
+          f"articles older than {PURGE_OLDER_THAN_DAYS} d, request logs older "
+          f"than {REQUEST_LOG_RETENTION_DAYS} d, sessions idle over "
+          f"{SESSION_RETENTION_DAYS} d.")
     print(f"[Scheduler] Flushing buffered request logs every "
           f"{LOG_FLUSH_INTERVAL_SECONDS} s.")
 

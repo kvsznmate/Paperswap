@@ -39,6 +39,7 @@ services:
       # halves of the analytics union cover the same period -- see
       # database.purge_old_request_logs before changing it.
       REQUEST_LOG_RETENTION_DAYS: ${REQUEST_LOG_RETENTION_DAYS:-${PURGE_OLDER_THAN_DAYS:-7}}
+      SESSION_RETENTION_DAYS: ${SESSION_RETENTION_DAYS:-${PURGE_OLDER_THAN_DAYS:-7}}
       LOG_FLUSH_INTERVAL: ${LOG_FLUSH_INTERVAL:-10}   # seconds between request-log flushes
     depends_on:
       db:

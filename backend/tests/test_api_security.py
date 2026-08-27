@@ -29,7 +29,7 @@ def check(name, cond, detail=""):
 
 db.init_pool()
 db.init_db()
-VALID_ID = db.save_article({
+VALID_ID, _ = db.save_article({
     "title": "API security fixture", "url": "https://example.com/apisec",
     "description": "d", "source": "s", "published_at": "now", "category": "TECH",
 })
