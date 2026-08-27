@@ -35,6 +35,11 @@ services:
       ADMIN_API_KEY: ${ADMIN_API_KEY:?set ADMIN_API_KEY in backend/.env (openssl rand -hex 32)}
       REFRESH_INTERVAL: ${REFRESH_INTERVAL:-12}       # hours between auto-refreshes
       PURGE_OLDER_THAN_DAYS: ${PURGE_OLDER_THAN_DAYS:-7}  # delete articles older than this
+      # Retention for request_logs. Defaults to the article window so the two
+      # halves of the analytics union cover the same period -- see
+      # database.purge_old_request_logs before changing it.
+      REQUEST_LOG_RETENTION_DAYS: ${REQUEST_LOG_RETENTION_DAYS:-${PURGE_OLDER_THAN_DAYS:-7}}
+      LOG_FLUSH_INTERVAL: ${LOG_FLUSH_INTERVAL:-10}   # seconds between request-log flushes
     depends_on:
       db:
         condition: service_healthy
