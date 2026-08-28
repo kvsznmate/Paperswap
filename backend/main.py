@@ -44,6 +44,29 @@ PURGE_OLDER_THAN_DAYS = int(os.getenv("PURGE_OLDER_THAN_DAYS", "7"))
 REQUEST_LOG_RETENTION_DAYS = int(
     os.getenv("REQUEST_LOG_RETENTION_DAYS", str(PURGE_OLDER_THAN_DAYS))
 )
+# Retention for user_sessions, measured from last_heartbeat. Same default and
+# the same reason: total_sessions, total_swipes and total_articles are rendered
+# side by side, and total_swipes is already capped at the article window by
+# ON DELETE CASCADE.
+SESSION_RETENTION_DAYS = int(
+    os.getenv("SESSION_RETENTION_DAYS", str(PURGE_OLDER_THAN_DAYS))
+)
+# Period the reported average session length covers. Clamped to the retention
+# window below: user_sessions is purged on last_heartbeat, so a metric window
+# wider than retention would compute over the rows that survived and report the
+# result under a label claiming a longer period.
+SESSION_METRIC_WINDOW_DAYS = int(
+    os.getenv("SESSION_METRIC_WINDOW_DAYS", str(SESSION_RETENTION_DAYS))
+)
+if SESSION_METRIC_WINDOW_DAYS > SESSION_RETENTION_DAYS:
+    logging.getLogger("paperswap.config").warning(
+        "SESSION_METRIC_WINDOW_DAYS=%d exceeds SESSION_RETENTION_DAYS=%d; sessions "
+        "older than the retention window no longer exist, so the average would be "
+        "computed over %d days while claiming %d. Clamping to %d.",
+        SESSION_METRIC_WINDOW_DAYS, SESSION_RETENTION_DAYS,
+        SESSION_RETENTION_DAYS, SESSION_METRIC_WINDOW_DAYS, SESSION_RETENTION_DAYS,
+    )
+    SESSION_METRIC_WINDOW_DAYS = SESSION_RETENTION_DAYS
 # Default deck size served by /api/v1/feed (7 topics x ~10 cards).
 FEED_DEFAULT_LIMIT = int(os.getenv("FEED_DEFAULT_LIMIT", "70"))
 # How often buffered request events are drained into Postgres.
@@ -185,14 +208,17 @@ limiter = Limiter(key_func=get_remote_address)
 def refresh_pipeline():
     """One full refresh cycle: fetch + dedup new news, then purge week-old rows.
 
-    The two purges are one unit on purpose. purge_old_articles cascades into
-    user_swipes, and purge_old_request_logs trims the other half of the same
-    analytics union -- running one without the other leaves the panels reading
-    two different time windows. Run on startup and on the scheduled interval.
+    The three purges are one unit on purpose. purge_old_articles cascades into
+    user_swipes; the other two trim the tables that are reported alongside it.
+    Running one without the others leaves the analytics panels reading different
+    time windows in the same view. Run on startup and on the scheduled interval.
     """
     fetch_and_sync_news_to_db()
-    db.purge_old_articles(days=PURGE_OLDER_THAN_DAYS)
-    db.purge_old_request_logs(days=REQUEST_LOG_RETENTION_DAYS)
+    db.purge_old_data(
+        articles_days=PURGE_OLDER_THAN_DAYS,
+        request_logs_days=REQUEST_LOG_RETENTION_DAYS,
+        sessions_days=SESSION_RETENTION_DAYS,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -305,8 +331,9 @@ async def lifespan(app: FastAPI):
     )
     scheduler.start()
     print(f"[Scheduler] Auto-refresh every {REFRESH_INTERVAL_HOURS} h; purging "
-          f"articles older than {PURGE_OLDER_THAN_DAYS} d and request logs older "
-          f"than {REQUEST_LOG_RETENTION_DAYS} d.")
+          f"articles older than {PURGE_OLDER_THAN_DAYS} d, request logs older "
+          f"than {REQUEST_LOG_RETENTION_DAYS} d, sessions idle over "
+          f"{SESSION_RETENTION_DAYS} d.")
     print(f"[Scheduler] Flushing buffered request logs every "
           f"{LOG_FLUSH_INTERVAL_SECONDS} s.")
 
@@ -701,7 +728,7 @@ def get_telemetry_stats(request: Request):
     Protected because it exposes operational detail about the host and
     aggregate user behaviour.
     """
-    stats = db.get_telemetry_summary()
+    stats = db.get_telemetry_summary(session_window_days=SESSION_METRIC_WINDOW_DAYS)
     return JSONResponse(content=stats)
 
 

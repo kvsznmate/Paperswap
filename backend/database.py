@@ -2,12 +2,15 @@ import os
 import time
 import shutil
 import hashlib
+import logging
 import threading
 import subprocess
 from contextlib import contextmanager
 
 from psycopg2.extras import RealDictCursor, execute_values
 from psycopg2.pool import PoolError, ThreadedConnectionPool
+
+logger = logging.getLogger("paperswap.database")
 
 
 def _database_url() -> str:
@@ -340,6 +343,14 @@ def init_db():
             ON request_logs (logged_at)
         ''')
 
+        # Serves two callers: the session retention purge, and
+        # _active_users_count -- which the dashboard polls every 8 seconds with a
+        # 60-second window, so this one earns its keep on reads alone.
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_user_sessions_last_heartbeat
+            ON user_sessions (last_heartbeat)
+        ''')
+
         # Migration: older rows may hold lowercase/legacy topic names.
         cursor.execute("UPDATE articles SET category = UPPER(category) WHERE category <> UPPER(category)")
         for legacy, slug in CATEGORY_ALIASES.items():
@@ -413,18 +424,22 @@ def generate_article_key(title: str, url: str) -> str:
     return hashlib.md5(raw.encode('utf-8')).hexdigest()
 
 
-def is_article_in_db(article_key: str) -> bool:
-    """Check if article already exists in the database."""
-    with db_cursor() as cursor:
-        cursor.execute("SELECT 1 FROM articles WHERE article_key = %s", (article_key,))
-        return cursor.fetchone() is not None
+def save_article(article_data: dict) -> tuple[int, bool]:
+    """Insert the article if its key is new. Returns (article_id, was_inserted).
 
+    `was_inserted` is decided by whether RETURNING produced a row, which
+    Postgres resolves inside this INSERT's own transaction. That is the only way
+    to count new articles correctly.
 
-def save_article(article_data: dict) -> int:
-    """
-    Save a new article if not already present, using Postgres ON CONFLICT for
-    deduplication (replaces SQLite's INSERT OR IGNORE / manual pre-check).
-    Returns the article's database ID.
+    Callers used to ask is_article_in_db() first and treat a False as "this will
+    be an insert". Between that read and this write, another thread could insert
+    the same key; ON CONFLICT absorbed the collision so the stored data stayed
+    right, but the caller's new_count silently over-reported. Three paths reach
+    here concurrently with no mutual exclusion between them -- the scheduler's
+    refresh job, the cold-start fetch inside GET /api/v1/feed, and the
+    background task behind POST /api/v1/cards/refresh.
+
+    The pre-check is gone. This is the only path.
     """
     article_key = generate_article_key(article_data['title'], article_data['url'])
 
@@ -447,15 +462,25 @@ def save_article(article_data: dict) -> int:
         ))
 
         row = cursor.fetchone()
+        if row is not None:
+            # debug, not print: a refresh touches 84 articles, and a per-article
+            # line buries the [DB Sync Summary] that actually carries the result.
+            logger.debug("Inserted article #%s: %.40s", row['id'], article_data['title'])
+            return row['id'], True
+
+        # Key already present, so DO NOTHING returned nothing -- look up the id.
+        cursor.execute("SELECT id FROM articles WHERE article_key = %s", (article_key,))
+        row = cursor.fetchone()
         if row is None:
-            # Duplicate — the row already existed, so look up its id.
-            cursor.execute("SELECT id FROM articles WHERE article_key = %s", (article_key,))
-            row = cursor.fetchone()
-
-        article_id = row['id']
-
-    print(f"[DB] Article ID #{article_id}: {article_data['title'][:40]}...")
-    return article_id
+            # The conflicting row was purged between the INSERT and this SELECT.
+            # READ COMMITTED makes a concurrent purge_old_articles visible
+            # mid-transaction, so this is reachable, if rare. Raise something
+            # legible rather than letting None['id'] surface as a TypeError.
+            raise RuntimeError(
+                f"article_key {article_key} conflicted on INSERT but was gone on "
+                f"re-read; a concurrent purge most likely removed it."
+            )
+        return row['id'], False
 
 
 def get_latest_articles(limit: int = 50, categories=None) -> list:
@@ -542,14 +567,6 @@ def record_user_swipe(article_id: int, action: str) -> None:
         )
 
 
-def article_exists(article_id: int) -> bool:
-    """Cheap existence check for a numeric article id. Lets callers reject an
-    unknown id with a 404 rather than letting it become a 500 from the FK."""
-    with db_cursor() as cursor:
-        cursor.execute("SELECT 1 FROM articles WHERE id = %s", (article_id,))
-        return cursor.fetchone() is not None
-
-
 def purge_old_articles(days: int = 7) -> int:
     """Delete articles older than `days` (based on created_at), returning the
     number of rows removed. Related user_swipes rows are removed automatically
@@ -593,6 +610,55 @@ def purge_old_request_logs(days: int = 7) -> int:
 
     print(f"[DB Purge] Removed {removed} request log row(s) older than {days} days.")
     return removed
+
+
+def purge_old_sessions(days: int = 7) -> int:
+    """Delete user_sessions whose last heartbeat is older than `days`.
+
+    Keyed on last_heartbeat, NOT created_at, and that choice is load-bearing.
+    record_session_heartbeat recomputes duration_seconds as NOW() - created_at on
+    every beat, so deleting a row that is still receiving heartbeats would not
+    end that session -- the next beat would re-insert it with a fresh created_at
+    and its duration would silently restart at zero. Purging on last_heartbeat
+    means only sessions that have already gone quiet are removed, and their
+    duration_seconds was final before we touched them.
+
+    Note what this does to the reported figures: total_sessions and
+    avg_session_minutes become "within the retention window" rather than
+    all-time. That is why SESSION_RETENTION_DAYS defaults to the same window as
+    the article purge -- total_swipes is already capped there by ON DELETE
+    CASCADE, and those three numbers sit in the same panel. Three counters in one
+    block covering three different periods is the kind of thing that gets read as
+    a trend.
+    """
+    with db_cursor(commit=True) as cursor:
+        cursor.execute(
+            "DELETE FROM user_sessions "
+            "WHERE last_heartbeat < NOW() - (%s || ' days')::interval",
+            (days,),
+        )
+        removed = cursor.rowcount
+
+    print(f"[DB Purge] Removed {removed} session(s) idle for more than {days} days.")
+    return removed
+
+
+def purge_old_data(articles_days: int, request_logs_days: int,
+                   sessions_days: int) -> dict:
+    """Run every retention purge. Returns rows removed, per table.
+
+    Deliberately three transactions rather than one. If the session DELETE
+    fails, the article and log purges have already committed and their counts
+    are still reported -- a single transaction would roll all three back and
+    return nothing, which on a disk-pressure incident is the worst moment to
+    learn that the purge is all-or-nothing. Each table also keeps its own log
+    line that way.
+    """
+    return {
+        "articles": purge_old_articles(days=articles_days),
+        "request_logs": purge_old_request_logs(days=request_logs_days),
+        "user_sessions": purge_old_sessions(days=sessions_days),
+    }
 
 
 def record_session_heartbeat(session_id: str, user_agent: str = None, ip_address: str = None):
@@ -661,20 +727,38 @@ def get_active_users_count(window_seconds: int = 60) -> int:
         return _active_users_count(cursor, window_seconds)
 
 
-def _avg_session_duration_minutes(cursor) -> float:
+def _avg_session_duration_minutes(cursor, days: int) -> float:
+    """Mean session length over the last `days`, in minutes.
+
+    Windowed, not lifetime. An all-time average drifts toward a historical mean
+    and stops responding to current behaviour -- six months in, a week of
+    unusually long sessions barely moves it, and the number keeps being rendered
+    under a label that implies it describes now.
+
+    `days` must be <= the session retention window. user_sessions is purged on
+    last_heartbeat, so asking for 30 days of rows when only 7 days are kept
+    returns a 7-day average wearing a "30 day" label. main.py clamps it, because
+    that is where both numbers are configured.
+    """
     cursor.execute('''
         SELECT COALESCE(AVG(duration_seconds), 0) as avg_seconds
         FROM user_sessions
-    ''')
+        WHERE last_heartbeat >= NOW() - (%s || ' days')::interval
+    ''', (days,))
     row = cursor.fetchone()
     avg_sec = float(row['avg_seconds']) if row else 0.0
     return round(avg_sec / 60.0, 1)
 
 
-def get_avg_session_duration_minutes() -> float:
-    """Calculate average connected session duration in minutes."""
+def get_avg_session_duration_minutes(days: int) -> float:
+    """Single-query path for the windowed session average.
+
+    Currently unused -- get_telemetry_summary computes this on its own shared
+    connection. `days` is deliberately required: a default would let a caller
+    reintroduce the lifetime average without noticing.
+    """
     with db_cursor() as cursor:
-        return _avg_session_duration_minutes(cursor)
+        return _avg_session_duration_minutes(cursor, days)
 
 
 def _hourly_usage_distribution(cursor) -> list:
@@ -1237,13 +1321,17 @@ def get_free_tier_allowances(system: dict = None) -> dict:
     }
 
 
-def get_telemetry_summary() -> dict:
+def get_telemetry_summary(session_window_days: int = 7) -> dict:
     """Combine engagement analytics with live system measurements.
 
     Provenance contract: every numeric field below is either read at call time
     (`measured: true`) or reported as unavailable (`measured: false` with a null
     value and an `unavailable_reason`). Nothing here is estimated or hardcoded.
     Documented in docs/ARCHITECTURE.md, ADR-010.
+
+    `session_window_days` is the period avg_session_minutes covers, and it is
+    echoed back in the payload so the figure is never separated from the window
+    it describes.
     """
     # All DB-backed panels share ONE pooled connection.
     with db_cursor() as cursor:
@@ -1252,7 +1340,7 @@ def get_telemetry_summary() -> dict:
         top_articles = _top_swiped_articles(cursor, 6)
         top_endpoints = _top_api_endpoints(cursor, 6)
         active_users = _active_users_count(cursor, 60)
-        avg_duration = _avg_session_duration_minutes(cursor)
+        avg_duration = _avg_session_duration_minutes(cursor, session_window_days)
         hourly_distribution = _hourly_usage_distribution(cursor)
         database_storage = _database_storage_sizes(cursor)
 
@@ -1293,6 +1381,7 @@ def get_telemetry_summary() -> dict:
         "user_analytics": {
             "currently_connected_users": active_users,
             "avg_session_minutes": avg_duration,
+            "avg_session_window_days": session_window_days,
             "total_sessions": db_analytics["total_sessions"],
             "total_swipes": db_analytics["total_swipes"],
             "total_articles": db_analytics["total_articles"]

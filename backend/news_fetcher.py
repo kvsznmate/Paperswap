@@ -458,9 +458,9 @@ def fetch_and_sync_news_to_db(categories=None) -> list:
     """
     1. Fetches ARTICLES_PER_CATEGORY items for every enabled topic
        (Tech, Finance, Sports, Politics, Programming, Science, Beauty).
-    2. Checks the database to see if each article already exists.
-    3. Saves ONLY new articles (deduplicated by MD5 article_key).
-    4. Returns a fresh topic-balanced deck from the database.
+    2. Inserts each one with ON CONFLICT DO NOTHING, so deduplication by MD5
+       article_key is resolved atomically inside the write itself.
+    3. Returns a fresh topic-balanced deck from the database.
 
     Cards are rendered on the phone from the article fields, not server-side.
     """
@@ -505,13 +505,15 @@ def fetch_and_sync_news_to_db(categories=None) -> list:
             item.get('source', ''),
         )
 
-        article_key = db.generate_article_key(item['title'], item['url'])
-
-        if db.is_article_in_db(article_key):
-            skipped_count += 1
-        else:
-            db.save_article(item)
-            new_count += 1
+        # No read-then-write pre-check. ON CONFLICT settles new-vs-duplicate
+        # inside the INSERT's own transaction, so these counts stay correct even
+        # when the scheduler job, a cold-start /api/v1/feed fetch and a
+        # POST /cards/refresh background task all run at the same moment. The
+        # old is_article_in_db() gate left a window in which two of them could
+        # both decide an article was new and both increment new_count.
+        _, inserted = db.save_article(item)
+        new_count += inserted
+        skipped_count += not inserted
 
     breakdown = ", ".join(f"{cat} {count}" for cat, count in per_topic_counts.items())
     print(f"[DB Sync Summary] {len(raw_articles)} items across {len(target_categories)} topics "

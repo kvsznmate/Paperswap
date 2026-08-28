@@ -12,6 +12,7 @@ docker compose exec news-cards-backend python tests/test_telemetry_provenance.py
 docker compose exec news-cards-backend python tests/test_admin_auth.py
 docker compose exec news-cards-backend python tests/test_api_security.py
 docker compose exec news-cards-backend python tests/test_swipe_logging.py
+docker compose exec news-cards-backend python tests/test_dedup.py
 ```
 
 Or all of them:
@@ -28,6 +29,7 @@ docker compose exec news-cards-backend sh -c 'for t in tests/test_*.py; do echo 
 | `test_admin_auth.py` | yes | The /analytics gate, session cookies, CSRF posture, fail-closed behaviour |
 | `test_api_security.py` | yes | Safe methods, admin auth, input validation, rate limits |
 | `test_swipe_logging.py` | yes | Swipes written once, charts still complete, real status codes logged, request logs buffered off the request path and bounded by retention |
+| `test_dedup.py` | yes | `save_article` reports whether it inserted; no read-then-write pre-check; concurrent inserts of one key produce exactly one winner |
 
 ## Notes
 

@@ -56,7 +56,7 @@ db.init_pool()
 db.init_db()
 DBNAME = _dbname()
 
-valid_id = db.save_article({
+valid_id, _ = db.save_article({
     "title": "PS-07 live fixture", "url": "https://example.com/ps07",
     "description": "d", "source": "s", "published_at": "now", "category": "TECH",
 })
