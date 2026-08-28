@@ -51,6 +51,22 @@ REQUEST_LOG_RETENTION_DAYS = int(
 SESSION_RETENTION_DAYS = int(
     os.getenv("SESSION_RETENTION_DAYS", str(PURGE_OLDER_THAN_DAYS))
 )
+# Period the reported average session length covers. Clamped to the retention
+# window below: user_sessions is purged on last_heartbeat, so a metric window
+# wider than retention would compute over the rows that survived and report the
+# result under a label claiming a longer period.
+SESSION_METRIC_WINDOW_DAYS = int(
+    os.getenv("SESSION_METRIC_WINDOW_DAYS", str(SESSION_RETENTION_DAYS))
+)
+if SESSION_METRIC_WINDOW_DAYS > SESSION_RETENTION_DAYS:
+    logging.getLogger("paperswap.config").warning(
+        "SESSION_METRIC_WINDOW_DAYS=%d exceeds SESSION_RETENTION_DAYS=%d; sessions "
+        "older than the retention window no longer exist, so the average would be "
+        "computed over %d days while claiming %d. Clamping to %d.",
+        SESSION_METRIC_WINDOW_DAYS, SESSION_RETENTION_DAYS,
+        SESSION_RETENTION_DAYS, SESSION_METRIC_WINDOW_DAYS, SESSION_RETENTION_DAYS,
+    )
+    SESSION_METRIC_WINDOW_DAYS = SESSION_RETENTION_DAYS
 # Default deck size served by /api/v1/feed (7 topics x ~10 cards).
 FEED_DEFAULT_LIMIT = int(os.getenv("FEED_DEFAULT_LIMIT", "70"))
 # How often buffered request events are drained into Postgres.
@@ -198,9 +214,11 @@ def refresh_pipeline():
     time windows in the same view. Run on startup and on the scheduled interval.
     """
     fetch_and_sync_news_to_db()
-    db.purge_old_articles(days=PURGE_OLDER_THAN_DAYS)
-    db.purge_old_request_logs(days=REQUEST_LOG_RETENTION_DAYS)
-    db.purge_old_sessions(days=SESSION_RETENTION_DAYS)
+    db.purge_old_data(
+        articles_days=PURGE_OLDER_THAN_DAYS,
+        request_logs_days=REQUEST_LOG_RETENTION_DAYS,
+        sessions_days=SESSION_RETENTION_DAYS,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -710,7 +728,7 @@ def get_telemetry_stats(request: Request):
     Protected because it exposes operational detail about the host and
     aggregate user behaviour.
     """
-    stats = db.get_telemetry_summary()
+    stats = db.get_telemetry_summary(session_window_days=SESSION_METRIC_WINDOW_DAYS)
     return JSONResponse(content=stats)
 
 

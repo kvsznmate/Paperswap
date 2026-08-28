@@ -11,6 +11,8 @@ Claims under test:
      batches off the request path.
   7. request_logs and user_sessions are bounded by retention purges, on the same
      window as the article purge that caps user_swipes.
+  8. The average-session-length metric is windowed rather than lifetime, and its
+     window can never exceed the retention window it reads from.
 
 Run:  python tests/test_swipe_logging.py
 """
@@ -200,8 +202,13 @@ for name, actual, expected, env in [
           f"({actual} vs {expected})")
 
 refresh_src = MAIN_SRC.split("def refresh_pipeline")[1][:900]
-check("the refresh job runs all three purges together",
-      all(p in refresh_src for p in
+check("the refresh job runs the combined purge", "purge_old_data" in refresh_src)
+
+DB_SRC = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "database.py"), encoding="utf-8").read()
+purge_src = DB_SRC.split("def purge_old_data")[1][:900]
+check("purge_old_data covers all three tables",
+      all(p in purge_src for p in
           ("purge_old_articles", "purge_old_request_logs", "purge_old_sessions")))
 
 with db.db_cursor(commit=True) as cur:
@@ -250,6 +257,50 @@ check("session idle past the window is gone", "probe-idle" not in survivors, f"{
 
 with db.db_cursor(commit=True) as cur:
     cur.execute("DELETE FROM user_sessions WHERE session_id LIKE 'probe-%'")
+
+print("\n--- 7c. Session duration is windowed, not a lifetime average ---")
+# Runs inside a db_cursor() WITHOUT commit, so the DELETE and INSERTs below are
+# rolled back on exit. That makes the arithmetic deterministic without touching
+# whatever real sessions the database already holds.
+with db.db_cursor() as cur:
+    cur.execute("DELETE FROM user_sessions")
+    cur.execute(
+        "INSERT INTO user_sessions "
+        "(session_id, created_at, last_heartbeat, duration_seconds) VALUES "
+        "('m-fresh', NOW(),                     NOW(),                      60),"
+        "('m-old',   NOW() - INTERVAL '5 days', NOW() - INTERVAL '5 days',  600)"
+    )
+    w1 = db._avg_session_duration_minutes(cur, 1)
+    w7 = db._avg_session_duration_minutes(cur, 7)
+
+check("1-day window sees only the fresh session", w1 == 1.0, f"({w1} min)")
+check("7-day window averages both", w7 == 5.5, f"({w7} min)")
+check("the window changes the result -- a lifetime average could not", w1 != w7)
+
+# The metric window must not outrun the data. Sessions are purged on
+# last_heartbeat, so a wider window would average the surviving rows and label
+# the answer with a period those rows do not cover.
+check("metric window defaults to the session retention window",
+      os.getenv("SESSION_METRIC_WINDOW_DAYS") is not None
+      or m.SESSION_METRIC_WINDOW_DAYS == m.SESSION_RETENTION_DAYS,
+      f"({m.SESSION_METRIC_WINDOW_DAYS} vs {m.SESSION_RETENTION_DAYS})")
+check("metric window never exceeds retention",
+      m.SESSION_METRIC_WINDOW_DAYS <= m.SESSION_RETENTION_DAYS,
+      f"({m.SESSION_METRIC_WINDOW_DAYS} vs {m.SESSION_RETENTION_DAYS})")
+
+stats = db.get_telemetry_summary(session_window_days=m.SESSION_METRIC_WINDOW_DAYS)
+check("payload reports the window beside the figure",
+      stats["user_analytics"]["avg_session_window_days"] == m.SESSION_METRIC_WINDOW_DAYS,
+      f"({stats['user_analytics'].get('avg_session_window_days')})")
+
+removed_all = db.purge_old_data(
+    articles_days=m.PURGE_OLDER_THAN_DAYS,
+    request_logs_days=m.REQUEST_LOG_RETENTION_DAYS,
+    sessions_days=m.SESSION_RETENTION_DAYS,
+)
+check("purge_old_data returns per-table counts",
+      set(removed_all) == {"articles", "request_logs", "user_sessions"}, f"{removed_all}")
+check("the counts are integers", all(isinstance(v, int) for v in removed_all.values()))
 
 m.flush_request_logs()
 db.close_pool()

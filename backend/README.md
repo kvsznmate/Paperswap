@@ -61,6 +61,41 @@ Three details worth knowing before editing queries:
 
 ---
 
+## Environment
+
+Set in `.env` (see `.env.example` for the annotated version). Compose refuses to start if any **required** value is missing.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `NEWS_API_KEY` | — | **Required.** NewsAPI key for ingestion |
+| `ADMIN_API_KEY` | — | **Required.** Guards `POST /cards/refresh` and both telemetry routes. Unset means those endpoints return `503`, never open |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` | — | **Required.** Applied at initdb time only — see the rotation note below |
+| `POSTGRES_DB` | `newsdb` | Database name |
+| `DATABASE_URL` | assembled | Local runs only; under Compose it's built from the three above |
+| `ADMIN_SESSION_TTL` | `43200` | `/analytics` sign-in lifetime, seconds. Sessions are in-memory, so a restart signs everyone out |
+| `ADMIN_COOKIE_SECURE` | `false` | Flip to `true` once HTTPS terminates in front. A Secure cookie over plain HTTP is silently dropped |
+| `ARTICLES_PER_CATEGORY` | `12` | Per topic per refresh — 7 topics × 12 = 84 candidates |
+| `FEED_DEFAULT_LIMIT` | `70` | Cards returned by `GET /api/v1/feed` |
+| `REFRESH_INTERVAL` | `12` | Hours between background refreshes |
+| `LOG_FLUSH_INTERVAL` | `10` | Seconds between request-log buffer flushes |
+
+### Retention windows
+
+| Variable | Default | Purges on |
+| --- | --- | --- |
+| `PURGE_OLDER_THAN_DAYS` | `7` | `articles.created_at` — cascades into `user_swipes` |
+| `REQUEST_LOG_RETENTION_DAYS` | `PURGE_OLDER_THAN_DAYS` | `request_logs.logged_at` |
+| `SESSION_RETENTION_DAYS` | `PURGE_OLDER_THAN_DAYS` | `user_sessions.last_heartbeat` |
+| `SESSION_METRIC_WINDOW_DAYS` | `SESSION_RETENTION_DAYS` | not a purge — the period `avg_session_minutes` covers |
+
+**The three retention windows default to the same value on purpose, and should stay equal.** `user_swipes` has no window of its own; it is pinned to the article window by `ON DELETE CASCADE`. The analytics dashboard then renders these tables *together*: the hourly-usage and top-endpoint panels are a UNION of `request_logs` and `user_swipes`, and `total_articles` / `total_swipes` / `total_sessions` sit in one row of KPI cards.
+
+Raise one window in isolation and a single panel starts reporting two different periods side by side. The failure is quiet — nothing errors, the chart just shows swipes falling away against every other endpoint, which reads as a change in user behaviour rather than a config choice. If you do want divergent windows, the panels have to separate their sources first.
+
+`SESSION_METRIC_WINDOW_DAYS` is the one that may legitimately differ, but only *downward*. Sessions are purged on `last_heartbeat`, so a 30-day average over 7 days of surviving rows is a 7-day number wearing a 30-day label. Setting it above retention logs a warning at startup and clamps; setting it below is fine (`1` gives a same-day figure). The effective window is returned in the telemetry payload as `avg_session_window_days`, so the figure never travels without it.
+
+---
+
 ## Operational notes
 
 Things that have caused real outages here:

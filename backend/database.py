@@ -643,6 +643,24 @@ def purge_old_sessions(days: int = 7) -> int:
     return removed
 
 
+def purge_old_data(articles_days: int, request_logs_days: int,
+                   sessions_days: int) -> dict:
+    """Run every retention purge. Returns rows removed, per table.
+
+    Deliberately three transactions rather than one. If the session DELETE
+    fails, the article and log purges have already committed and their counts
+    are still reported -- a single transaction would roll all three back and
+    return nothing, which on a disk-pressure incident is the worst moment to
+    learn that the purge is all-or-nothing. Each table also keeps its own log
+    line that way.
+    """
+    return {
+        "articles": purge_old_articles(days=articles_days),
+        "request_logs": purge_old_request_logs(days=request_logs_days),
+        "user_sessions": purge_old_sessions(days=sessions_days),
+    }
+
+
 def record_session_heartbeat(session_id: str, user_agent: str = None, ip_address: str = None):
     """Record or refresh a user session heartbeat and update duration."""
     with db_cursor(commit=True) as cursor:
@@ -709,20 +727,38 @@ def get_active_users_count(window_seconds: int = 60) -> int:
         return _active_users_count(cursor, window_seconds)
 
 
-def _avg_session_duration_minutes(cursor) -> float:
+def _avg_session_duration_minutes(cursor, days: int) -> float:
+    """Mean session length over the last `days`, in minutes.
+
+    Windowed, not lifetime. An all-time average drifts toward a historical mean
+    and stops responding to current behaviour -- six months in, a week of
+    unusually long sessions barely moves it, and the number keeps being rendered
+    under a label that implies it describes now.
+
+    `days` must be <= the session retention window. user_sessions is purged on
+    last_heartbeat, so asking for 30 days of rows when only 7 days are kept
+    returns a 7-day average wearing a "30 day" label. main.py clamps it, because
+    that is where both numbers are configured.
+    """
     cursor.execute('''
         SELECT COALESCE(AVG(duration_seconds), 0) as avg_seconds
         FROM user_sessions
-    ''')
+        WHERE last_heartbeat >= NOW() - (%s || ' days')::interval
+    ''', (days,))
     row = cursor.fetchone()
     avg_sec = float(row['avg_seconds']) if row else 0.0
     return round(avg_sec / 60.0, 1)
 
 
-def get_avg_session_duration_minutes() -> float:
-    """Calculate average connected session duration in minutes."""
+def get_avg_session_duration_minutes(days: int) -> float:
+    """Single-query path for the windowed session average.
+
+    Currently unused -- get_telemetry_summary computes this on its own shared
+    connection. `days` is deliberately required: a default would let a caller
+    reintroduce the lifetime average without noticing.
+    """
     with db_cursor() as cursor:
-        return _avg_session_duration_minutes(cursor)
+        return _avg_session_duration_minutes(cursor, days)
 
 
 def _hourly_usage_distribution(cursor) -> list:
@@ -1285,13 +1321,17 @@ def get_free_tier_allowances(system: dict = None) -> dict:
     }
 
 
-def get_telemetry_summary() -> dict:
+def get_telemetry_summary(session_window_days: int = 7) -> dict:
     """Combine engagement analytics with live system measurements.
 
     Provenance contract: every numeric field below is either read at call time
     (`measured: true`) or reported as unavailable (`measured: false` with a null
     value and an `unavailable_reason`). Nothing here is estimated or hardcoded.
     Documented in docs/ARCHITECTURE.md, ADR-010.
+
+    `session_window_days` is the period avg_session_minutes covers, and it is
+    echoed back in the payload so the figure is never separated from the window
+    it describes.
     """
     # All DB-backed panels share ONE pooled connection.
     with db_cursor() as cursor:
@@ -1300,7 +1340,7 @@ def get_telemetry_summary() -> dict:
         top_articles = _top_swiped_articles(cursor, 6)
         top_endpoints = _top_api_endpoints(cursor, 6)
         active_users = _active_users_count(cursor, 60)
-        avg_duration = _avg_session_duration_minutes(cursor)
+        avg_duration = _avg_session_duration_minutes(cursor, session_window_days)
         hourly_distribution = _hourly_usage_distribution(cursor)
         database_storage = _database_storage_sizes(cursor)
 
@@ -1341,6 +1381,7 @@ def get_telemetry_summary() -> dict:
         "user_analytics": {
             "currently_connected_users": active_users,
             "avg_session_minutes": avg_duration,
+            "avg_session_window_days": session_window_days,
             "total_sessions": db_analytics["total_sessions"],
             "total_swipes": db_analytics["total_swipes"],
             "total_articles": db_analytics["total_articles"]
