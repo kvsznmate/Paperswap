@@ -6,3 +6,19 @@ feedparser>=6.0.10
 psycopg2-binary>=2.9.9
 apscheduler>=3.10.0
 slowapi>=0.1.9
+
+# --- enrichment.py only ---
+# Not imported by main.py. The API container installs them because it shares an
+# image with the nightly job, but nothing here is loaded at request time.
+#
+# onnxruntime rather than torch: torch costs ~350 MB resident on import alone,
+# before a single weight loads, which does not fit beside Postgres on a 956 MB
+# instance. onnxruntime + an int8 MiniLM export is ~150 MB peak.
+#
+# No transformers, no sentence-transformers -- both pull torch transitively.
+# Tokenization is the Rust `tokenizers` package direct; mean pooling and L2
+# normalization are done in numpy in enrichment.Embedder.
+numpy>=1.26.0
+onnxruntime>=1.17.0
+tokenizers>=0.15.0
+trafilatura>=1.6.0

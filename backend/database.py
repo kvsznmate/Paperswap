@@ -1,5 +1,6 @@
 import os
 import time
+import json
 import shutil
 import hashlib
 import logging
@@ -87,6 +88,31 @@ def clean_category_filter(categories) -> list:
     return cleaned
 
 
+def pack_embedding(vector) -> bytes:
+    """Pack a 384-dim sentence embedding into BYTEA as little-endian float32.
+
+    float32, not float16. An earlier draft chose float16 to halve the 1.5 KB per
+    row, which matters at hundreds of thousands of rows. This deployment holds
+    roughly 600 articles at a time (84 per refresh, 7-day retention), so the
+    saving is under a megabyte and not worth the precision question.
+
+    Explicit '<f4' so a dump written on one machine reads correctly on another.
+    numpy's native byte order is host-dependent; the analysis notebook runs on a
+    laptop and the writer runs on the VM.
+    """
+    import numpy as np
+    return np.asarray(vector, dtype='<f4').tobytes()
+
+
+def unpack_embedding(blob) -> "object":
+    """Inverse of pack_embedding. Returns None for a NULL column so callers can
+    distinguish 'not embedded yet' from 'embedded to a zero vector'."""
+    if blob is None:
+        return None
+    import numpy as np
+    return np.frombuffer(bytes(blob), dtype='<f4')
+
+
 def _decorate_articles(rows: list) -> list:
     """Shared post-processing: JSON-safe timestamps, feed index, and the topic
     label/accent colour so clients don't need their own hardcoded colour map."""
@@ -97,6 +123,20 @@ def _decorate_articles(rows: list) -> list:
 
         if item.get('created_at') is not None:
             item['created_at'] = item['created_at'].isoformat()
+
+        # Stored as a JSON string; the client wants an array. A row enriched by
+        # an older version of the job, or not enriched at all, yields [] rather
+        # than null so the Android card can iterate unconditionally.
+        raw_bullets = item.pop('summary_bullets', None)
+        if raw_bullets:
+            try:
+                parsed = json.loads(raw_bullets)
+                item['summary_bullets'] = parsed if isinstance(parsed, list) else []
+            except (ValueError, TypeError):
+                logger.warning("Unparseable summary_bullets on article %s", item.get('id'))
+                item['summary_bullets'] = []
+        else:
+            item['summary_bullets'] = []
 
         slug = normalize_category(item.get('category'))
         meta = CATEGORIES[slug]
@@ -257,6 +297,22 @@ def init_db():
             )
         ''')
 
+        # Enrichment output, written by the nightly enrichment.py job.
+        #
+        # full_text is the extracted article body -- the RSS description is one
+        # or two sentences, and running an extractive summarizer over two
+        # sentences returns those two sentences. summary_bullets is a JSON array
+        # of strings. embedding is 384 float32 values packed little-endian; see
+        # database.pack_embedding / unpack_embedding.
+        #
+        # enriched_at is the completion marker AND the idempotency key: the job
+        # selects WHERE enriched_at IS NULL, so a crash mid-batch resumes rather
+        # than reprocessing. Never set it before all stages for that row finish.
+        cursor.execute('ALTER TABLE articles ADD COLUMN IF NOT EXISTS full_text TEXT')
+        cursor.execute('ALTER TABLE articles ADD COLUMN IF NOT EXISTS summary_bullets TEXT')
+        cursor.execute('ALTER TABLE articles ADD COLUMN IF NOT EXISTS embedding BYTEA')
+        cursor.execute('ALTER TABLE articles ADD COLUMN IF NOT EXISTS enriched_at TIMESTAMPTZ')
+
         # User swipe actions (Read / Pass).
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_swipes (
@@ -265,6 +321,83 @@ def init_db():
                 action TEXT NOT NULL CHECK (action IN ('read', 'pass')),
                 swiped_at TIMESTAMPTZ DEFAULT NOW()
             )
+        ''')
+
+        # Interaction signals, added after the table shipped.
+        #
+        # These are recommender features, not analytics. Direction alone is a
+        # weak label: a fast right-swipe on a headline and a right-swipe after
+        # reading the back of the card are the same row today, but they mean
+        # very different things about interest.
+        #
+        # Both are NULLABLE and old rows are deliberately NOT backfilled. A
+        # swipe recorded before the client sent these fields had no dwell or
+        # flip observed -- writing 0 now would manufacture a measurement rather
+        # than record one. NULL reads as "not measured", matching the
+        # provenance contract used for request_logs.status_code above.
+        #
+        # Any model trained on this table must filter on `dwell_ms IS NOT NULL`
+        # rather than treating NULL as zero engagement.
+        cursor.execute('''
+            ALTER TABLE user_swipes ADD COLUMN IF NOT EXISTS dwell_ms INTEGER
+        ''')
+        cursor.execute('''
+            ALTER TABLE user_swipes ADD COLUMN IF NOT EXISTS flipped BOOLEAN
+        ''')
+
+        # ------------------------------------------------------------------
+        # swipe_events -- the training set. NEVER purged.
+        #
+        # user_swipes.article_id is ON DELETE CASCADE, so every swipe recorded
+        # there is destroyed when its article passes PURGE_OLDER_THAN_DAYS. That
+        # is correct for the analytics panels, which deliberately keep all their
+        # retention windows aligned so a UNION never mixes periods.
+        #
+        # It is fatal for the recommender. Swipe history is the one asset in
+        # this project that cannot be regenerated -- articles re-fetch, weights
+        # re-download, embeddings recompute, but a swipe that happened and was
+        # deleted is gone. Capping the training set at seven days caps the model
+        # at seven days of signal forever.
+        #
+        # So this table denormalizes what a model needs at write time and holds
+        # NO foreign key to articles. It intentionally duplicates title and
+        # description: that is what lets a row stay trainable after its article
+        # is purged, since the embedding can be recomputed from the stored text.
+        #
+        # It stores NO vector, on purpose. The ranker is trained off-box against
+        # a local archive, so the VM never reads a historical embedding -- it
+        # only serves the trained weights back. Keeping text instead of vectors
+        # costs ~460 B/row rather than ~2 KB, and it means the whole history can
+        # be re-embedded when the model changes. A frozen vector cannot be.
+        #
+        # user_swipes is left exactly as it was. The analytics queries keep
+        # reading it and are unaffected by anything here.
+        # ------------------------------------------------------------------
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS swipe_events (
+                id BIGSERIAL PRIMARY KEY,
+                article_key TEXT NOT NULL,
+                action TEXT NOT NULL CHECK (action IN ('read', 'pass')),
+                dwell_ms INTEGER,
+                flipped BOOLEAN,
+                title TEXT NOT NULL,
+                description TEXT,
+                category TEXT NOT NULL,
+                source TEXT,
+                swiped_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        ''')
+
+        # swiped_at DESC serves both the chronological holdout split and the
+        # incremental export cursor. article_key supports joining an archived
+        # swipe back to its article during analysis, while that article lives.
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_swipe_events_swiped_at
+            ON swipe_events (swiped_at DESC)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_swipe_events_article_key
+            ON swipe_events (article_key)
         ''')
 
         # Telemetry: User active sessions and heartbeats
@@ -489,7 +622,8 @@ def get_latest_articles(limit: int = 50, categories=None) -> list:
     cats = clean_category_filter(categories)
 
     sql = '''
-        SELECT id, title, description, source, published_at, category, image_url, url, created_at
+        SELECT id, title, description, source, published_at, category, image_url, url, created_at,
+               summary_bullets
         FROM articles
     '''
     params = []
@@ -530,13 +664,13 @@ def get_balanced_feed(limit: int = 70, categories=None, per_category: int = None
     sql = f'''
         WITH ranked AS (
             SELECT id, title, description, source, published_at, category,
-                   image_url, url, created_at,
+                   image_url, url, created_at, summary_bullets,
                    ROW_NUMBER() OVER (PARTITION BY category ORDER BY id DESC) AS rank_in_category
             FROM articles
             {where_sql}
         )
         SELECT id, title, description, source, published_at, category,
-               image_url, url, created_at, rank_in_category
+               image_url, url, created_at, summary_bullets, rank_in_category
         FROM ranked
         WHERE rank_in_category <= %s
         -- rank first (one card per topic, then the next round), then hash the
@@ -554,17 +688,51 @@ def get_balanced_feed(limit: int = 70, categories=None, per_category: int = None
     return _decorate_articles(rows)
 
 
-def record_user_swipe(article_id: int, action: str) -> None:
-    """Record user swipe action (read or pass).
+def record_user_swipe(
+    article_id: int,
+    action: str,
+    dwell_ms: int = None,
+    flipped: bool = None,
+) -> None:
+    """Record user swipe action (read or pass), with optional interaction signals.
+
+    dwell_ms is the time the card spent frontmost before the swipe; flipped is
+    whether the user turned the card over to read the summary. Both stay None
+    when the client does not send them -- see the schema note in init_db() for
+    why they are never defaulted to 0/False.
+
+    Writes TWO tables on purpose. user_swipes feeds the analytics dashboard and
+    is purged with its article; swipe_events is the permanent training set and
+    is not. Keeping them separate means the retention windows the dashboard
+    depends on stay aligned without the model losing its history.
 
     An unknown article_id raises ForeignKeyViolation here. That now rolls back
     and returns the connection instead of stranding it -- see db_cursor().
     """
     with db_cursor(commit=True) as cursor:
         cursor.execute(
-            "INSERT INTO user_swipes (article_id, action) VALUES (%s, %s)",
-            (article_id, action),
+            "INSERT INTO user_swipes (article_id, action, dwell_ms, flipped) "
+            "VALUES (%s, %s, %s, %s)",
+            (article_id, action, dwell_ms, flipped),
         )
+
+        # Same transaction, and deliberately after the line above: that INSERT
+        # is what raises ForeignKeyViolation on an unknown article_id, which
+        # main.record_swipe translates to a 404. By the time we reach here the
+        # article is known to exist, so the SELECT cannot come back empty.
+        #
+        # INSERT..SELECT rather than a read followed by a write -- one round
+        # trip, and no window in which the article could be purged between the
+        # two statements.
+        cursor.execute('''
+            INSERT INTO swipe_events
+                (article_key, action, dwell_ms, flipped,
+                 title, description, category, source)
+            SELECT article_key, %s, %s, %s,
+                   title, description, category, source
+            FROM articles
+            WHERE id = %s
+        ''', (action, dwell_ms, flipped, article_id))
 
 
 def purge_old_articles(days: int = 7) -> int:

@@ -265,6 +265,101 @@ The backend runs in a container. It can see its own filesystem, its own `/proc`,
 
 ---
 
+## ADR-011 — Enrichment runs as a one-shot ONNX job, not an in-process transformer
+
+**Status:** Accepted · **Constrained by:** ADR-003 (E2.1.Micro, 956 MB)
+
+### Context
+
+The card back needs summary bullets, and the ranker needs article embeddings. The obvious stack is HuggingFace `transformers` — `distilbart-cnn-12-6` for abstractive summaries, `bart-large-mnli` for zero-shot topic labels, `sentence-transformers` for vectors.
+
+None of it fits. The budget on this box:
+
+| | RAM |
+| --- | --- |
+| Total | 956 MB |
+| Postgres 16 resident | ~250 MB |
+| FastAPI + uvicorn | ~130 MB |
+| **Available** | **~550 MB** |
+| `import torch`, before any weights load | ~350 MB |
+| `distilbart-cnn-12-6` weights | 1.2 GB |
+| `bart-large-mnli` weights | 1.6 GB |
+
+The 2 GB swap file does not rescue this. Swap sits on a network-attached boot volume, so paging a 1.6 GB model per batch trades a 100 ns memory access for a ~1 ms network round trip. The realistic outcome is not a slow job — it is the OOM killer selecting Postgres, because Postgres is the largest RSS on the box.
+
+A second constraint made the first one cheaper to accept: this deployment serves 2–3 users. There is no latency requirement on enrichment at all.
+
+### Decision
+
+Split the work by where it runs, not by what it is.
+
+**On the VM**, `enrichment.py` runs as a separate one-shot process, invoked nightly. It never runs inside the API container's process, and it exits when finished so nothing stays resident.
+
+- Embeddings: `all-MiniLM-L6-v2`, int8 ONNX export, via `onnxruntime` + `tokenizers`. ~23 MB on disk, ~150 MB peak RSS. No torch anywhere in the tree — `transformers` and `sentence-transformers` were both rejected because they pull it transitively.
+- Mean pooling and L2 normalisation are ten lines of numpy in `enrichment.Embedder`, rather than a library that would have brought the runtime with it.
+- Bullets: TextRank implemented directly in `enrichment.textrank`. `sumy` was rejected because its tokenizer requires the nltk punkt corpus, a ~35 MB download onto a box with no room for it. The similarity graph uses MiniLM sentence vectors instead of the original paper's TF-IDF overlap, since the session is already loaded — this catches restatements that word overlap misses.
+- `onnxruntime` is pinned to one intra-op and one inter-op thread. The instance has a single shared OCPU, so additional threads contend with Postgres for it and add per-thread arena allocations while making the batch slower.
+
+**On a laptop**, against a database export: the model comparisons that do not fit. ROUGE scoring of extractive against abstractive summaries, BERTopic, `bart-large-mnli`, and ranker training. Unlimited RAM, no schedule.
+
+Two guards make the split safe. Before loading the session, the job reads `MemAvailable` from `/proc/meminfo` and exits non-zero below `ENRICH_MIN_AVAILABLE_MB` (default 250) rather than starting a run that will swap. And `articles.enriched_at` is both the completion marker and the resume point — the job selects `WHERE enriched_at IS NULL` and commits per article, so a kill 40 rows in keeps those 40.
+
+### Consequences
+
+Inference runs on hardware that cannot host a transformer, at a total dependency cost of numpy, onnxruntime, tokenizers, and trafilatura. Nothing in the enrichment path is imported by `main.py`; the API container installs these only because it shares an image with the nightly job.
+
+The cost is that production summaries are extractive. They select real sentences from the article and cannot paraphrase or compress across sentences, which an abstractive model does better. They also cannot hallucinate, which for a news card is arguably the right trade — but it is a trade, and it was forced by hardware rather than chosen on merit.
+
+Whether extractive is actually worse here is unmeasured, and measuring it is a laptop task. That comparison is more valuable as a portfolio artifact than either model alone, because it is the only part of this that produces a number.
+
+Model files are deliberately **not** vendored and **not** auto-downloaded. An unattended fetch on a 956 MB box is a poor failure mode; `enrichment.py`'s module docstring carries the one-time manual steps. Note that some published int8 exports are AVX-512-VNNI-specific, and this 2018-era Xeon does not have those instructions.
+
+One parameter choice worth recording: the article vector embeds **title + description, not the body**. The user swipes on what the card shows. Embedding 20,000 characters they never saw would train the ranker on a different stimulus than the one that produced the label.
+
+---
+
+## ADR-012 — Split the training set from the analytics table
+
+**Status:** Accepted · **Relates to:** ADR-010 (provenance)
+
+### Context
+
+`user_swipes.article_id` is `ON DELETE CASCADE`, and articles are purged at `PURGE_OLDER_THAN_DAYS` (7). Every swipe is therefore destroyed a week after its article was ingested.
+
+That is correct for the dashboard. The hourly-usage and top-endpoint panels are a UNION of `request_logs` and `user_swipes`, and all three retention windows are held equal on purpose so a panel never renders two periods side by side as if they were one.
+
+It is fatal for the recommender. Articles re-fetch, weights re-download, embeddings recompute — a swipe that happened and was deleted is gone. Capping the training set at seven days caps the model at seven days of signal permanently, no matter how long the deployment runs.
+
+The two requirements are in direct conflict: analytics wants a bounded window, the model wants everything.
+
+### Decision
+
+Stop making one table serve both.
+
+`user_swipes` is unchanged — same columns, same cascade, same window. Every analytics query reads it exactly as before.
+
+`swipe_events` is new, has **no foreign key to `articles`**, and is never purged. `record_user_swipe` writes both tables in one transaction, using `INSERT..SELECT` so there is no window in which the article could be purged between a read and a write. It is ordered after the `user_swipes` insert deliberately: that insert is what raises `ForeignKeyViolation` on an unknown `article_id`, which `main.record_swipe` translates to a 404.
+
+`swipe_events` denormalises title, description, category, and source at write time. That duplication is the point — it is what keeps a row trainable after its article is purged.
+
+It stores **no vector**. The ranker trains off-box against a local archive, so the VM never reads a historical embedding; it only serves trained weights back. Text instead of vectors costs ~460 B/row rather than ~2 KB, and it means the entire history can be re-embedded when the model changes. A frozen vector cannot be — swap the embedding model and old rows silently occupy a different vector space than new ones, with no error to notice.
+
+Two interaction signals were added to both tables: `dwell_ms` (time the card was frontmost) and `flipped` (whether the user turned it over). A flip is a stronger interest signal than a fast right-swipe, and neither is recoverable retroactively.
+
+Per ADR-010, both are **nullable and old rows are not backfilled**. A swipe recorded before the client sent these fields had no dwell or flip observed; writing 0 would manufacture a measurement. NULL reads as "not measured", matching `request_logs.status_code`. Any model trained on this table must filter `dwell_ms IS NOT NULL` rather than treating NULL as zero engagement.
+
+### Consequences
+
+The model's history is no longer bounded by the dashboard's retention policy, and the dashboard's windows stayed aligned without compromise. Both requirements are met because neither had to bend.
+
+The cost is unbounded growth in one table and duplicated text between two. At ~460 B/row, three users at 100 swipes/day is roughly 50 MB/year — small enough that no VM-side retention is needed yet, which is why none was added.
+
+That table is currently the only copy of data that cannot be regenerated, and it lives on a free-tier volume with no backup, an ephemeral IP, and Oracle's idle-reclamation policy over it. Pulling it to a local archive is planned and not built: `GET /api/v1/export/swipes?since_id=N` behind `ADMIN_API_KEY`, a scheduled puller on a separate machine, and an export watermark so the VM never deletes above what has been confirmed archived. That watermark only becomes load-bearing once VM-side retention exists — today a missed sync loses nothing.
+
+Exporting from another machine means the endpoint faces the internet, so HTTPS (Caddy + DuckDNS) is a prerequisite for the export route, not a follow-up to it. `ADMIN_COOKIE_SECURE` is still `false`.
+
+---
+
 ## Failure modes we've hit
 
 Hard-won operational facts. Each of these caused a real outage.
@@ -316,5 +411,7 @@ A pool with startup retry would log the failure, keep the process alive, and let
 ## Open questions
 
 - **Is the topic taxonomy well-posed?** An Apple earnings story is genuinely both Tech and Finance. Single-label classification may be the wrong frame; multi-label with a primary topic for the badge is worth evaluating.
-- **Can per-user personalisation be justified?** `user_swipes` collects implicit feedback, but with a single user any personalisation claim is statistically unsupportable. Framing it as a single-user cold-start study is more honest.
+- **Can per-user personalisation be justified?** `user_swipes` collects implicit feedback, but with a single user any personalisation claim is statistically unsupportable. Framing it as a single-user cold-start study is more honest. ADR-012 does not change this — a longer history from 2–3 users is still not a population, and the extra signals (`dwell_ms`, `flipped`) raise the ceiling on what a single-user study can show without turning it into a multi-user result.
 - **Should the classifier be replaced?** Only a labelled dataset can answer this. If a keyword scorer matches TF-IDF at a fraction of the latency on a 956 MB box, keeping it is a defensible engineering result — but it has to be measured to be claimed.
+- **Are extractive bullets worse than abstractive ones here?** ADR-011 chose extractive on a hardware constraint, not on quality. Unmeasured. The comparison is a laptop job against an export, and it is the one part of the enrichment work that would produce a defensible number.
+- **Does the ranker beat chronological order?** Not yet built, and the answer is only meaningful against a baseline. Random and reverse-chronological are the two that matter; precision@5 and NDCG over a chronological holdout are the metrics. Claiming a recommender works without that comparison would be the ADR-010 failure in a new place.
