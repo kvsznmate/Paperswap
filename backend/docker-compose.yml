@@ -47,5 +47,45 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Nightly enrichment (ADR-011). One-shot, not a server -- it exits when done.
+  #
+  #   docker compose run --rm enrichment python enrichment.py --dry-run
+  #   docker compose run --rm enrichment python enrichment.py --limit 5
+  #
+  # Behind a profile so `docker compose up` never starts it. It reuses the
+  # backend image rather than defining its own, so no second build.
+  #
+  # A separate service rather than `exec` into the running API, purely for
+  # mem_limit. On a 956 MB box the failure mode that matters is the OOM killer
+  # picking Postgres, because Postgres has the largest RSS. Capping this
+  # container means a runaway enrichment run kills itself instead. 400m covers
+  # the ~250 MB the ONNX session, tokenizer and lxml actually need, and leaves
+  # headroom above Postgres (~250) and the API (~130).
+  enrichment:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["tools"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-newsdb}
+      EMBED_MODEL_PATH: ${EMBED_MODEL_PATH:-models/minilm-int8.onnx}
+      EMBED_TOKENIZER_PATH: ${EMBED_TOKENIZER_PATH:-models/tokenizer.json}
+      BULLET_COUNT: ${BULLET_COUNT:-3}
+      # The job reads MemAvailable from /proc/meminfo, which inside a container
+      # reports the HOST's memory, not this container's limit. That is what we
+      # want -- the question is whether the box has room, not whether the cgroup
+      # does. Refuses to load the session below this.
+      ENRICH_MIN_AVAILABLE_MB: ${ENRICH_MIN_AVAILABLE_MB:-250}
+    volumes:
+      # Read-only bind mount, not a named volume: these are two files you
+      # downloaded by hand and may need to swap if the export turns out to be
+      # wrong for this CPU. A named volume would hide them.
+      - ./models:/app/models:ro
+    mem_limit: 400m
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"        # one-shot; restarting a finished batch would re-run it
+
 volumes:
   pgdata:

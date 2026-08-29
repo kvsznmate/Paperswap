@@ -106,6 +106,28 @@ backend/output/cards/
 !backend/output/cards/.gitkeep
 
 # -----------------------------------------------------------------------------
+# ML weights & local data artifacts
+# -----------------------------------------------------------------------------
+# ONNX weights are downloaded once by hand and bind-mounted into the enrichment
+# container (ADR-011). ~25 MB of binary that git would store forever, and it is
+# reproducible from a URL -- so it does not belong here.
+backend/models/
+
+# Hand-labelled holdout from tools/label_articles.py.
+#
+# This one is a judgement call. It is small, it is text, and it is the single
+# most expensive artifact in the project -- hours of human attention that
+# cannot be regenerated. Strong argument for tracking it.
+#
+# It is ignored anyway because it is also a raw export: it carries article
+# titles and descriptions copied out of the database, and the labelling tool
+# writes whatever it read. If you want it in git -- and you probably should,
+# it is the ground truth every accuracy claim will rest on -- commit it
+# deliberately with `git add -f data/labels.csv` after reading it, rather than
+# letting a `git add -A` decide for you.
+data/labels*.csv
+
+# -----------------------------------------------------------------------------
 # OS cruft
 # -----------------------------------------------------------------------------
 .DS_Store
