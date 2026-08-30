@@ -3,6 +3,7 @@ package com.newsswipe.app.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.newsswipe.app.data.model.NewsArticle
+import com.newsswipe.app.data.model.SwipeMetrics
 import com.newsswipe.app.data.model.SwipeRecordRequest
 import com.newsswipe.app.data.remote.RetrofitInstance
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -45,7 +46,14 @@ class NewsViewModel : ViewModel() {
         }
     }
 
-    fun onSwipe(direction: String) {
+    /**
+     * @param metrics dwell time and flip state, when the swipe came from the card
+     *   itself. Swipes from the bottom action buttons pass the default, whose
+     *   fields are null -- those never had a dwell timer running, and reporting
+     *   0ms would look like an instant dismissal to anything reading the column
+     *   later. Null means unmeasured; see SwipeMetrics.
+     */
+    fun onSwipe(direction: String, metrics: SwipeMetrics = SwipeMetrics()) {
         val currentState = _uiState.value
         if (currentState is NewsUiState.Success) {
             val articles = currentState.articles
@@ -59,7 +67,12 @@ class NewsViewModel : ViewModel() {
                 viewModelScope.launch {
                     try {
                         RetrofitInstance.api.recordSwipe(
-                            SwipeRecordRequest(articleId = article.id, action = action)
+                            SwipeRecordRequest(
+                                articleId = article.id,
+                                action = action,
+                                dwellMs = metrics.dwellMs,
+                                flipped = metrics.flipped
+                            )
                         )
                     } catch (e: Exception) {
                         // Silent fallback if log fails

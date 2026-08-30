@@ -26,8 +26,12 @@ import com.newsswipe.app.ui.theme.*
  * Parses a backend-supplied hex colour such as "#6366f1".
  * Never throws: a malformed or missing value from the server falls back to a
  * theme colour rather than crashing the card.
+ *
+ * `internal` rather than private so NewsCardBack shares it. Both faces must
+ * resolve the same accent from the same field, or a flip would change colour
+ * halfway through.
  */
-private fun parseAccent(hex: String?, fallback: Color): Color =
+internal fun parseAccent(hex: String?, fallback: Color): Color =
     runCatching { Color(android.graphics.Color.parseColor(hex)) }.getOrDefault(fallback)
 
 @Composable

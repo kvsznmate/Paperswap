@@ -147,12 +147,12 @@ fun NewsSwipeAppScreen(
                     SwipeableCardStack(
                         articles = state.articles,
                         currentIndex = state.currentIndex,
-                        onSwipeRight = { article ->
-                            viewModel.onSwipe("right")
+                        onSwipeRight = { article, metrics ->
+                            viewModel.onSwipe("right", metrics)
                             openNewsUrl(article.url)
                         },
-                        onSwipeLeft = {
-                            viewModel.onSwipe("left")
+                        onSwipeLeft = { _, metrics ->
+                            viewModel.onSwipe("left", metrics)
                         }
                     )
                 }
@@ -162,6 +162,10 @@ fun NewsSwipeAppScreen(
         // 3. Bottom Action Controls
         if (uiState is NewsUiState.Success) {
             val state = uiState as NewsUiState.Success
+            // The button path passes no SwipeMetrics on purpose. These swipes
+            // bypass the card, so no dwell timer was running and no flip was
+            // observed; the default reports both as null rather than inventing
+            // a 0ms dwell. See SwipeMetrics.
             ActionButtons(
                 onPassClick = {
                     if (state.currentIndex < state.articles.size) {

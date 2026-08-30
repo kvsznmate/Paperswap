@@ -5,6 +5,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -22,6 +23,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.newsswipe.app.data.model.NewsArticle
+import com.newsswipe.app.data.model.SwipeMetrics
 import com.newsswipe.app.ui.theme.PassRed
 import com.newsswipe.app.ui.theme.ReadGreen
 import kotlinx.coroutines.launch
@@ -30,8 +32,8 @@ import kotlinx.coroutines.launch
 fun SwipeableCardStack(
     articles: List<NewsArticle>,
     currentIndex: Int,
-    onSwipeRight: (NewsArticle) -> Unit,
-    onSwipeLeft: (NewsArticle) -> Unit,
+    onSwipeRight: (NewsArticle, SwipeMetrics) -> Unit,
+    onSwipeLeft: (NewsArticle, SwipeMetrics) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val configuration = LocalConfiguration.current
@@ -41,6 +43,31 @@ fun SwipeableCardStack(
     val coroutineScope = rememberCoroutineScope()
     val offsetX = remember { Animatable(0f) }
     val offsetY = remember { Animatable(0f) }
+
+    // Which face is showing right now.
+    var isFlipped by remember { mutableStateOf(false) }
+
+    // Whether the card was EVER turned over, which is the signal worth logging.
+    // A user who flips, reads the summary, flips back and then swipes has shown
+    // real interest; isFlipped would be false at that moment and would lose it.
+    var everFlipped by remember { mutableStateOf(false) }
+
+    // Start of dwell for the card currently on top.
+    var shownAtMs by remember { mutableStateOf(System.currentTimeMillis()) }
+
+    // Reset per card. Without this the next card inherits the previous card's
+    // flip state -- it would arrive already showing its back -- and its dwell
+    // would be measured from whenever the deck was first built.
+    LaunchedEffect(currentIndex) {
+        isFlipped = false
+        everFlipped = false
+        shownAtMs = System.currentTimeMillis()
+    }
+
+    fun currentMetrics() = SwipeMetrics(
+        dwellMs = System.currentTimeMillis() - shownAtMs,
+        flipped = everFlipped
+    )
 
     val activeArticle = articles.getOrNull(currentIndex)
 
@@ -92,23 +119,44 @@ fun SwipeableCardStack(
                             translationY = offsetY.value
                             rotationZ = rotationAngle
                         }
+                        // Tap and drag live in separate pointerInput blocks and
+                        // coexist without a manual slop check. detectDragGestures
+                        // waits on awaitTouchSlopOrCancellation and consumes
+                        // nothing until the finger has actually travelled, so a
+                        // stationary press still reaches the tap detector; once
+                        // slop is exceeded the tap detector cancels itself.
+                        //
+                        // Doing this by hand -- measuring displacement and
+                        // duration in one handler -- was the alternative, and it
+                        // means reimplementing platform touch slop, which varies
+                        // by device.
+                        .pointerInput(currentIndex) {
+                            detectTapGestures(
+                                onTap = {
+                                    isFlipped = !isFlipped
+                                    if (isFlipped) everFlipped = true
+                                }
+                            )
+                        }
                         .pointerInput(currentIndex) {
                             detectDragGestures(
                                 onDragEnd = {
                                     val threshold = screenWidthPx * 0.30f
                                     if (offsetX.value > threshold) {
                                         // Swipe Right (Read)
+                                        val metrics = currentMetrics()
                                         coroutineScope.launch {
                                             offsetX.animateTo(screenWidthPx * 1.5f, animationSpec = tween(250))
-                                            onSwipeRight(activeArticle)
+                                            onSwipeRight(activeArticle, metrics)
                                             offsetX.snapTo(0f)
                                             offsetY.snapTo(0f)
                                         }
                                     } else if (offsetX.value < -threshold) {
                                         // Swipe Left (Pass)
+                                        val metrics = currentMetrics()
                                         coroutineScope.launch {
                                             offsetX.animateTo(-screenWidthPx * 1.5f, animationSpec = tween(250))
-                                            onSwipeLeft(activeArticle)
+                                            onSwipeLeft(activeArticle, metrics)
                                             offsetX.snapTo(0f)
                                             offsetY.snapTo(0f)
                                         }
@@ -130,9 +178,13 @@ fun SwipeableCardStack(
                             )
                         }
                 ) {
-                    NewsCard(article = activeArticle)
+                    FlippableNewsCard(article = activeArticle, flipped = isFlipped)
 
-                    // Overlay Swipe Badges
+                    // Overlay Swipe Badges.
+                    //
+                    // Drawn outside FlippableNewsCard on purpose: they belong to
+                    // the drag, not to either face. Nested inside, they would
+                    // rotate away with the card and vanish mid-flip.
                     if (dragX > 40f) {
                         val alphaVal = (dragX / 200f).coerceIn(0f, 1f)
                         Box(
