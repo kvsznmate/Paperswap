@@ -293,7 +293,9 @@ A second constraint made the first one cheaper to accept: this deployment serves
 
 Split the work by where it runs, not by what it is.
 
-**On the VM**, `enrichment.py` runs as a separate one-shot process, invoked nightly. It never runs inside the API container's process, and it exits when finished so nothing stays resident.
+**On the VM**, `enrichment.py` runs as a separate one-shot process, invoked on a schedule by `run_enrichment.sh`. It never runs inside the API container's process, and it exits when finished so nothing stays resident.
+
+(Originally specified as nightly. Measured throughput came in at ~3.4 s/article, so a full 84-article batch takes ~5 minutes and the job no-ops when nothing is pending. The installed cron runs every 6 hours instead, which keeps a card back from being empty for more than a few hours at a cost of ~20 min CPU/day.)
 
 - Embeddings: `all-MiniLM-L6-v2`, int8 ONNX export, via `onnxruntime` + `tokenizers`. ~23 MB on disk, ~150 MB peak RSS. No torch anywhere in the tree — `transformers` and `sentence-transformers` were both rejected because they pull it transitively.
 - Mean pooling and L2 normalisation are ten lines of numpy in `enrichment.Embedder`, rather than a library that would have brought the runtime with it.
@@ -360,6 +362,40 @@ Exporting from another machine means the endpoint faces the internet, so HTTPS (
 
 ---
 
+## ADR-013 — Direct publisher feeds, not Google News
+
+**Status:** Accepted · **Supersedes:** the original `rss_url` config
+
+### Context
+
+All seven topics pulled from Google News search feeds, and NewsAPI was nominally the primary source with RSS as fallback. In practice **100% of 532 stored articles came from RSS.** NewsAPI's free Developer plan is licensed for development use and rejects requests from server environments, so the key worked on a laptop and returned nothing from Oracle Cloud. The fetcher fell through silently every time, for the entire life of the deployment, and nothing surfaced it.
+
+That mattered once enrichment arrived. Google News does not publish article links — it publishes redirect wrappers (`news.google.com/rss/articles/CBMi...`) that bounce through `consent.google.com` and loop until the client gives up. A phone browser follows them fine, so swipe-to-read always worked and the problem was invisible. Server-side extraction got nothing: `full_text` was NULL on every row and every card back was empty.
+
+Since 2024 the wrapper cannot be decoded offline either. Resolving it requires Google's undocumented `batchexecute` endpoint, which would add a fragile dependency that breaks without notice.
+
+### Decision
+
+Replace all seven Google News feeds with direct publisher RSS, verified rather than assumed. `check_feeds.py` tests candidates and is the tool of record when a feed rots.
+
+Verification has to include extraction, not just link cleanliness. Of 26 candidates, 19 passed — and three of the seven failures (MarketWatch, Politico, Nature) returned perfectly valid publisher links that yielded **zero** extractable text. A link-only check would have shipped all three. ESPN answered 202 and Byrdie 403; both are bot challenges that `feedparser` reports as an empty entry list rather than an error.
+
+`fetch_from_rss` now round-robins across each topic's feeds rather than concatenating. BBC Sport returns 76 entries and Sky returns 20, so reading in order would make nearly every Sports card a BBC card. This matters beyond variety: these articles get embedded, and one publisher's house style becoming a proxy for the topic is a real way to poison a classifier.
+
+NewsAPI is left in place. It costs nothing and starts working the day the plan is upgraded — but `newsapi_query` should not be read as live.
+
+### Consequences
+
+Extraction went from 0% to **98.8%** (82 of 83 on the first full run). The single failure was an FT paywall returning 403, which correctly exhausted its retry budget after three attempts rather than being refetched nightly forever.
+
+Two Google-specific behaviours had to be removed from `fetch_from_rss`, and both would have silently corrupted data on direct feeds. Titles were stripped of everything after the last ` - `, because Google appends ` - Publisher` to every headline; on a publisher feed that rule truncates any real headline containing a dash. `source` was derived from that same suffix and defaulted to `"Google News"`; it now comes from the feed's own title.
+
+The cost is source concentration. BBC supplies a feed to four of the seven topics and accounts for ~24% of the corpus. Round-robin caps it within each topic, but the cross-topic concentration is worth remembering when reading any per-category metric.
+
+All 537 legacy articles were deleted rather than left to age out, since none could ever extract. That cascade destroyed 148 swipes; `swipe_events` (ADR-012) held only 7 at the time, having been added days earlier. The mechanism was correct and the timing was not — a reminder that a retention fix protects nothing retroactively.
+
+---
+
 ## Failure modes we've hit
 
 Hard-won operational facts. Each of these caused a real outage.
@@ -381,6 +417,26 @@ Read `$NEW` from one variable for both steps so the two cannot diverge.
 ### `.env` changes need `down`/`up`, not `--force-recreate`
 
 `--force-recreate` can carry stale environment forward. A rotation that appears to have been applied may not have reached the container at all.
+
+### A profiled compose service will not be rebuilt by `up --build`
+
+`docker compose up --build` skips services behind a `profiles:` key. When `enrichment` carried its own `build:` section it produced a second image that `up` never refreshed, so a freshly deployed API ran beside a week-old enrichment image. The symptom was a run printing the *previous version's log format* — code that no longer existed anywhere in the repo.
+
+The fix is to share one image tag (`paperswap-backend:latest`) rather than build twice. The general rule: two build definitions in one compose file means two things that can drift.
+
+The original block also carried a comment claiming it "reuses the backend image rather than defining its own" directly above a `build:` section. A comment describing intent rather than code is worse than no comment — it stops the reader from checking.
+
+### Confirm which branch the deploy target is on
+
+A long stretch of edits appeared to vanish: files were changed on the development machine, `git pull` on the VM reported success, and the changes were absent. The development machine was on `feature/news-labels` while the VM tracked `main`. Nothing was lost — it was in the other branch the whole time.
+
+`git status` was clean on both, and both were legitimately up to date with their own remote. "Already up to date" answers a narrower question than it appears to.
+
+```bash
+cd ~/paperswap && git branch --show-current    # before any deploy
+```
+
+This is the same lesson as *Verify the deployed artifact* above, arriving through a different door. Worth noting it recurred **after** that section was written.
 
 ### Verify the deployed artifact before acting on it
 

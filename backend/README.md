@@ -33,7 +33,9 @@ python main.py --cli      # sync news once, print a per-topic summary, exit
 | `main.py` | FastAPI app, routes, APScheduler lifespan, CLI runner |
 | `database.py` | Schema, topic catalogue (`CATEGORIES`), queries, dedup, purge |
 | `news_fetcher.py` | NewsAPI + RSS ingestion, keyword classification, summary generation |
-| `enrichment.py` | **One-shot nightly job.** Article body extraction, TextRank bullets, ONNX embeddings. Not imported by `main.py` |
+| `enrichment.py` | **Scheduled job.** Article body extraction, TextRank bullets, ONNX embeddings. Not imported by `main.py` — see `docs/SUMMARIZATION.md` |
+| `run_enrichment.sh` | Cron wrapper for the above. Self-locking; safe to run by hand |
+| `check_feeds.py` | Tests candidate RSS feeds before wiring them into `CATEGORIES`. Run with `--extract` |
 | `backfill_categories.py` | One-off reclassification of stored rows. **Dry-run by default** — pass `--apply` to write. |
 
 `database.CATEGORIES` is the single source of truth for topics. Add an entry there plus a feed in `news_fetcher.TOPIC_FEEDS`, and `init_db()` syncs it into the `categories` table on the next boot. The Android client reads labels and colours from the API, so new topics need no client release.

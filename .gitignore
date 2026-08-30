@@ -113,6 +113,9 @@ backend/output/cards/
 # reproducible from a URL, so it does not belong here.
 backend/models/
 
+# Cron output from run_enrichment.sh.
+logs/
+
 # Hand-labelled holdout from tools/label_articles.py.
 #
 # Ignored by default because it is a raw export -- it carries article titles and
