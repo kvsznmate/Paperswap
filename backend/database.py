@@ -313,6 +313,16 @@ def init_db():
         cursor.execute('ALTER TABLE articles ADD COLUMN IF NOT EXISTS embedding BYTEA')
         cursor.execute('ALTER TABLE articles ADD COLUMN IF NOT EXISTS enriched_at TIMESTAMPTZ')
 
+        # Retry budget for enrichment. enriched_at alone was not enough: the job
+        # used to set it even when body extraction failed, so one bad fetch
+        # marked a row permanently done with no bullets and it was never
+        # retried. Now enriched_at means "finished successfully", this counts
+        # attempts, and the job selects WHERE enriched_at IS NULL AND
+        # enrich_attempts < ENRICH_MAX_ATTEMPTS. Transient network failures get
+        # another night; permanently unreadable pages stop after a few tries
+        # instead of being refetched forever.
+        cursor.execute('ALTER TABLE articles ADD COLUMN IF NOT EXISTS enrich_attempts INTEGER DEFAULT 0')
+
         # User swipe actions (Read / Pass).
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_swipes (
