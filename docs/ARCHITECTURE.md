@@ -265,6 +265,54 @@ The backend runs in a container. It can see its own filesystem, its own `/proc`,
 
 ---
 
+## ADR-011 — Weekly topic summaries outlive their sources
+
+**Status:** Accepted
+
+### Context
+
+The swipe deck answers "what is there to read now". It cannot answer "what happened in Finance last week", because `purge_old_articles` deletes the evidence on a rolling window. A weekly per-topic digest fills that gap, and it is the only place any history exists.
+
+That framing creates three problems the obvious implementation gets wrong.
+
+**The purge destroys the input.** `refresh_pipeline` runs `fetch` then `purge_old_data` every 12 hours. For the week Mon `W` → Sun `W+6`, the Monday articles reach 7 days old at 00:00 on Monday `W+7`. Any refresh on that Monday deletes them. A summariser scheduled independently — an APScheduler cron job, say — races that purge, and losing the race is silent: the digest covers six days, writes `number_of_articles` for six days, and labels it a week. Nothing downstream can detect the discrepancy because the rows that would reveal it are gone.
+
+**Most article descriptions are boilerplate.** `generate_short_summary` has three tiers. Tier 1 is the publisher's own blurb. Tier 2 is one of ten canned sentences keyed on a title keyword — every article mentioning `chip`/`nvidia`/`semiconductor`/`amd` receives byte-identical text about "semiconductor supply dynamics". Tier 3 is a single fixed string per topic. On a swipe card that is merely dull. Fed to a summariser reading a whole week at once, 25 copies of one sentence become the dominant theme, and the digest reports chip supply chains as the story of the week. That is a claim about the rule table in `news_fetcher.py`, not about the news. It is ADR-010's fabrication problem in prose form, and prose conceals it far better than `int(used_bytes * 0.62)` did.
+
+**`published_at` cannot be bucketed.** It is `TEXT`, and `save_article` defaults it to the literal string `'Recently'`.
+
+### Decision
+
+**The summariser is a step inside `refresh_pipeline`, immediately before the purge.** Ordering is guaranteed by control flow rather than by two schedulers agreeing. It is idempotent and gated on `topics_missing_summary()`, so thirteen of every fourteen refreshes cost one indexed query.
+
+**`PURGE_OLDER_THAN_DAYS` moves 7 → 9,** and `main.py` clamps anything lower back up with a warning. Nine days covers 7 days of week, up to 24 h of intra-day offset, and one 12 h refresh interval. `REQUEST_LOG_RETENTION_DAYS` and `SESSION_RETENTION_DAYS` default to the same variable, so all three move together and the invariant in `purge_old_request_logs` — that the UNIONed analytics panels cover one period — is preserved. `avg_session_window_days` now reports 9.
+
+**Provenance is recorded at write time, not reconstructed.** `articles.description_source` stores `publisher` / `keyword_template` / `topic_fallback`, and the summariser reads only the first. `KEYWORD_SUMMARY_RULES` moved to module scope with `{source}` as a placeholder so `boilerplate_like_patterns()` derives from the rules themselves; retyping the strings would rot the first time one was reworded. Pre-migration rows carry `NULL` and are matched by `LIKE` instead — they are **not** backfilled to a guessed tier, for the same reason `request_logs.status_code` left its old rows null.
+
+**Two counts, both measured.** `number_of_articles` is what the generator read. `articles_in_window` is what the topic saw before filtering. Storing only the first hides how thin a week was; storing only the second attaches a number to prose that does not describe it. The page renders "summarised from 34 of 61 articles", which doubles as a health signal on the fetcher.
+
+**A generated summary carries `generator`, not `measured`.** ADR-010's contract is two-valued and neither value fits a sentence written by a model. So the row names what produced it — `extractive:v1` or `anthropic:<model-id>` — and when. Both can coexist in the history.
+
+**On failure, no row.** The generator raises rather than returning a placeholder. A gap is visible and, while the articles survive, recoverable. A placeholder becomes permanent and indistinguishable from a real summary the moment the purge runs.
+
+**`MIN_ARTICLES_FOR_SUMMARY` (default 3) applies after filtering**, and `topic_summaries` is exempt from the article retention window (`SUMMARY_RETENTION_WEEKS=0`, keep forever).
+
+### Consequences
+
+Some topics have no row some weeks. Beauty and Programming are the likely absentees — narrow topics on Google News RSS, where publisher descriptions are often missing. The API returns them in `topics_missing` so a client can say "not enough coverage" rather than render a blank card. This is the system working, and it will look like a bug to anyone who has not read this record.
+
+The extractive generator ships first and is the default. It is not eloquent; every clause is derived from the input and it asserts nothing it cannot count. It exists so the window arithmetic, filtering, counts, upsert and scheduling could all be built and tested before the LLM question was settled, and so the feature degrades to something honest rather than to nothing if a key goes missing.
+
+Retention rose by two days across three tables to protect a feature that touches one. That is the cost of a calendar week; a rolling 7-day window would have avoided it at the price of a digest nobody can date.
+
+What this feature does **not** fix: topic assignment is still the unmeasured keyword classifier of ADR-007, so every digest is "articles the classifier called TECH". The window is ingest time, not publication time, and the API says so on every row. And summary quality itself is unevaluated — no rubric, no baseline, no blind comparison against the extractive output. The same honest position as ADR-007: it may be good, nobody has checked.
+
+### Enforcement
+
+`backend/tests/test_topic_summaries.py`. The count-integrity and no-placeholder checks are the ADR-010 checks in this feature's clothing. The one that matters most is the ordering check: it seeds a real week, runs the summariser, then runs the purge, and asserts the summary exists and survives. A static read of `refresh_pipeline` can be satisfied by two calls in the right order that do the wrong thing; only the behavioural check proves the week was still there to be read.
+
+---
+
 ## Failure modes we've hit
 
 Hard-won operational facts. Each of these caused a real outage.
@@ -316,5 +364,6 @@ A pool with startup retry would log the failure, keep the process alive, and let
 ## Open questions
 
 - **Is the topic taxonomy well-posed?** An Apple earnings story is genuinely both Tech and Finance. Single-label classification may be the wrong frame; multi-label with a primary topic for the badge is worth evaluating.
+- **Are the weekly summaries any good?** ADR-011 ships them unevaluated. The cheapest answer is a handful of weeks scored blind against the `extractive:v1` baseline — which, being free and deterministic, is a fair control.
 - **Can per-user personalisation be justified?** `user_swipes` collects implicit feedback, but with a single user any personalisation claim is statistically unsupportable. Framing it as a single-user cold-start study is more honest.
 - **Should the classifier be replaced?** Only a labelled dataset can answer this. If a keyword scorer matches TF-IDF at a fraction of the latency on a 956 MB box, keeping it is a defensible engineering result — but it has to be measured to be claimed.

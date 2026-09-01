@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PaperSwap — Weekly Summaries</title>
+<style>
+  :root { --bg:#000; --card:#0a0a0a; --line:#1c1c1c; --fg:#e8e9ea; --dim:#6b6f78; --lime:#c4f542; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
+         line-height:1.55; -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:720px; margin:0 auto; padding:28px 18px 64px; }
+
+  header { border-bottom:1px solid var(--line); padding-bottom:18px; margin-bottom:8px; }
+  h1 { font-size:20px; margin:0 0 6px; letter-spacing:-0.01em; }
+  .week { font-size:13px; color:var(--dim); font-family:ui-monospace,monospace; }
+  .nav { margin-top:14px; display:flex; gap:8px; flex-wrap:wrap; }
+  .nav a, .nav button {
+    font-size:12px; padding:6px 11px; border-radius:7px; text-decoration:none;
+    border:1px solid var(--line); background:#050505; color:var(--dim);
+    cursor:pointer; font-family:inherit; }
+  .nav a:hover, .nav button:hover { color:var(--fg); border-color:#333; }
+
+  .basis { margin:18px 0 4px; padding:11px 13px; border-radius:8px;
+           background:#070707; border:1px solid var(--line);
+           font-size:11.5px; color:var(--dim); line-height:1.5; }
+
+  .card { background:var(--card); border:1px solid var(--line); border-left-width:3px;
+          border-radius:11px; padding:17px 18px; margin-top:14px; }
+  .card h2 { font-size:15px; margin:0 0 3px; letter-spacing:-0.01em; }
+  .counts { font-size:11.5px; color:var(--dim); font-family:ui-monospace,monospace;
+            margin-bottom:11px; }
+  .summary { font-size:14.5px; margin:0 0 12px; }
+  .meta { display:flex; gap:7px; flex-wrap:wrap; align-items:center;
+          border-top:1px solid var(--line); padding-top:10px; }
+  .tag { font-size:10.5px; color:var(--dim); background:#070707;
+         border:1px solid var(--line); border-radius:5px; padding:3px 7px;
+         font-family:ui-monospace,monospace; }
+
+  .empty { margin-top:22px; padding:15px; border:1px dashed var(--line);
+           border-radius:9px; color:var(--dim); font-size:13px; }
+  .empty strong { color:var(--fg); font-weight:600; }
+  .missing { margin-top:16px; font-size:12px; color:var(--dim); }
+  .err { color:#f87171; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Weekly topic summaries</h1>
+    <div class="week" id="week">loading…</div>
+    <div class="nav">
+      <button id="prev">← earlier week</button>
+      <button id="next">later week →</button>
+      <a href="/mobile">swipe deck</a>
+    </div>
+  </header>
+
+  <!-- Shown on every load, not tucked into a tooltip. The window is ingest time
+       and the prose is generated; a reader who sees only the paragraph would
+       reasonably assume neither. -->
+  <div class="basis" id="basis"></div>
+
+  <div id="cards"></div>
+  <div class="missing" id="missing"></div>
+</div>
+
+<script>
+const cards   = document.getElementById('cards');
+const missing = document.getElementById('missing');
+const weekEl  = document.getElementById('week');
+const basisEl = document.getElementById('basis');
+
+// null = "whatever the newest stored week is". The server decides, so the page
+// does not have to guess which weeks exist.
+let currentWeek = null;
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+const fmt = iso => {
+  const d = new Date(iso + 'T00:00:00Z');
+  return d.toLocaleDateString(undefined,
+    { day:'numeric', month:'short', year:'numeric', timeZone:'UTC' });
+};
+
+const shiftWeek = (iso, days) => {
+  const d = new Date(iso + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+};
+
+function render(data) {
+  cards.innerHTML = '';
+  missing.textContent = '';
+
+  if (!data.count) {
+    weekEl.textContent = data.week_start ? `week of ${fmt(data.week_start)}` : '—';
+    basisEl.textContent = '';
+    cards.innerHTML = `<div class="empty"><strong>No summaries for this week.</strong><br>
+      Summaries are written for the last completed Monday–Sunday week, during the
+      refresh cycle that follows it. If the backend has been running less than a
+      week, there is nothing to summarise yet.</div>`;
+    return;
+  }
+
+  currentWeek = data.week_start;
+  weekEl.textContent = `${fmt(data.week_start)} → ${fmt(data.week_end)}`;
+  basisEl.textContent = data.summaries[0].basis
+    + ' Text is generated, not written by a person — each card names its generator.';
+
+  data.summaries.forEach(s => {
+    const el = document.createElement('div');
+    el.className = 'card';
+    el.style.borderLeftColor = s.accent_color;
+
+    // Both counts, always. "34 of 61" is the honest figure: the summary read 34,
+    // the topic saw 61, and the gap is the boilerplate that was filtered out.
+    const ratio = s.number_of_articles === s.articles_in_window
+      ? `${s.number_of_articles} articles`
+      : `${s.number_of_articles} of ${s.articles_in_window} articles`;
+
+    const sources = (s.top_sources || []).slice(0, 4)
+      .map(x => `<span class="tag">${esc(x)}</span>`).join('');
+
+    el.innerHTML = `
+      <h2 style="color:${esc(s.accent_color)}">${esc(s.topic_label)}</h2>
+      <div class="counts">summarised from ${ratio}</div>
+      <p class="summary">${esc(s.summary)}</p>
+      <div class="meta">
+        ${sources}
+        <span class="tag">via ${esc(s.generator)}</span>
+      </div>`;
+    cards.appendChild(el);
+  });
+
+  if (data.topics_missing && data.topics_missing.length) {
+    // Named rather than silently omitted: an absent topic means too few articles
+    // had a real publisher description, which is information about the feed.
+    missing.textContent =
+      'No summary this week (too few usable articles): '
+      + data.topics_missing.join(', ') + '.';
+  }
+}
+
+async function load(week) {
+  const url = week ? `/api/v1/summaries?week_start=${week}` : '/api/v1/summaries';
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    render(await r.json());
+  } catch (e) {
+    cards.innerHTML = `<div class="empty err">Could not load summaries: ${esc(e.message)}</div>`;
+  }
+}
+
+document.getElementById('prev').addEventListener('click',
+  () => currentWeek && load(shiftWeek(currentWeek, -7)));
+document.getElementById('next').addEventListener('click',
+  () => currentWeek && load(shiftWeek(currentWeek, 7)));
+
+load(null);
+</script>
+</body>
+</html>

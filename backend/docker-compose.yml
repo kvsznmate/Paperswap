@@ -34,14 +34,29 @@ services:
       # clear message rather than booting with those endpoints returning 503.
       ADMIN_API_KEY: ${ADMIN_API_KEY:?set ADMIN_API_KEY in backend/.env (openssl rand -hex 32)}
       REFRESH_INTERVAL: ${REFRESH_INTERVAL:-12}       # hours between auto-refreshes
-      PURGE_OLDER_THAN_DAYS: ${PURGE_OLDER_THAN_DAYS:-7}  # delete articles older than this
+      # Delete articles older than this. Default is 9, not 7, because the weekly
+      # summariser reads the last completed Mon-Sun week and a 7-day window has
+      # already started deleting it by the time the Monday job runs. main.py
+      # clamps anything lower back up to 9. See ADR-011.
+      PURGE_OLDER_THAN_DAYS: ${PURGE_OLDER_THAN_DAYS:-9}
       # Retention for request_logs. Defaults to the article window so the two
       # halves of the analytics union cover the same period -- see
       # database.purge_old_request_logs before changing it.
-      REQUEST_LOG_RETENTION_DAYS: ${REQUEST_LOG_RETENTION_DAYS:-${PURGE_OLDER_THAN_DAYS:-7}}
-      SESSION_RETENTION_DAYS: ${SESSION_RETENTION_DAYS:-${PURGE_OLDER_THAN_DAYS:-7}}
-      SESSION_METRIC_WINDOW_DAYS: ${SESSION_METRIC_WINDOW_DAYS:-${SESSION_RETENTION_DAYS:-${PURGE_OLDER_THAN_DAYS:-7}}}
+      REQUEST_LOG_RETENTION_DAYS: ${REQUEST_LOG_RETENTION_DAYS:-${PURGE_OLDER_THAN_DAYS:-9}}
+      SESSION_RETENTION_DAYS: ${SESSION_RETENTION_DAYS:-${PURGE_OLDER_THAN_DAYS:-9}}
+      SESSION_METRIC_WINDOW_DAYS: ${SESSION_METRIC_WINDOW_DAYS:-${SESSION_RETENTION_DAYS:-${PURGE_OLDER_THAN_DAYS:-9}}}
       LOG_FLUSH_INTERVAL: ${LOG_FLUSH_INTERVAL:-10}   # seconds between request-log flushes
+      # --- Weekly topic summaries ---
+      # Unset ANTHROPIC_API_KEY is fine: the default generator is offline.
+      SUMMARY_GENERATOR: ${SUMMARY_GENERATOR:-extractive:v1}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      SUMMARY_MODEL: ${SUMMARY_MODEL:-}
+      SUMMARY_TIMEOUT: ${SUMMARY_TIMEOUT:-60}
+      SUMMARY_PUBLISHER_DESCRIPTIONS_ONLY: ${SUMMARY_PUBLISHER_DESCRIPTIONS_ONLY:-true}
+      MIN_ARTICLES_FOR_SUMMARY: ${MIN_ARTICLES_FOR_SUMMARY:-3}
+      SUMMARY_MAX_ARTICLES: ${SUMMARY_MAX_ARTICLES:-80}
+      # 0 = keep forever. These rows outlive the articles they describe.
+      SUMMARY_RETENTION_WEEKS: ${SUMMARY_RETENTION_WEEKS:-0}
     depends_on:
       db:
         condition: service_healthy

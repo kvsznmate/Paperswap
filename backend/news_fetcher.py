@@ -292,6 +292,95 @@ def extract_rss_image(entry) -> str:
     return ""
 
 
+# ---------------------------------------------------------------------------
+# ARTICLE-LEVEL SUMMARIES AND THEIR PROVENANCE
+#
+# generate_short_summary_tiered() has three tiers and they are NOT equivalent:
+#
+#   publisher         the publisher's own blurb. Real, per-article information.
+#   keyword_template  one of KEYWORD_SUMMARY_RULES below -- a CANNED sentence,
+#                     byte-identical for every article that trips the same rule.
+#   topic_fallback    TOPIC_FEEDS[cat]["summary_fallback"] -- one fixed string
+#                     per topic, identical for every unmatched article in it.
+#
+# On a swipe card the distinction barely matters: the reader sees one blurb at a
+# time and a generic line is merely dull. It matters enormously to the weekly
+# topic summariser, which reads a whole week at once. Hand it 25 copies of the
+# semiconductor template and it will report chip supply chains as the theme of
+# the week -- a fact about this rule table, not about the news. Prose hides that
+# kind of artefact far better than a fabricated number does. See ADR-010 for the
+# principle and ADR-011 for this application of it.
+#
+# So the tier is recorded at write time in articles.description_source, and the
+# summariser filters on it. Deriving it after the fact by matching strings works
+# but rots the moment somebody rewords a fallback.
+#
+# The rules live at module scope with {source} as a PLACEHOLDER rather than an
+# f-string, so boilerplate_like_patterns() can be generated from them. One source
+# of truth: edit a rule and the exclusion patterns follow automatically.
+# ---------------------------------------------------------------------------
+
+DESC_PUBLISHER = "publisher"
+DESC_KEYWORD_TEMPLATE = "keyword_template"
+DESC_TOPIC_FALLBACK = "topic_fallback"
+
+DESCRIPTION_SOURCES = (DESC_PUBLISHER, DESC_KEYWORD_TEMPLATE, DESC_TOPIC_FALLBACK)
+
+KEYWORD_SUMMARY_RULES = [
+    (("ai", "artificial intelligence", "machine learning"),
+     "Industry developments in AI model scaling, infrastructure, and enterprise adoption reported by {source}."),
+    (("layoff", "job cuts", "hiring"),
+     "Workforce adjustments and operational efficiency shifts across key sector players as reported by {source}."),
+    (("chip", "nvidia", "semiconductor", "amd"),
+     "Semiconductor supply dynamics, hardware innovation, and market demand driving global hardware valuations."),
+    (("stock", "dow", "nasdaq", "s&p", "inflation"),
+     "Key market indices react to economic indicators, investor sentiment, and recent earnings reports according to {source}."),
+    (("tariff", "trade deal", "sanction"),
+     "Macroeconomic policies, trade regulations, and international market impacts analyzed by {source}."),
+    (("election", "vote", "ballot", "campaign"),
+     "Campaign developments, polling shifts, and electoral outcomes covered by {source}."),
+    (("nasa", "spacex", "orbit", "telescope"),
+     "Mission milestones and observational findings advancing our understanding of the solar system and beyond."),
+    (("transfer", "signing", "playoff", "championship", "final"),
+     "Squad changes, fixture outcomes, and title-race implications reported by {source}."),
+    (("open source", "release", "framework", "runtime", "sdk"),
+     "Tooling and release notes for developers, covering API changes and ecosystem impact, via {source}."),
+    (("skincare", "serum", "cosmetic", "fragrance"),
+     "Formulation trends, ingredient science, and brand strategy shaping the consumer beauty market."),
+]
+
+
+def _like_pattern(template: str) -> str:
+    """Turn a summary template into a SQL LIKE pattern.
+
+    Escapes LIKE's own wildcards first, THEN substitutes {source} -> %, so a
+    template that ever gains a literal % or _ cannot silently widen into a
+    pattern that excludes real publisher text.
+    """
+    escaped = (template.replace("\\", "\\\\")
+                       .replace("%", "\\%")
+                       .replace("_", "\\_"))
+    return escaped.replace("{source}", "%")
+
+
+def boilerplate_like_patterns() -> list:
+    """SQL LIKE patterns matching every canned summary this module can emit.
+
+    Needed only for rows written BEFORE articles.description_source existed.
+    Those carry NULL and cannot be filtered on the column, so the summariser
+    falls back to matching them here.
+
+    This is a read-time filter, not a backfill. Nothing rewrites the old rows to
+    a guessed tier -- the tier that produced them was never observed, and writing
+    one now is the same class of error as backfilling the old request_logs rows
+    with a status code nobody measured. Inside one purge window every NULL row is
+    gone anyway.
+    """
+    patterns = [_like_pattern(tpl) for _kw, tpl in KEYWORD_SUMMARY_RULES]
+    patterns += [_like_pattern(cfg["summary_fallback"]) for cfg in TOPIC_FEEDS.values()]
+    return patterns
+
+
 def _title_mentions(title_lower: str, keywords) -> bool:
     """Word-boundary keyword test.
 
@@ -303,10 +392,26 @@ def _title_mentions(title_lower: str, keywords) -> bool:
 
 
 def generate_short_summary(title: str, category: str, raw_desc: str, source: str) -> str:
-    """Generate a distinct short summary for a news item.
+    """Text-only wrapper around generate_short_summary_tiered().
+
+    Kept because callers and tests that only want the blurb should not have to
+    care about the tier. Everything that WRITES an article should use the tiered
+    form so the provenance is stored rather than thrown away.
+    """
+    return generate_short_summary_tiered(title, category, raw_desc, source)[0]
+
+
+def generate_short_summary_tiered(title: str, category: str, raw_desc: str,
+                                  source: str) -> tuple:
+    """Generate a short summary for a news item, and say where it came from.
+
+    Returns (summary_text, description_source) where description_source is one
+    of DESC_PUBLISHER / DESC_KEYWORD_TEMPLATE / DESC_TOPIC_FALLBACK.
 
     Prefers the publisher's own description; only falls back to a generated line
-    when the description is missing or just echoes the headline.
+    when the description is missing or just echoes the headline. The second
+    element is the whole point of this function existing -- see the block comment
+    above KEYWORD_SUMMARY_RULES.
     """
     clean_desc = clean_html(raw_desc)
     clean_title = clean_html(title)
@@ -319,38 +424,17 @@ def generate_short_summary(title: str, category: str, raw_desc: str, source: str
     overlap = len(title_words.intersection(desc_words)) / max(len(title_words), 1)
 
     if clean_desc and overlap < 0.70 and len(clean_desc) > 30:
-        return clean_desc
+        return clean_desc, DESC_PUBLISHER
 
     # Cross-topic keyword heuristics, checked before the per-topic fallback.
     title_lower = title.lower()
-    keyword_rules = [
-        (("ai", "artificial intelligence", "machine learning"),
-         f"Industry developments in AI model scaling, infrastructure, and enterprise adoption reported by {source}."),
-        (("layoff", "job cuts", "hiring"),
-         f"Workforce adjustments and operational efficiency shifts across key sector players as reported by {source}."),
-        (("chip", "nvidia", "semiconductor", "amd"),
-         "Semiconductor supply dynamics, hardware innovation, and market demand driving global hardware valuations."),
-        (("stock", "dow", "nasdaq", "s&p", "inflation"),
-         f"Key market indices react to economic indicators, investor sentiment, and recent earnings reports according to {source}."),
-        (("tariff", "trade deal", "sanction"),
-         f"Macroeconomic policies, trade regulations, and international market impacts analyzed by {source}."),
-        (("election", "vote", "ballot", "campaign"),
-         f"Campaign developments, polling shifts, and electoral outcomes covered by {source}."),
-        (("nasa", "spacex", "orbit", "telescope"),
-         "Mission milestones and observational findings advancing our understanding of the solar system and beyond."),
-        (("transfer", "signing", "playoff", "championship", "final"),
-         f"Squad changes, fixture outcomes, and title-race implications reported by {source}."),
-        (("open source", "release", "framework", "runtime", "sdk"),
-         f"Tooling and release notes for developers, covering API changes and ecosystem impact, via {source}."),
-        (("skincare", "serum", "cosmetic", "fragrance"),
-         "Formulation trends, ingredient science, and brand strategy shaping the consumer beauty market."),
-    ]
-
-    for keywords, summary in keyword_rules:
+    for keywords, template in KEYWORD_SUMMARY_RULES:
         if _title_mentions(title_lower, keywords):
-            return summary
+            # .format on a template with no placeholder is a no-op, so the three
+            # source-free rules pass through untouched.
+            return template.format(source=source), DESC_KEYWORD_TEMPLATE
 
-    return get_topic_config(category)["summary_fallback"]
+    return get_topic_config(category)["summary_fallback"], DESC_TOPIC_FALLBACK
 
 
 def fetch_from_news_api(category: str, count: int = ARTICLES_PER_CATEGORY) -> list:
@@ -387,10 +471,13 @@ def fetch_from_news_api(category: str, count: int = ARTICLES_PER_CATEGORY) -> li
 
             src_name = art.get("source", {}).get("name", "News API")
             title = art.get("title", "Untitled News")
+            desc, desc_source = generate_short_summary_tiered(
+                title, category, art.get("description", ""), src_name)
 
             results.append({
                 "title": title,
-                "description": generate_short_summary(title, category, art.get("description", ""), src_name),
+                "description": desc,
+                "description_source": desc_source,
                 "raw_description": art.get("description", ""),
                 "source": src_name,
                 "published_at": pub_str,
@@ -428,9 +515,12 @@ def fetch_from_rss(category: str, count: int = ARTICLES_PER_CATEGORY) -> list:
             if getattr(entry, 'published_parsed', None):
                 pub_str = datetime(*entry.published_parsed[:6]).strftime("%b %d, %Y - %H:%M")
 
+            desc, desc_source = generate_short_summary_tiered(title, category, raw_desc, source)
+
             results.append({
                 "title": title,
-                "description": generate_short_summary(title, category, raw_desc, source),
+                "description": desc,
+                "description_source": desc_source,
                 "raw_description": raw_desc,
                 "source": source,
                 "published_at": pub_str,
@@ -497,8 +587,11 @@ def fetch_and_sync_news_to_db(categories=None) -> list:
                 item['image_url'] = fallback_image(true_category, idx)
 
         # Rebuild the blurb against the FINAL topic so a politics story can never
-        # keep a tech-flavoured fallback line.
-        item['description'] = generate_short_summary(
+        # keep a tech-flavoured fallback line. The tier is recaptured with it --
+        # reclassification can move an article from a publisher description to a
+        # different topic's fallback, and description_source has to follow or the
+        # weekly summariser will treat boilerplate as real content.
+        item['description'], item['description_source'] = generate_short_summary_tiered(
             item['title'],
             true_category,
             item.get('raw_description', ''),
