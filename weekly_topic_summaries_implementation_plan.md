@@ -6,6 +6,8 @@ A per-topic weekly digest: for each topic in the catalogue, one short paragraph 
 
 Target shape, in the user's words: a table with `topic`, `summary`, `number_of_articles`.
 
+**Scope note:** article-level summaries already exist — `generate_short_summary()` writes one into `articles.description` for every article at fetch time. Nothing here re-summarises an article. This is a **summary of existing summaries**, and the raw article text was never stored anyway, so `description` is the only body text available. The catch is that not every `description` is real content; §1.5 is about separating the ones that are.
+
 ---
 
 ## 0. What already exists (read before planning changes)
@@ -14,6 +16,7 @@ Target shape, in the user's words: a table with `topic`, `summary`, `number_of_a
 |---|---|---|
 | Article store | `backend/database.py` → `articles` | Postgres 16. Columns: `article_key`, `title`, `description`, `source`, `published_at`, `category`, `image_url`, `url`, `created_at`. |
 | Topic catalogue | `database.CATEGORIES` → `categories` table | 7 slugs: TECH, FINANCE, SPORTS, POLITICS, PROGRAMMING, SCIENCE, BEAUTY. Code is source of truth, synced into the table on every boot (ADR-006). |
+| **Article-level summaries** | `news_fetcher.generate_short_summary()` → `articles.description` | **Already built.** Every article carries a short summary. But it is produced by a three-tier fallback and only tier 1 is real — see §1.5. |
 | Classification | `news_fetcher.py` | Weighted keyword scorer. **Accuracy has never been measured** (ADR-007). |
 | Refresh cycle | `main.refresh_pipeline()` | `fetch_and_sync_news_to_db()` then `purge_old_data(...)`. Runs on startup and every `REFRESH_INTERVAL` hours (default 12). |
 | Retention | `main.PURGE_OLDER_THAN_DAYS` | **Articles are deleted after 7 days.** |
@@ -49,6 +52,59 @@ The rest of this plan assumes **Option A**.
 
 ---
 
+## 1.5 The second constraint: most article summaries are boilerplate
+
+The input to the topic summariser is `articles.description`, written by `generate_short_summary(title, category, raw_desc, source)`. That function has **three tiers**, and they are not equivalent:
+
+| Tier | Condition | What you get |
+|---|---|---|
+| **1 — real** | Publisher description exists, >30 chars, <70% word overlap with the title | The publisher's own sentence. Genuine per-article information. |
+| **2 — keyword template** | Title matches one of 10 keyword rules | A **canned sentence**, identical for every article that trips the same rule. Every story mentioning `chip`/`nvidia`/`semiconductor`/`amd` gets the exact same line about "semiconductor supply dynamics, hardware innovation, and market demand". |
+| **3 — topic fallback** | Nothing else matched | `TOPIC_FEEDS[category]["summary_fallback"]` — **one fixed string per topic**, e.g. every unmatched TECH article gets "Breakthrough technology updates and strategic market shifts impacting digital infrastructure and software." |
+
+### Why this matters more than it looks
+
+Feed a week of TECH descriptions to a summariser and suppose 25 of the 60 are the tier-2 semiconductor template. Any summariser — LLM or extractive — will read that repetition as the dominant theme of the week and write "chip supply chains dominated coverage."
+
+That sentence is **an artefact of the template, not a finding about the news.** The frequency of a canned string is evidence about `generate_short_summary`'s keyword rules, nothing more. Tier 3 is worse: a topic with a quiet week produces the *same* fallback sentence 40 times, and a summariser handed 40 identical sentences will confidently describe the week using the fallback's own wording.
+
+This is the ADR-010 failure mode in prose form. A number that was manufactured by construction rather than measured is exactly what that ADR exists to prevent; a *theme* manufactured the same way is the same defect wearing different clothes, and prose hides it far better than `int(used_bytes * 0.62)` did.
+
+### Fix: tier the input, and only summarise tier 1
+
+**Short term — exclude by known-string matching.** Both boilerplate sets are finite and generated in code:
+
+- 10 tier-2 templates from `keyword_rules` (6 of them interpolate `{source}`, so match on the invariant portion or regex the source out).
+- 7 tier-3 strings from `TOPIC_FEEDS[*]["summary_fallback"]`.
+
+Build the set once at import from `news_fetcher`, don't retype the strings — a copy drifts the moment somebody edits a fallback. Exclude matching rows from the generator input.
+
+**Proper fix — record the tier at write time.** Add a `description_source` column to `articles`:
+
+```sql
+ALTER TABLE articles ADD COLUMN IF NOT EXISTS description_source TEXT
+    CHECK (description_source IN ('publisher', 'keyword_template', 'topic_fallback'));
+```
+
+Have `generate_short_summary()` return `(text, tier)` and `save_article` persist it. Then the summariser filters on `description_source = 'publisher'` — exact, one index scan, no string matching, and it survives edits to the templates. This is the same move ADR-010 made for telemetry: the provenance travels with the value instead of being reconstructed downstream.
+
+Old rows get `NULL` and are **not** backfilled by guessing — same reasoning as the `request_logs.status_code` migration, which deliberately left old rows null rather than manufacturing a measurement. Within 9 days the purge retires every null anyway.
+
+### Knock-on: two counts, not one
+
+Once boilerplate is excluded, "how many articles" has two honest answers. Store both:
+
+- `number_of_articles` — rows **actually fed to the generator**. The number the summary describes.
+- `articles_in_window` — rows matching topic + week, before filtering. The number the topic actually saw.
+
+The page can then say *"summarised from 34 of 61 articles"*, which is honest and doubles as a live quality signal on the fetcher: if that ratio collapses, tier 1 is drying up and the digests are about to get thin. One measured number would have hidden that.
+
+### And a floor that now bites harder
+
+`MIN_ARTICLES_FOR_SUMMARY` (§3, Step 3) applies to the **post-filter** count. A topic with 61 articles of which 2 are publisher-written does not get a summary. BEAUTY and PROGRAMMING are the likely casualties — narrow topics on Google News RSS, where descriptions are frequently absent. Expect some weeks to have no row for some topics; that is the system working.
+
+---
+
 ## 2. Schema
 
 ### 2.1 Why the proposed three columns aren't enough
@@ -73,6 +129,7 @@ CREATE TABLE IF NOT EXISTS topic_summaries (
     week_end            DATE NOT NULL,            -- Sunday, UTC, inclusive
     summary             TEXT NOT NULL,
     number_of_articles  INTEGER NOT NULL CHECK (number_of_articles > 0),
+    articles_in_window  INTEGER NOT NULL,         -- pre-filter count; see §1.5
     top_sources         TEXT[],                   -- measured; nullable
     generator           TEXT NOT NULL,            -- 'extractive:v1' | 'anthropic:<model-id>'
     generated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -87,7 +144,8 @@ Column rationale:
 
 - **`REFERENCES categories (slug)`** — the catalogue is server-driven (ADR-006). The FK stops a typo'd or retired slug entering, the same way `normalize_category()` protects `articles`.
 - **`UNIQUE (topic, week_start)`** — makes the write idempotent via `ON CONFLICT DO UPDATE`. The scheduler runs every 12 h; without this, a Monday with two refreshes produces two rows.
-- **`number_of_articles`** — the count of rows **actually passed to the generator**, not the count matching the window. If the generator skips articles (empty description, over a token budget), this must reflect the skip or the number describes a different set than the summary does. ADR-010 territory.
+- **`number_of_articles`** — the count of rows **actually passed to the generator**, not the count matching the window. Given §1.5 this gap is not hypothetical: boilerplate-description rows are excluded, and on a bad week that is most of them. If this counted the window instead, the number would describe a different set than the summary does. ADR-010 territory.
+- **`articles_in_window`** — the pre-filter count. Both are measured, neither is redundant, and the pair is what lets the page say "summarised from 34 of 61" instead of picking one number and hoping.
 - **`generator` + `generated_at`** — ADR-010 has no "estimated" state, and a generated sentence is not a measurement. It can't be given `measured: true`, so instead it names what produced it and when. A summary from `extractive:v1` and one from an LLM are different kinds of object and the row should say which it is.
 - **`top_sources`** — genuinely measured (a `GROUP BY source` on the same window). Cheap, and gives the summary page something factual to sit next to the prose.
 
@@ -122,11 +180,13 @@ Steps 1–5 are the minimum shippable feature. Steps 6–9 make it good.
 In `database.py`:
 
 ```python
-def get_articles_for_week(topic: str, week_start: date) -> list
-def count_articles_for_week(topic: str, week_start: date) -> int
-def get_top_sources_for_week(topic: str, week_start: date, limit: int = 5) -> list
-def weeks_missing_summaries(oldest_week: date) -> list[tuple[str, date]]
+def get_articles_for_week(topic, week_start, publisher_only=True) -> list
+def count_articles_for_week(topic, week_start) -> int      # pre-filter -> articles_in_window
+def get_top_sources_for_week(topic, week_start, limit=5) -> list
+def weeks_missing_summaries(oldest_week) -> list[tuple[str, date]]
 ```
+
+`publisher_only=True` is the §1.5 filter and is the **default**, so the boilerplate-contaminated path has to be asked for explicitly rather than being what you get by forgetting.
 
 Pure SQL, no generation, no network. This half is fully testable without an API key and is where correctness actually lives.
 
@@ -138,18 +198,22 @@ One interface, two backends, selected by `SUMMARY_GENERATOR`:
 
 ```python
 def summarise(topic: str, articles: list[dict]) -> tuple[str, str]:
-    """Return (summary_text, generator_id). Raises on failure — never returns
-    a placeholder, because a placeholder in this table is indistinguishable
-    from a real summary once the source articles are purged."""
+    """Summarise a week of EXISTING article-level summaries (articles.description,
+    tier-1 only — see §1.5) into one paragraph for the topic.
+
+    Returns (summary_text, generator_id). Raises on failure — never returns a
+    placeholder, because a placeholder in this table is indistinguishable from a
+    real summary once the source articles are purged."""
 ```
 
 **`extractive:v1` — build this first.** Deterministic, no network, no key, no cost. Roughly: term-frequency over titles with a stopword list, pick the top 3–5 headlines weighted for source diversity, assemble a templated paragraph ("Coverage centred on X and Y, across N articles from A, B and C."). It is not eloquent. It is honest, free, and it makes the whole pipeline end-to-end testable on day one — which means Steps 1, 2, 4 and 5 can be verified before any LLM question is settled.
 
 **`anthropic:<model-id>` — the quality path.** One call per topic per week.
 
-- Prompt gets `title`, `description`, `source` for each article — never full text (not stored) and never the URL (invites hallucinated citation).
+- Prompt gets `title`, `description`, `source` per article — where `description` is the **existing article-level summary**, already tier-1-filtered per §1.5. Full text is not an option (never stored) and the URL is deliberately withheld (invites hallucinated citation).
+- Because the input is already a summary, say so in the prompt. The model is compressing seven-to-eighty publisher blurbs into one paragraph, not reading articles, and it should not write as though it read them.
 - Instruct: 3–5 sentences, only what appears in the supplied list, name recurring stories, no invented figures, no speculation about causes.
-- Volume: `ARTICLES_PER_CATEGORY=12` × 2 refreshes/day × 7 days = 168 candidates per topic per week before dedup; realistically 30–80 unique. At ~60 tokens each that's ~5 k input tokens per topic, ~35 k for all seven, **once a week**. The cost is negligible; a per-run token budget guard is still worth having so a feed anomaly can't turn into a surprise bill.
+- Volume: `ARTICLES_PER_CATEGORY=12` × 2 refreshes/day × 7 days = 168 candidates per topic per week before dedup; realistically 30–80 unique, and fewer again after the tier-1 filter. At ~60 tokens each that's roughly 2–5 k input tokens per topic, well under 35 k for all seven, **once a week**. The cost is negligible; a per-run token budget guard is still worth having so a feed anomaly can't turn into a surprise bill.
 - Pin the model ID in config and record it in `generator`. Check current IDs against the Anthropic docs rather than hardcoding from memory — they change.
 - Add `anthropic` (or plain `requests`, which is already a dependency) to `requirements.txt`. Note the box is 956 MB with a 2 GB swap file; a local model is not an option.
 
@@ -160,8 +224,8 @@ def summarise(topic: str, articles: list[dict]) -> tuple[str, str]:
 ### Step 4 — Persist
 
 ```python
-def save_topic_summary(topic, week_start, week_end, summary,
-                       number_of_articles, top_sources, generator) -> None
+def save_topic_summary(topic, week_start, week_end, summary, number_of_articles,
+                       articles_in_window, top_sources, generator) -> None
 ```
 
 ```sql
@@ -170,6 +234,7 @@ VALUES (...)
 ON CONFLICT (topic, week_start) DO UPDATE SET
     summary            = EXCLUDED.summary,
     number_of_articles = EXCLUDED.number_of_articles,
+    articles_in_window = EXCLUDED.articles_in_window,
     top_sources        = EXCLUDED.top_sources,
     generator          = EXCLUDED.generator,
     generated_at       = NOW()
@@ -205,7 +270,7 @@ Mirror the existing endpoint conventions exactly — `slowapi` limits, `JSONResp
 | GET | `/api/v1/summaries/{topic}` | public | 60/min | History for one topic. `?weeks=N` (default 8, max 52). 404 on unknown slug via `clean_category_filter`. |
 | POST | `/api/v1/summaries/generate` | `require_admin_key` | 2/hour | 202 + `BackgroundTasks`, exactly like `/api/v1/cards/refresh`. Optional `?week_start=` for backfill. POST because it mutates and costs money. |
 
-Decorate responses the way `_decorate_articles` does — attach `category_label` and `accent_color` from `CATEGORIES` so the client never hardcodes a colour map (ADR-006). Include `week_start`, `week_end`, `number_of_articles`, `generator`, `generated_at`, and a `basis` field spelling out `"articles ingested in this window; ingest time, not publication time"`.
+Decorate responses the way `_decorate_articles` does — attach `category_label` and `accent_color` from `CATEGORIES` so the client never hardcodes a colour map (ADR-006). Include `week_start`, `week_end`, `number_of_articles`, `articles_in_window`, `generator`, `generated_at`, and a `basis` field spelling out `"summarised from publisher-written article summaries ingested in this window; ingest time, not publication time"`.
 
 ### Step 7 — Client
 
@@ -219,7 +284,8 @@ Follow the pattern in `test_telemetry_provenance.py` — that suite exists becau
 
 1. **Week maths** — `last_completed_week_start()` for all 7 weekdays, plus a year boundary and an ISO week 53 year.
 2. **Half-open window** — an article at `week_end 23:59:59.9` is included; one at `week_start - 1µs` is not.
-3. **Count integrity** — `number_of_articles` equals `len(articles_passed_to_generator)`, not the raw window count, when the generator skips rows. The ADR-010 check.
+3. **Count integrity** — `number_of_articles` equals `len(articles_passed_to_generator)` and `articles_in_window` equals the raw window count, and the two differ when boilerplate is present. The ADR-010 check.
+3b. **Boilerplate exclusion (§1.5)** — seed a week where 20 of 25 descriptions are the TECH `summary_fallback` string and 3 are the semiconductor keyword template. Assert only the 2 publisher-written rows reach the generator, `number_of_articles == 2`, `articles_in_window == 25`, and — with `MIN_ARTICLES_FOR_SUMMARY=3` — that **no row is written at all**. This is the test that stops the digest reporting a template as a theme.
 4. **Idempotency** — running the job twice yields one row per `(topic, week)`, updated rather than duplicated.
 5. **Ordering** — seed articles at day 8, run `refresh_pipeline()`, assert the summary row exists *and* the articles are gone. This is the regression test for §1 and the one most likely to save the feature.
 6. **Failure writes nothing** — generator raises → zero rows, warning logged, no placeholder.
@@ -254,7 +320,17 @@ SUMMARY_MODEL=
 
 # Topics with fewer than this many articles in the week get NO row. A weekly
 # digest built from two articles is noise with an authoritative label on it.
+# Counted AFTER the boilerplate filter below, so this bites harder than it looks.
 MIN_ARTICLES_FOR_SUMMARY=3
+
+# Exclude articles whose description is a generate_short_summary() fallback
+# rather than a real publisher blurb. Leave this true.
+#
+# Tier 2 and 3 of that function emit CANNED strings -- one per keyword rule, one
+# per topic. Feed 25 copies of the same sentence to a summariser and it reports
+# that sentence's subject as the theme of the week. That is a fact about the
+# template, not about the news. See ADR-011 / plan section 1.5.
+SUMMARY_PUBLISHER_DESCRIPTIONS_ONLY=true
 
 # Weeks of summary history to keep. 0 = forever (the default and the intent:
 # these rows are the only record of a week once its articles are purged).
@@ -272,6 +348,7 @@ SUMMARY_RETENTION_WEEKS=0
 This project's own standard (ADR-010) is that a number travels with its provenance. The same applies to prose.
 
 1. **Topic assignment is unmeasured.** Every summary is "articles the keyword classifier assigned to TECH", not "the week's tech news". ADR-007 states the classifier's accuracy is unknown and that Tech↔Finance reassignment cannot currently fire. The summary inherits that error and, being prose, hides it better than a badge does.
+1b. **It is a summary of summaries, and the summaries vary in quality.** The input is `articles.description`, itself generated by `generate_short_summary()`. Even after filtering to tier 1, that is the publisher's promotional blurb, not the article — so the digest describes how stories were *pitched* that week, which correlates with but is not the same as what happened. Two compression steps, and the first one was never evaluated either.
 2. **Ingest time ≠ publication time.** `created_at` is when Paperswap saw the article. A Sunday-night story fetched Monday 06:00 lands in the following week.
 3. **Summary quality is unevaluated.** No rubric, no baseline, no human comparison. Same honest position as ADR-007: it may be good, nobody has checked. If it matters, the evaluation is a handful of weeks scored blind against the extractive baseline.
 4. **`number_of_articles` is unverifiable after 7 (or 9) days.** No test and no audit can recompute it once the sources are purged. It is right at write time or never.
@@ -284,9 +361,10 @@ This project's own standard (ADR-010) is that a number travels with its provenan
 
 1. **Option A, B or C from §1?** A is recommended; B is the zero-retention-change escape hatch if moving `PURGE_OLDER_THAN_DAYS` feels risky.
 2. **LLM or extractive at launch?** Suggestion: ship extractive, get the pipeline correct and tested, then flip `SUMMARY_GENERATOR` once. The row records which wrote it, so both can coexist in history.
-3. **One summary per topic, or a cross-topic "week in review" too?** The latter is one more row with `topic = '__ALL__'`, but that breaks the FK to `categories`. If it's wanted, it needs a nullable `topic` and a partial unique index instead.
-4. **Backfill?** The current DB holds ~7 days, so at most one completed week is recoverable — and only if the job runs before the next purge. Everything before that is already gone. Worth running `POST /api/v1/summaries/generate` manually the day this ships.
-5. **Should the summary page be public or admin-gated?** The feed is public; the analytics dashboard is not. Summaries feel like product, not operations, so public — but it's a per-topic aggregate of what the service ingests, which is closer to operational data than a single card is.
+3. **Add `articles.description_source` now, or filter by string matching first?** (§1.5.) The column is the right answer and costs one `ALTER TABLE` plus a two-line change to `generate_short_summary`; string matching ships a day sooner and rots the first time a fallback is reworded.
+4. **One summary per topic, or a cross-topic "week in review" too?** The latter is one more row with `topic = '__ALL__'`, but that breaks the FK to `categories`. If it's wanted, it needs a nullable `topic` and a partial unique index instead.
+5. **Backfill?** The current DB holds ~7 days, so at most one completed week is recoverable — and only if the job runs before the next purge. Everything before that is already gone. Worth running `POST /api/v1/summaries/generate` manually the day this ships. Note that pre-existing rows have no `description_source`, so a backfilled week has to fall back to string matching regardless.
+6. **Should the summary page be public or admin-gated?** The feed is public; the analytics dashboard is not. Summaries feel like product, not operations, so public — but it's a per-topic aggregate of what the service ingests, which is closer to operational data than a single card is.
 
 ---
 
@@ -295,13 +373,16 @@ This project's own standard (ADR-010) is that a number travels with its provenan
 | # | Work | Depends on | Ships something |
 |---|---|---|---|
 | 1 | §1 decision + §2 schema in `init_db()` | — | no |
-| 2 | Step 2 read functions + their tests | 1 | no |
-| 3 | `extractive:v1` generator | — | no |
-| 4 | Step 4 persist + Step 5 pipeline wiring | 1–3 | **yes — rows appear** |
-| 5 | Step 8 tests 1–6 | 4 | no |
-| 6 | Step 6 API endpoints | 4 | **yes — data reachable** |
-| 7 | Step 7 client page | 6 | **yes — feature visible** |
-| 8 | Anthropic generator behind the env flag | 4 | **yes — quality jump** |
-| 9 | Step 9 docs + ADR-011 | all | no |
+| 2 | §1.5 tier filter — `description_source` column, or the known-string set | — | no |
+| 3 | Step 2 read functions + their tests | 1, 2 | no |
+| 4 | `extractive:v1` generator | 2 | no |
+| 5 | Step 4 persist + Step 5 pipeline wiring | 1–4 | **yes — rows appear** |
+| 6 | Step 8 tests 1–7 (incl. 3b) | 5 | no |
+| 7 | Step 6 API endpoints | 5 | **yes — data reachable** |
+| 8 | Step 7 client page | 7 | **yes — feature visible** |
+| 9 | Anthropic generator behind the env flag | 5 | **yes — quality jump** |
+| 10 | Step 9 docs + ADR-011 | all | no |
 
-Rows exist by item 4, the feature is visible by item 7, and the LLM is an independent upgrade that can land whenever.
+Rows exist by item 5, the feature is visible by item 8, and the LLM is an independent upgrade that can land whenever.
+
+Item 2 is the one to resist skipping. Without the tier filter the pipeline still runs, still writes rows, and still produces confident paragraphs — they will just be describing `generate_short_summary`'s fallback strings back to you, and there is no point in the pipeline where that failure announces itself.
