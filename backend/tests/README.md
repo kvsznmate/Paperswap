@@ -39,13 +39,15 @@ docker compose exec news-cards-backend sh -c 'for t in tests/test_*.py; do echo 
 records swipes. Point `DATABASE_URL` at a scratch database if you do not want
 production rows; the volumes are small (tens of rows) but they are real.
 
-**`test_topic_summaries.py` seeds weeks in 2019 on purpose.** Its count checks
-compare against fixture-only totals, so a live article inside a fixture window
-makes them all wrong -- and wrong in a way that reads as a filtering bug. A week
-older than `PURGE_OLDER_THAN_DAYS` cannot contain live rows, and
-`require_empty_week()` asserts that rather than trusting it. It also calls
-`purge_old_articles()` once, which is the same call the scheduler makes every
-12 hours, and it never deletes a summary for a week it did not create.
+**`test_topic_summaries.py` computes its fixture weeks 12 weeks back.** Its
+count checks compare against fixture-only totals, so a live article inside a
+fixture window makes them all wrong -- and wrong in a way that reads as a
+filtering bug rather than as contamination. The only requirement is a week older
+than `PURGE_OLDER_THAN_DAYS`; 12 weeks is just comfortable headroom, and
+`require_empty_week()` asserts each window really is empty rather than trusting
+it. The suite also calls `purge_old_articles()` once, which is the same call the
+scheduler makes every 12 hours, and it never deletes a summary for a week it did
+not create.
 
 **`test_api_security.py`, `test_admin_auth.py` and `test_swipe_logging.py` set
 `ADMIN_API_KEY` themselves** and reload `main`, so they do not depend on your
