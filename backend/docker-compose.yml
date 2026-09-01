@@ -23,6 +23,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # Explicit tag so the enrichment service can point at this exact image
+    # rather than building a second copy of it. See the note on that service.
+    image: paperswap-backend:latest
     container_name: news_cards_backend
     ports:
       - "8000:8000"
@@ -61,6 +64,57 @@ services:
       db:
         condition: service_healthy
     restart: unless-stopped
+
+  # Nightly enrichment (ADR-011). One-shot, not a server -- it exits when done.
+  #
+  #   docker compose run --rm enrichment python enrichment.py --dry-run
+  #   docker compose run --rm enrichment python enrichment.py --limit 5
+  #
+  # Behind a profile so `docker compose up` never starts it.
+  #
+  # NO build: section, deliberately -- it points at the backend's image tag.
+  # This block used to carry `build: context: .`, which produced a SECOND image
+  # (backend-enrichment) that `docker compose up --build` never refreshed,
+  # because `up` skips profiled services. The result was a stale enrichment
+  # image running week-old code against a freshly built backend: a run reported
+  # the previous version's log format and cost an hour of confusion. Sharing one
+  # tag makes that impossible.
+  #
+  # The tradeoff is that `run enrichment` needs the image to already exist, so a
+  # fresh checkout must `docker compose up -d --build` before the first run.
+  #
+  # A separate service rather than `exec` into the running API, purely for
+  # mem_limit. On a 956 MB box the failure mode that matters is the OOM killer
+  # picking Postgres, because Postgres has the largest RSS. Capping this
+  # container means a runaway enrichment run kills itself instead. 400m covers
+  # the ~250 MB the ONNX session, tokenizer and lxml actually need, and leaves
+  # headroom above Postgres (~250) and the API (~130).
+  enrichment:
+    image: paperswap-backend:latest
+    profiles: ["tools"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-newsdb}
+      EMBED_MODEL_PATH: ${EMBED_MODEL_PATH:-models/minilm-int8.onnx}
+      EMBED_TOKENIZER_PATH: ${EMBED_TOKENIZER_PATH:-models/tokenizer.json}
+      BULLET_COUNT: ${BULLET_COUNT:-3}
+      # Give up on a row after this many failed extraction attempts, so a
+      # permanently unreadable page stops costing a fetch every night.
+      ENRICH_MAX_ATTEMPTS: ${ENRICH_MAX_ATTEMPTS:-3}
+      # The job reads MemAvailable from /proc/meminfo, which inside a container
+      # reports the HOST's memory, not this container's limit. That is what we
+      # want -- the question is whether the box has room, not whether the cgroup
+      # does. Refuses to load the session below this.
+      ENRICH_MIN_AVAILABLE_MB: ${ENRICH_MIN_AVAILABLE_MB:-250}
+    volumes:
+      # Read-only bind mount, not a named volume: these are two files you
+      # downloaded by hand and may need to swap if the export turns out to be
+      # wrong for this CPU. A named volume would hide them.
+      - ./models:/app/models:ro
+    mem_limit: 400m
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"        # one-shot; restarting a finished batch would re-run it
 
 volumes:
   pgdata:

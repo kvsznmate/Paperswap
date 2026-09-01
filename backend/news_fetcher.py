@@ -22,14 +22,31 @@ ARTICLES_PER_CATEGORY = int(os.getenv("ARTICLES_PER_CATEGORY", "12"))
 # database.CATEGORIES, then add a matching block here. Nothing else changes.
 #
 #   newsapi_query   -> passed to NewsAPI /v2/everything (primary source)
-#   rss_url         -> Google News RSS (fallback when NewsAPI is unset/short)
+#   rss_urls        -> publisher feeds, round-robin. Verified with check_feeds.py
 #   summary_fallback-> used when the feed gives no usable description
 #   images          -> hero image used only when the article has none of its own
+#
+# These were Google News search feeds until every one of them was replaced.
+# Google News does not publish article links, it publishes redirect wrappers
+# (news.google.com/rss/articles/CBMi...) that bounce through consent.google.com
+# and loop. A phone browser follows them fine, so swipe-to-read always worked --
+# but server-side extraction gets nothing, so full_text was NULL on all 532
+# rows and every card back was empty. Since 2024 the wrapper cannot be decoded
+# offline either; resolving it needs Google's undocumented batchexecute endpoint.
+#
+# Feeds rot. Re-run `python check_feeds.py --extract` before trusting a change
+# here -- and note that --extract is the test that matters: MarketWatch,
+# Politico and Nature all return perfectly clean links that yield zero text.
 # ---------------------------------------------------------------------------
 TOPIC_FEEDS = {
     "TECH": {
         "newsapi_query": "technology OR tech OR AI",
-        "rss_url": "https://news.google.com/rss/search?q=technology+industry+AI&hl=en-US&gl=US&ceid=US:en",
+        "rss_urls": [
+            "https://feeds.arstechnica.com/arstechnica/index",
+            "https://www.theverge.com/rss/index.xml",
+            "https://techcrunch.com/feed/",
+            "https://www.engadget.com/rss.xml",
+        ],
         "summary_fallback": "Breakthrough technology updates and strategic market shifts impacting digital infrastructure and software.",
         "images": [
             "https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=800&q=80",
@@ -40,7 +57,11 @@ TOPIC_FEEDS = {
     },
     "FINANCE": {
         "newsapi_query": "finance OR stocks OR markets OR earnings",
-        "rss_url": "https://news.google.com/rss/search?q=finance+stocks+markets&hl=en-US&gl=US&ceid=US:en",
+        "rss_urls": [
+            "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+            "https://finance.yahoo.com/news/rssindex",
+            "https://feeds.bbci.co.uk/news/business/rss.xml",
+        ],
         "summary_fallback": "Financial sector analysis covering corporate earnings, market trends, and strategic investment movements.",
         "images": [
             "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?auto=format&fit=crop&w=800&q=80",
@@ -51,7 +72,10 @@ TOPIC_FEEDS = {
     },
     "SPORTS": {
         "newsapi_query": "sports OR football OR basketball OR soccer OR tennis",
-        "rss_url": "https://news.google.com/rss/headlines/section/topic/SPORTS?hl=en-US&gl=US&ceid=US:en",
+        "rss_urls": [
+            "https://feeds.bbci.co.uk/sport/rss.xml",
+            "https://www.skysports.com/rss/12040",
+        ],
         "summary_fallback": "Match results, transfer moves, and championship standings from across the world of professional sport.",
         "images": [
             "https://loremflickr.com/800/1200/stadium,sport?lock=11",
@@ -62,7 +86,10 @@ TOPIC_FEEDS = {
     },
     "POLITICS": {
         "newsapi_query": "politics OR election OR parliament OR government policy",
-        "rss_url": "https://news.google.com/rss/search?q=politics+election+government+policy&hl=en-US&gl=US&ceid=US:en",
+        "rss_urls": [
+            "https://feeds.bbci.co.uk/news/politics/rss.xml",
+            "https://feeds.npr.org/1014/rss.xml",
+        ],
         "summary_fallback": "Legislative developments, election coverage, and policy debates shaping domestic and international governance.",
         "images": [
             "https://loremflickr.com/800/1200/parliament,building?lock=21",
@@ -73,7 +100,13 @@ TOPIC_FEEDS = {
     },
     "PROGRAMMING": {
         "newsapi_query": "programming OR \"software development\" OR \"open source\" OR developer tools",
-        "rss_url": "https://news.google.com/rss/search?q=programming+software+development+open+source+developer&hl=en-US&gl=US&ceid=US:en",
+        "rss_urls": [
+            "https://dev.to/feed",
+            "https://feed.infoq.com/",
+            # Highest-variance feed here: HN links wherever the story lives, so
+            # extraction success swings between a clean blog and a PDF.
+            "https://hnrss.org/frontpage",
+        ],
         "summary_fallback": "Language releases, framework updates, and open-source project news relevant to working software engineers.",
         "images": [
             "https://loremflickr.com/800/1200/code,screen?lock=31",
@@ -84,7 +117,11 @@ TOPIC_FEEDS = {
     },
     "SCIENCE": {
         "newsapi_query": "science OR research OR space OR physics OR biology",
-        "rss_url": "https://news.google.com/rss/headlines/section/topic/SCIENCE?hl=en-US&gl=US&ceid=US:en",
+        "rss_urls": [
+            "https://phys.org/rss-feed/",
+            "https://www.sciencedaily.com/rss/all.xml",
+            "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
+        ],
         "summary_fallback": "Peer-reviewed findings, space missions, and laboratory breakthroughs reported from the global research community.",
         "images": [
             "https://loremflickr.com/800/1200/laboratory,science?lock=41",
@@ -95,7 +132,10 @@ TOPIC_FEEDS = {
     },
     "BEAUTY": {
         "newsapi_query": "beauty OR skincare OR cosmetics OR makeup",
-        "rss_url": "https://news.google.com/rss/search?q=beauty+skincare+cosmetics+makeup&hl=en-US&gl=US&ceid=US:en",
+        "rss_urls": [
+            "https://www.allure.com/feed/rss",
+            "https://www.refinery29.com/en-us/beauty/rss.xml",
+        ],
         "summary_fallback": "Product launches, skincare research, and brand movements across the global beauty and cosmetics industry.",
         "images": [
             "https://loremflickr.com/800/1200/cosmetics?lock=51",
@@ -492,24 +532,70 @@ def fetch_from_news_api(category: str, count: int = ARTICLES_PER_CATEGORY) -> li
 
 
 def fetch_from_rss(category: str, count: int = ARTICLES_PER_CATEGORY) -> list:
-    """Fetch news for one topic from the Google News RSS fallback."""
-    config = get_topic_config(category)
-    results = []
+    """Fetch one topic, round-robin across its publisher feeds.
 
-    try:
-        feed = feedparser.parse(config["rss_url"])
-        for idx, entry in enumerate(feed.entries[:count]):
-            source = "Google News"
+    Round-robin rather than concatenate. BBC Sport returns 76 entries and Sky
+    returns 20, so reading them in order would make nearly every Sports card a
+    BBC card. Interleaving keeps the mix even -- which matters beyond variety,
+    because these articles get embedded, and one publisher's house style
+    becoming a proxy for the topic is a real way to poison a classifier.
+
+    (BBC still supplies a feed to four of the seven topics. Round-robin caps it
+    at a third to a half within each one, but the cross-topic concentration is
+    worth remembering when reading any per-category metric later.)
+
+    A dead feed is skipped, not fatal. Feeds rot -- ESPN answered 202 and Byrdie
+    403 during the last check -- and one bad response should cost a few
+    articles, not the whole topic.
+    """
+    config = get_topic_config(category)
+    urls = config.get("rss_urls") or []
+    if isinstance(urls, str):        # tolerate the old single-URL form
+        urls = [urls]
+
+    batches = []
+    for url in urls:
+        try:
+            feed = feedparser.parse(url)
+            entries = list(getattr(feed, "entries", []))
+            if not entries:
+                # feedparser does not raise on a 404 or a bot challenge; it
+                # returns an object with no entries. This is the only signal.
+                print(f"[Warn] {category}: no entries from {url} "
+                      f"(http {getattr(feed, 'status', '?')})")
+                continue
+            # Publisher name comes from the feed, not the entry. Google News set
+            # entry.source on every item; direct publisher feeds rarely do.
+            feed_title = getattr(getattr(feed, "feed", None), "title", "") or ""
+            batches.append((feed_title, entries))
+        except Exception as exc:
+            print(f"[Error] {category}: RSS fetch failed for {url}: {exc}")
+
+    results = []
+    depth = max((len(entries) for _, entries in batches), default=0)
+
+    for position in range(depth):
+        for feed_title, entries in batches:
+            if position >= len(entries):
+                continue
+            if len(results) >= count:
+                return results
+
+            entry = entries[position]
+
+            source = feed_title or "Unknown"
             if hasattr(entry, 'source') and hasattr(entry.source, 'title'):
                 source = entry.source.title
-            elif ' - ' in entry.title:
-                source = entry.title.rsplit(' - ', 1)[1]
 
-            title = entry.title
-            if ' - ' in title:
-                title = title.rsplit(' - ', 1)[0]
+            # The old code stripped everything after the last ' - ' from both
+            # title and source, because Google News appends ' - Publisher' to
+            # every headline. Publisher feeds do not, so that rule now only
+            # truncates real headlines that happen to contain a dash. Removed.
+            title = entry.get("title", "")
+            if not title:
+                continue
 
-            raw_desc = getattr(entry, 'summary', getattr(entry, 'description', ''))
+            raw_desc = entry.get("summary", entry.get("description", ""))
 
             pub_str = "Recently"
             if getattr(entry, 'published_parsed', None):
@@ -525,17 +611,26 @@ def fetch_from_rss(category: str, count: int = ARTICLES_PER_CATEGORY) -> list:
                 "source": source,
                 "published_at": pub_str,
                 "category": category,
-                "image_url": extract_rss_image(entry) or fallback_image(category, idx),
-                "url": getattr(entry, 'link', '#'),
+                "image_url": extract_rss_image(entry) or fallback_image(category, len(results)),
+                "url": entry.get("link", "#"),
             })
-    except Exception as e:
-        print(f"[Error] RSS feed fetch error for {category}: {e}")
+
     return results
 
 
 def fetch_topic(category: str, count: int = ARTICLES_PER_CATEGORY) -> list:
     """Fetch one topic, preferring NewsAPI and falling back to RSS when the
-    key is missing or the API returns a short batch."""
+    key is missing or the API returns a short batch.
+
+    In practice on the deployed VM, RSS is not the fallback -- it is the only
+    source. All 532 rows in the database came from it. NewsAPI's free Developer
+    plan is licensed for development use and rejects requests from server
+    environments, so a key that works on a laptop still returns nothing from
+    Oracle Cloud, and this function silently falls through every time.
+
+    Left in place because it costs nothing and starts working the day the plan
+    is upgraded. But do not read `newsapi_query` as if it were live.
+    """
     items = fetch_from_news_api(category, count)
     if len(items) < count:
         rss_items = fetch_from_rss(category, count)

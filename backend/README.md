@@ -33,6 +33,7 @@ python main.py --cli      # sync news once, print a per-topic summary, exit
 | `main.py` | FastAPI app, routes, APScheduler lifespan, CLI runner |
 | `database.py` | Schema, topic catalogue (`CATEGORIES`), queries, dedup, purge |
 | `news_fetcher.py` | NewsAPI + RSS ingestion, keyword classification, summary generation |
+| `enrichment.py` | **One-shot nightly job.** Article body extraction, TextRank bullets, ONNX embeddings. Not imported by `main.py` |
 | `backfill_categories.py` | One-off reclassification of stored rows. **Dry-run by default** — pass `--apply` to write. |
 
 `database.CATEGORIES` is the single source of truth for topics. Add an entry there plus a feed in `news_fetcher.TOPIC_FEEDS`, and `init_db()` syncs it into the `categories` table on the next boot. The Android client reads labels and colours from the API, so new topics need no client release.
@@ -43,13 +44,16 @@ python main.py --cli      # sync news once, print a per-topic summary, exit
 
 | Table | Holds | Retention |
 | --- | --- | --- |
-| `articles` | Headline, summary, source, topic, image URL, link, `article_key` (unique) | `PURGE_OLDER_THAN_DAYS` (7) on `created_at` |
+| `articles` | Headline, summary, source, topic, image URL, link, `article_key` (unique), and the nightly enrichment columns | `PURGE_OLDER_THAN_DAYS` (7) on `created_at` |
 | `categories` | Topic catalogue synced from `database.CATEGORIES` on boot | permanent |
 | `user_swipes` | One row per swipe — `read` or `pass` | cascades when its article is purged |
+| `swipe_events` | The same swipe, denormalised, no foreign key. The training set | **never purged** |
 | `user_sessions` | Session heartbeats for engagement metrics | `SESSION_RETENTION_DAYS` (7) on `last_heartbeat` |
 | `request_logs` | One row per HTTP request, with its real status code | `REQUEST_LOG_RETENTION_DAYS` (7) on `logged_at` |
 
-Three details worth knowing before editing queries:
+Four details worth knowing before editing queries:
+
+**Swipes are written to two tables on purpose.** `user_swipes` cascades with its article so the analytics windows stay aligned; `swipe_events` has no foreign key and is never deleted, because a purged swipe cannot be regenerated. `record_user_swipe` writes both in one transaction, `swipe_events` second — the first insert is what raises `ForeignKeyViolation` on a bad `article_id`, so by the time the `INSERT..SELECT` runs the article is known to exist. `dwell_ms` and `flipped` are nullable and never backfilled; NULL means unreported, not zero. See ADR-012.
 
 **Deduplication is atomic.** `article_key` is `md5(title + url)` with a unique constraint, and inserts use `ON CONFLICT DO NOTHING`. Don't add a check-then-insert around it — that reintroduces a race and doubles the connection count. `save_article` returns `(id, was_inserted)`; take the count from that flag, never from a prior read.
 

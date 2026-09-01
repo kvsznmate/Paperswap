@@ -486,6 +486,27 @@ class SwipeRequest(BaseModel):
         description="'read' for a right swipe (interested), 'pass' for a left swipe.",
         examples=["read"],
     )
+    dwell_ms: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=3_600_000,
+        description=(
+            "Milliseconds the card was frontmost before the swipe. Omit if the "
+            "client cannot measure it -- do not send 0, which reads as a "
+            "measured instant dismissal. Capped at 1 hour to reject the "
+            "backgrounded-app case where a card sat on screen overnight."
+        ),
+        examples=[4200],
+    )
+    flipped: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Whether the user turned the card over to read the summary before "
+            "swiping. Omit if unmeasured; a stronger interest signal than "
+            "direction alone."
+        ),
+        examples=[True],
+    )
 
 
 class HeartbeatRequest(BaseModel):
@@ -664,7 +685,7 @@ def record_swipe(request: Request, req: SwipeRequest):
     than surfacing as an unhandled 500.
     """
     try:
-        db.record_user_swipe(req.article_id, req.action)
+        db.record_user_swipe(req.article_id, req.action, req.dwell_ms, req.flipped)
     except psycopg2.errors.ForeignKeyViolation:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,

@@ -98,11 +98,42 @@ Modern Python web framework. Fast, lightweight, and generates interactive API do
 
 | Table | Holds |
 | --- | --- |
-| `articles` | Headline, summary, source, topic, image URL, link, and `article_key` |
+| `articles` | Headline, summary, source, topic, image URL, link, and `article_key`. Plus the enrichment columns written nightly: `full_text`, `summary_bullets`, `embedding`, `enriched_at` |
 | `categories` | The topic catalogue, synced from `database.CATEGORIES` on every boot |
 | `user_swipes` | One row per swipe — `read` or `pass` — cascading on article delete |
+| `swipe_events` | The same swipe, denormalised and **never purged**. The training set |
 | `user_sessions` | Session heartbeats, used for engagement metrics |
 | `request_logs` | One row per HTTP request, for peak-hour analysis |
+
+### Why swipes are stored twice
+
+This looks like a mistake and is not. A swipe is written to `user_swipes` **and** `swipe_events` in one transaction, because the two have incompatible retention needs.
+
+`user_swipes` is cascade-deleted when its article is purged at seven days. The analytics dashboard depends on that: its panels UNION `user_swipes` with `request_logs`, so both windows must stay equal or a chart silently mixes two periods.
+
+`swipe_events` has no foreign key and is never deleted. It snapshots the title, description, category, and source at swipe time, so a row stays usable long after its article is gone. That duplication is deliberate — it is the only reason old swipes remain trainable.
+
+It stores no embedding on purpose. Vectors are recomputed off-box from the stored text, which means the whole history can be re-embedded when the model changes. See ADR-012.
+
+`dwell_ms` and `flipped` are **nullable and never backfilled**. NULL means the client did not report it, not zero engagement — filter on `dwell_ms IS NOT NULL` before training on it.
+
+### The enrichment columns
+
+Written by `backend/enrichment.py`, a one-shot nightly job that runs outside the API process (ADR-011). It is safe to run by hand at any time:
+
+```bash
+docker compose exec news-cards-backend python enrichment.py --dry-run
+docker compose exec news-cards-backend python enrichment.py --limit 5
+```
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `full_text` | `TEXT` | Article body via trafilatura, capped at 20k chars. NULL means extraction was attempted and failed |
+| `summary_bullets` | `TEXT` | JSON array of strings. `_decorate_articles` parses it to a real array before it reaches the client, and yields `[]` rather than null so the Android card can iterate unconditionally |
+| `embedding` | `BYTEA` | 384 little-endian float32 values. Use `database.pack_embedding` / `unpack_embedding`, never raw `np.tobytes()` — the explicit `<f4` byte order is what lets a VM-written dump load correctly on a laptop |
+| `enriched_at` | `TIMESTAMPTZ` | Completion marker **and** resume point. The job selects `WHERE enriched_at IS NULL`, so never set it before every stage for that row has finished |
+
+Neither feed query selects `embedding`, so the bytes never reach JSON serialisation. If you add a query, name your columns explicitly rather than using `SELECT *` — `bytea` is not JSON-serialisable and the failure surfaces as a 500 at response time, not at query time.
 
 ### How deduplication works
 
@@ -243,7 +274,8 @@ Oracle Cloud (rented data-centre computer)
                                └── Volume: pgdata  ← the actual data
                                       ├── articles
                                       ├── categories
-                                      ├── user_swipes
+                                      ├── user_swipes      (purged at 7d)
+                                      ├── swipe_events     (never purged)
                                       ├── user_sessions
                                       └── request_logs
 ```
@@ -255,6 +287,8 @@ Oracle Cloud (rented data-centre computer)
 - **`pgdata`** — where the data actually lives, surviving container rebuilds
 
 Only the backend publishes a port. The database is reachable solely from the app container.
+
+> **`swipe_events` has no backup.** Articles re-fetch, embeddings recompute, model weights re-download. A deleted swipe is gone. That table is the one thing in `pgdata` that cannot be reconstructed, and it currently exists in exactly one place — a free-tier volume with an ephemeral IP and Oracle's idle-reclamation policy over it. Take a backup (Part 4, Step 7) before any operation that touches the volume, and see ADR-012 for the planned local archive.
 
 ---
 
