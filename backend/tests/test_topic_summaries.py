@@ -41,9 +41,9 @@ An earlier version of this file used a fixture week close to the present. On a
 live box that week held 43 real articles, and six count checks failed while the
 filtering logic they were meant to guard was working perfectly.
 
-Fixture weeks are therefore YEARS in the past, where PURGE_OLDER_THAN_DAYS
-guarantees nothing real can survive. require_empty_week() asserts that rather
-than assuming it, so a future change to retention produces a clear message
+Fixture weeks are therefore computed a few months back, comfortably outside the
+retention window. require_empty_week() asserts each one really is empty rather
+than assuming it, so a future change to retention produces one clear message
 instead of six confusing ones.
 
 Section 7 prints a RuntimeError traceback. That is the deliberately simulated
@@ -66,15 +66,40 @@ import summarizer as sm
 fails = []
 TOPIC = "TECH"
 
-# All Mondays, all far outside any plausible retention window.
-WEEK = datetime.date(2019, 1, 7)          # main fixture week
-WEEK_END = datetime.date(2019, 1, 13)
-THIN_WEEK = datetime.date(2019, 2, 4)     # the MIN_ARTICLES floor
-FAIL_WEEK = datetime.date(2019, 3, 4)     # the raising generator
-ORDER_WEEK = datetime.date(2019, 4, 1)    # ordering / outlives-its-sources
-SCHEMA_WEEK = datetime.date(2019, 4, 29)  # FK and CHECK violations
+# ---------------------------------------------------------------------------
+# FIXTURE WEEKS
+#
+# The only requirement is that a fixture week cannot contain a live article.
+# Articles are deleted after PURGE_OLDER_THAN_DAYS (9), so any week more than a
+# fortnight old qualifies.
+#
+# Computed backwards from the current week rather than hardcoded. A hardcoded
+# date is a magic number that ages badly: it stops matching the calendar the
+# code runs on, and the next person to read it reasonably asks why the test is
+# dated years before the project. "Twelve weeks before the last completed week"
+# reads the same in 2026 as in 2036.
+#
+# Twelve is not special -- anything well above the retention window works. If
+# retention is ever raised past it, require_empty_week() says so directly rather
+# than letting live rows corrupt the counts.
+# ---------------------------------------------------------------------------
+FIXTURE_WEEKS_BACK = 12
 
-ALL_FIXTURE_WEEKS = [WEEK, THIN_WEEK, FAIL_WEEK, ORDER_WEEK, SCHEMA_WEEK]
+
+def fixture_week(weeks_back):
+    """The Monday `weeks_back` weeks before the last completed week."""
+    return sm.last_completed_week_start() - datetime.timedelta(weeks=weeks_back)
+
+
+WEEK = fixture_week(FIXTURE_WEEKS_BACK)              # main fixture week
+WEEK_END = WEEK + datetime.timedelta(days=6)
+THIN_WEEK = fixture_week(FIXTURE_WEEKS_BACK + 1)     # the MIN_ARTICLES floor
+FAIL_WEEK = fixture_week(FIXTURE_WEEKS_BACK + 2)     # the raising generator
+ORDER_WEEK = fixture_week(FIXTURE_WEEKS_BACK + 3)    # ordering / outlives sources
+SCHEMA_WEEK = fixture_week(FIXTURE_WEEKS_BACK + 4)   # FK and CHECK violations
+
+FIXTURE_WEEKS = [WEEK, THIN_WEEK, FAIL_WEEK, ORDER_WEEK, SCHEMA_WEEK]
+
 FIXTURE_URL_PREFIX = "https://example.com/summaries/"
 
 
@@ -121,12 +146,12 @@ def drop_fixture_articles():
 
 
 def drop_fixture_summaries():
-    """Only the fixture weeks. Never a live week -- a summary is the sole
+    """Only this run's fixture weeks. Never a live week -- a summary is the sole
     surviving record of its week once the articles are purged, so a test that
-    deletes real ones destroys data it cannot regenerate."""
+    deletes real ones destroys data that cannot be regenerated."""
     with db.db_cursor(commit=True) as cur:
         cur.execute("DELETE FROM topic_summaries WHERE week_start = ANY(%s)",
-                    (ALL_FIXTURE_WEEKS,))
+                    (FIXTURE_WEEKS,))
         return cur.rowcount
 
 
@@ -139,8 +164,17 @@ def require_empty_week(week_start, label):
     return n == 0
 
 
-def utc(y, m, d, hh=0, mm=0, ss=0, us=0):
-    return datetime.datetime(y, m, d, hh, mm, ss, us, tzinfo=datetime.timezone.utc)
+def at(week_start, day, hh=0, mm=0, ss=0, us=0):
+    """A UTC timestamp `day` days into `week_start`.
+
+    Day 0 is the Monday, day 6 the Sunday. Negative and >6 values land outside
+    the week on purpose -- the boundary fixtures need them.
+    """
+    return datetime.datetime.combine(
+        week_start + datetime.timedelta(days=day),
+        datetime.time(hh, mm, ss, us),
+        tzinfo=datetime.timezone.utc,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -185,13 +219,13 @@ try:
     section("2. half-open window, anchored to UTC")
     require_empty_week(WEEK, "window")
 
-    seed("edge-first", utc(2019, 1, 7, 0, 0, 0),
+    seed("edge-first", at(WEEK, 0, 0, 0, 0, 0),
          "Publisher blurb for the very first instant of the week.", nf.DESC_PUBLISHER)
-    seed("edge-last", utc(2019, 1, 13, 23, 59, 59, 999999),
+    seed("edge-last", at(WEEK, 6, 23, 59, 59, 999999),
          "Publisher blurb for the very last instant of the week.", nf.DESC_PUBLISHER)
-    seed("edge-before", utc(2019, 1, 6, 23, 59, 59, 999999),
+    seed("edge-before", at(WEEK, -1, 23, 59, 59, 999999),
          "Publisher blurb from the previous week entirely.", nf.DESC_PUBLISHER)
-    seed("edge-after", utc(2019, 1, 14, 0, 0, 0),
+    seed("edge-after", at(WEEK, 7, 0, 0, 0, 0),
          "Publisher blurb from the following week entirely.", nf.DESC_PUBLISHER)
 
     got = {a["title"] for a in db.get_articles_for_week(TOPIC, WEEK)}
@@ -216,18 +250,18 @@ try:
 
     # 4 real, 3 tier-3 fallback, 2 tier-2 template, 2 legacy NULL boilerplate.
     for i in range(4):
-        seed(f"real-{i}", utc(2019, 1, 8, 8 + i),
+        seed(f"real-{i}", at(WEEK, 1, 8 + i),
              f"A genuine publisher description number {i} with enough length to pass.",
              nf.DESC_PUBLISHER, source=f"Outlet {i}",
              title=f"Datacentre buildout accelerates in region {i}")
     for i in range(3):
-        seed(f"fb-{i}", utc(2019, 1, 9, 8 + i), fallback, nf.DESC_TOPIC_FALLBACK)
+        seed(f"fb-{i}", at(WEEK, 2, 8 + i), fallback, nf.DESC_TOPIC_FALLBACK)
     for i in range(2):
-        seed(f"kw-{i}", utc(2019, 1, 10, 8 + i), keyword_tpl, nf.DESC_KEYWORD_TEMPLATE)
+        seed(f"kw-{i}", at(WEEK, 3, 8 + i), keyword_tpl, nf.DESC_KEYWORD_TEMPLATE)
     # Legacy rows: written before the column existed, so the tier is NULL and the
     # LIKE arm is the only thing that can catch them.
     for i in range(2):
-        aid = seed(f"legacy-{i}", utc(2019, 1, 11, 8 + i), fallback, None)
+        aid = seed(f"legacy-{i}", at(WEEK, 4, 8 + i), fallback, None)
         with db.db_cursor(commit=True) as cur:
             cur.execute("UPDATE articles SET description_source = NULL WHERE id = %s", (aid,))
 
@@ -292,11 +326,11 @@ try:
     section("6. MIN_ARTICLES_FOR_SUMMARY floor")
     require_empty_week(THIN_WEEK, "floor")
 
-    seed("thin-0", utc(2019, 2, 5, 9),
+    seed("thin-0", at(THIN_WEEK, 1, 9),
          "One solitary genuine publisher description, long enough to qualify.",
          nf.DESC_PUBLISHER)
     for i in range(9):
-        seed(f"thin-fb-{i}", utc(2019, 2, 5, 10 + i), fallback, nf.DESC_TOPIC_FALLBACK)
+        seed(f"thin-fb-{i}", at(THIN_WEEK, 1, 10 + i), fallback, nf.DESC_TOPIC_FALLBACK)
 
     sm.generate_weekly_summaries(week_start=THIN_WEEK)
     check("10 articles but only 1 usable -> no row at all",
@@ -312,7 +346,7 @@ try:
     print("      (the RuntimeError traceback below is the simulated failure, not a test error)")
 
     for i in range(5):
-        seed(f"fail-{i}", utc(2019, 3, 5, 9 + i),
+        seed(f"fail-{i}", at(FAIL_WEEK, 1, 9 + i),
              f"Genuine publisher description {i}, long enough to be kept by the filter.",
              nf.DESC_PUBLISHER, source=f"Outlet {i}")
 
@@ -366,7 +400,7 @@ try:
     # purge boundary really is where the arithmetic says it is.
     require_empty_week(ORDER_WEEK, "ordering")
     for i in range(4):
-        seed(f"order-{i}", utc(2019, 4, 2, 9 + i),
+        seed(f"order-{i}", at(ORDER_WEEK, 1, 9 + i),
              f"Genuine publisher description {i} for the ordering check, long enough.",
              nf.DESC_PUBLISHER, source=f"Outlet {i}")
 
