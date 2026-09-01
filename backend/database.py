@@ -6,6 +6,7 @@ import hashlib
 import logging
 import threading
 import subprocess
+from datetime import date, timedelta
 from contextlib import contextmanager
 
 from psycopg2.extras import RealDictCursor, execute_values
@@ -469,6 +470,60 @@ def init_db():
                     sort_order = EXCLUDED.sort_order
             ''', (slug, meta['label'], meta['accent'], meta['sort_order']))
 
+        # Provenance for articles.description. See the block comment above
+        # KEYWORD_SUMMARY_RULES in news_fetcher.py: only 'publisher' rows carry
+        # real per-article information, and the weekly summariser filters on it.
+        #
+        # Nullable, and old rows are deliberately NOT backfilled. The tier that
+        # produced them was never observed, so assigning one now would
+        # manufacture a measurement -- the same reason status_code above leaves
+        # its pre-existing rows null. get_articles_for_week() falls back to LIKE
+        # matching for NULLs, and the purge retires every one of them inside a
+        # single retention window.
+        cursor.execute('''
+            ALTER TABLE articles ADD COLUMN IF NOT EXISTS description_source TEXT
+        ''')
+
+        # Weekly per-topic digests.
+        #
+        # Unlike every other table here, this one is NOT purged alongside the
+        # articles -- outliving its sources is the entire point. Once
+        # purge_old_articles() runs, this row is the only surviving record of
+        # that week, which is also why number_of_articles must be correct at
+        # write time: nothing downstream can ever recompute it.
+        #
+        # Two counts, not one. number_of_articles is what the generator actually
+        # read; articles_in_window is what the topic saw before boilerplate was
+        # filtered out. Storing only the first hides how thin a week was; storing
+        # only the second attaches a number to prose it does not describe.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS topic_summaries (
+                id SERIAL PRIMARY KEY,
+                topic TEXT NOT NULL REFERENCES categories (slug),
+                week_start DATE NOT NULL,
+                week_end DATE NOT NULL,
+                summary TEXT NOT NULL,
+                number_of_articles INTEGER NOT NULL CHECK (number_of_articles > 0),
+                articles_in_window INTEGER NOT NULL,
+                top_sources TEXT[],
+                generator TEXT NOT NULL,
+                generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE (topic, week_start)
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_topic_summaries_week
+            ON topic_summaries (week_start DESC, topic)
+        ''')
+
+        # The weekly job scans one topic-week at a time. idx_articles_category_id
+        # is ordered by id and cannot serve a created_at range.
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_articles_category_created
+            ON articles (category, created_at)
+        ''')
+
         # Per-topic feed queries hit these constantly once the deck is filtered.
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_articles_category_id
@@ -589,8 +644,9 @@ def save_article(article_data: dict) -> tuple[int, bool]:
     with db_cursor(commit=True) as cursor:
         cursor.execute('''
             INSERT INTO articles
-                (article_key, title, description, source, published_at, category, image_url, url)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                (article_key, title, description, source, published_at, category,
+                 image_url, url, description_source)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (article_key) DO NOTHING
             RETURNING id
         ''', (
@@ -602,6 +658,10 @@ def save_article(article_data: dict) -> tuple[int, bool]:
             normalize_category(article_data.get('category')),
             article_data.get('image_url', ''),
             article_data.get('url', '#'),
+            # None for callers that do not supply it, which reads as "tier not
+            # observed" rather than a guessed tier. Everything in news_fetcher
+            # supplies it.
+            article_data.get('description_source'),
         ))
 
         row = cursor.fetchone()
@@ -1061,6 +1121,281 @@ def get_top_api_endpoints(limit: int = 6) -> list:
     """Retrieve top API endpoints by total request hits and percentage distribution."""
     with db_cursor() as cursor:
         return _top_api_endpoints(cursor, limit)
+
+
+# ---------------------------------------------------------------------------
+# WEEKLY TOPIC SUMMARIES
+#
+# Two halves, kept apart on purpose. Everything in this section is MEASURED --
+# counts, source tallies, window membership. The prose itself is generated in
+# summarizer.py and arrives here as an argument. Keeping the SQL free of the
+# generator means the numbers can be tested without an API key, and the one part
+# that cannot carry ADR-010's `measured` flag stays visibly separate from the
+# parts that can.
+# ---------------------------------------------------------------------------
+
+# Week windows are anchored to UTC EXPLICITLY rather than leaning on the server's
+# TimeZone setting. A bare DATE compared against a TIMESTAMPTZ is cast using the
+# session timezone, so a container running on local time would shift every week
+# boundary by its UTC offset -- and nothing in the output would show it.
+#
+# Half-open [start, start+7d). Never BETWEEN with a 23:59:59 upper bound: that
+# drops the final second of the week, and the bug is invisible until it isn't.
+_WEEK_WINDOW_SQL = (
+    "created_at >= (%s::date)::timestamp AT TIME ZONE 'UTC' "
+    "AND created_at < ((%s::date) + 7)::timestamp AT TIME ZONE 'UTC'"
+)
+
+# Excludes rows whose description is a generate_short_summary fallback rather
+# than a real publisher blurb. The column carries the answer for anything written
+# since the migration; the LIKE arm is only for pre-migration NULLs.
+_PUBLISHER_ONLY_SQL = (
+    "(description_source = 'publisher' "
+    " OR (description_source IS NULL AND NOT (description LIKE ANY(%s))))"
+)
+
+
+def _boilerplate_patterns() -> list:
+    """Canned-summary LIKE patterns, imported from news_fetcher rather than
+    retyped here.
+
+    The import is function-local because news_fetcher imports this module at the
+    top. A module-level import would be circular; this one runs after both
+    modules are loaded.
+    """
+    from news_fetcher import boilerplate_like_patterns
+    return boilerplate_like_patterns()
+
+
+def week_end_for(week_start: date) -> date:
+    """Sunday of the Mon-anchored week beginning `week_start` (inclusive)."""
+    return week_start + timedelta(days=6)
+
+
+def get_articles_for_week(topic: str, week_start: date,
+                          publisher_only: bool = True, limit: int = None) -> list:
+    """Articles for one topic-week, ordered oldest first.
+
+    `publisher_only` defaults to True so the boilerplate-contaminated path has to
+    be asked for explicitly rather than being what you get by forgetting. See
+    news_fetcher's KEYWORD_SUMMARY_RULES comment for why it matters.
+    """
+    sql = f'''
+        SELECT id, title, description, source, published_at, category, url,
+               description_source, created_at
+        FROM articles
+        WHERE category = %s AND {_WEEK_WINDOW_SQL}
+    '''
+    params = [normalize_category(topic), week_start, week_start]
+
+    if publisher_only:
+        sql += f" AND {_PUBLISHER_ONLY_SQL}"
+        params.append(_boilerplate_patterns())
+
+    sql += " ORDER BY created_at ASC, id ASC"
+    if limit:
+        sql += " LIMIT %s"
+        params.append(limit)
+
+    with db_cursor() as cursor:
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
+
+    articles = []
+    for row in rows:
+        item = dict(row)
+        if item.get('created_at') is not None:
+            item['created_at'] = item['created_at'].isoformat()
+        articles.append(item)
+    return articles
+
+
+def count_articles_for_week(topic: str, week_start: date) -> int:
+    """Every article in the topic-week, before any boilerplate filtering.
+
+    This is `articles_in_window`. It is not the number the summary describes --
+    that is number_of_articles -- and conflating the two is how a digest ends up
+    claiming to cover 61 articles it never read.
+    """
+    with db_cursor() as cursor:
+        cursor.execute(
+            f"SELECT COUNT(*) AS n FROM articles WHERE category = %s AND {_WEEK_WINDOW_SQL}",
+            (normalize_category(topic), week_start, week_start),
+        )
+        row = cursor.fetchone()
+    return row['n'] if row else 0
+
+
+def get_top_sources_for_week(topic: str, week_start: date, limit: int = 5,
+                             publisher_only: bool = True) -> list:
+    """Most-represented publishers in the topic-week. A plain GROUP BY -- fully
+    measured, and worth showing beside prose that is not."""
+    sql = f'''
+        SELECT source, COUNT(*) AS n
+        FROM articles
+        WHERE category = %s AND {_WEEK_WINDOW_SQL}
+    '''
+    params = [normalize_category(topic), week_start, week_start]
+
+    if publisher_only:
+        sql += f" AND {_PUBLISHER_ONLY_SQL}"
+        params.append(_boilerplate_patterns())
+
+    sql += " GROUP BY source ORDER BY n DESC, source ASC LIMIT %s"
+    params.append(limit)
+
+    with db_cursor() as cursor:
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
+    return [r['source'] for r in rows if r['source']]
+
+
+def topics_missing_summary(week_start: date) -> list:
+    """Enabled topics that have at least one article in the week but no summary.
+
+    The idempotency gate for the whole feature. generate_weekly_summaries() calls
+    this first and returns immediately on an empty list, which is what happens on
+    thirteen of every fourteen refreshes -- so the cost of running the job twice
+    a day is one indexed query.
+    """
+    with db_cursor() as cursor:
+        cursor.execute(f'''
+            SELECT c.slug
+            FROM categories c
+            WHERE c.enabled = TRUE
+              AND EXISTS (
+                    SELECT 1 FROM articles a
+                    WHERE a.category = c.slug AND {_WEEK_WINDOW_SQL.replace("created_at", "a.created_at")}
+              )
+              AND NOT EXISTS (
+                    SELECT 1 FROM topic_summaries s
+                    WHERE s.topic = c.slug AND s.week_start = %s::date
+              )
+            ORDER BY c.sort_order ASC
+        ''', (week_start, week_start, week_start))
+        rows = cursor.fetchall()
+    return [r['slug'] for r in rows]
+
+
+def save_topic_summary(topic: str, week_start: date, week_end: date, summary: str,
+                       number_of_articles: int, articles_in_window: int,
+                       top_sources: list, generator: str) -> None:
+    """Upsert one topic-week digest.
+
+    ON CONFLICT rather than INSERT because the scheduler reaches this twice a day
+    and a re-run must update rather than duplicate. `generated_at` is refreshed on
+    update so the timestamp always describes the text sitting next to it.
+    """
+    with db_cursor(commit=True) as cursor:
+        cursor.execute('''
+            INSERT INTO topic_summaries
+                (topic, week_start, week_end, summary, number_of_articles,
+                 articles_in_window, top_sources, generator)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (topic, week_start) DO UPDATE SET
+                summary            = EXCLUDED.summary,
+                number_of_articles = EXCLUDED.number_of_articles,
+                articles_in_window = EXCLUDED.articles_in_window,
+                top_sources        = EXCLUDED.top_sources,
+                generator          = EXCLUDED.generator,
+                generated_at       = NOW()
+        ''', (normalize_category(topic), week_start, week_end, summary,
+              number_of_articles, articles_in_window, top_sources or None, generator))
+
+
+def _decorate_summaries(rows: list) -> list:
+    """JSON-safe dates plus the topic label and accent colour, so clients never
+    keep their own colour map (ADR-006) -- the same contract _decorate_articles
+    gives the feed."""
+    out = []
+    for row in rows:
+        item = dict(row)
+        slug = normalize_category(item.get('topic'))
+        meta = CATEGORIES[slug]
+        item['topic'] = slug
+        item['topic_label'] = meta['label']
+        item['accent_color'] = meta['accent']
+        for field in ('week_start', 'week_end', 'generated_at'):
+            if item.get(field) is not None:
+                item[field] = item[field].isoformat()
+        item['top_sources'] = item.get('top_sources') or []
+        # Stated on every row rather than once in the envelope, because a single
+        # summary object gets copied out of the payload and then read without it.
+        item['basis'] = (
+            "Generated from publisher-written article summaries ingested during "
+            "this window. Ingest time, not publication time."
+        )
+        out.append(item)
+    return out
+
+
+def get_latest_summary_week() -> date:
+    """Newest week that has any summary at all, or None."""
+    with db_cursor() as cursor:
+        cursor.execute("SELECT MAX(week_start) AS w FROM topic_summaries")
+        row = cursor.fetchone()
+    return row['w'] if row else None
+
+
+def get_topic_summaries(week_start: date = None) -> list:
+    """Every topic's summary for one week, in catalogue order. Defaults to the
+    newest week present."""
+    if week_start is None:
+        week_start = get_latest_summary_week()
+        if week_start is None:
+            return []
+
+    with db_cursor() as cursor:
+        cursor.execute('''
+            SELECT s.topic, s.week_start, s.week_end, s.summary,
+                   s.number_of_articles, s.articles_in_window, s.top_sources,
+                   s.generator, s.generated_at
+            FROM topic_summaries s
+            JOIN categories c ON c.slug = s.topic
+            WHERE s.week_start = %s
+            ORDER BY c.sort_order ASC
+        ''', (week_start,))
+        rows = cursor.fetchall()
+    return _decorate_summaries(rows)
+
+
+def get_summary_history(topic: str, weeks: int = 8) -> list:
+    """One topic's summaries, newest week first."""
+    with db_cursor() as cursor:
+        cursor.execute('''
+            SELECT topic, week_start, week_end, summary, number_of_articles,
+                   articles_in_window, top_sources, generator, generated_at
+            FROM topic_summaries
+            WHERE topic = %s
+            ORDER BY week_start DESC
+            LIMIT %s
+        ''', (normalize_category(topic), weeks))
+        rows = cursor.fetchall()
+    return _decorate_summaries(rows)
+
+
+def purge_old_summaries(weeks: int) -> int:
+    """Delete summaries older than `weeks`. A value of 0 keeps everything.
+
+    Deliberately NOT part of purge_old_data(). Those three tables are purged as
+    one unit because they are reported side by side and must cover the same
+    period; this table is the opposite case -- it exists to outlive that window,
+    and folding it in would invite someone to give it the same retention as the
+    articles, which would defeat the entire feature.
+
+    At 7 topics x 52 weeks x ~1 KB, a decade of history is under 4 MB.
+    """
+    if not weeks:
+        return 0
+    with db_cursor(commit=True) as cursor:
+        cursor.execute(
+            "DELETE FROM topic_summaries "
+            "WHERE week_start < (CURRENT_DATE - (%s || ' weeks')::interval)",
+            (weeks,),
+        )
+        removed = cursor.rowcount
+    print(f"[DB Purge] Removed {removed} topic summary row(s) older than {weeks} week(s).")
+    return removed
 
 
 # ---------------------------------------------------------------------------

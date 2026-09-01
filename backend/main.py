@@ -29,6 +29,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from news_fetcher import fetch_and_sync_news_to_db
+import summarizer
 import database as db
 
 
@@ -36,6 +37,24 @@ import database as db
 REFRESH_INTERVAL_HOURS = float(os.getenv("REFRESH_INTERVAL", "12"))
 # Articles older than this are purged on each refresh.
 PURGE_OLDER_THAN_DAYS = int(os.getenv("PURGE_OLDER_THAN_DAYS", "7"))
+
+# Weekly summaries need the whole of the last completed Mon-Sun week to still be
+# in the table when the Monday job runs. That is 7 days of week, plus up to 24 h
+# of intra-day offset, plus one refresh interval before the job is reached --
+# about 8.5 days. At the old default of 7, the Monday of the summarised week is
+# already purge-eligible, so the digest quietly covers six days and reports
+# number_of_articles for six days under a label saying seven. Nothing downstream
+# can detect it: the evidence has been deleted. See ADR-011.
+MIN_PURGE_DAYS_FOR_WEEKLY_SUMMARIES = 9
+if PURGE_OLDER_THAN_DAYS < MIN_PURGE_DAYS_FOR_WEEKLY_SUMMARIES:
+    logging.getLogger("paperswap.config").warning(
+        "PURGE_OLDER_THAN_DAYS=%d is below %d, so the last completed week may be "
+        "partly purged before the weekly summariser reads it. Summaries would "
+        "silently cover a short week. Raising to %d.",
+        PURGE_OLDER_THAN_DAYS, MIN_PURGE_DAYS_FOR_WEEKLY_SUMMARIES,
+        MIN_PURGE_DAYS_FOR_WEEKLY_SUMMARIES,
+    )
+    PURGE_OLDER_THAN_DAYS = MIN_PURGE_DAYS_FOR_WEEKLY_SUMMARIES
 # Retention for the request_logs analytics table. Defaults to the article window
 # deliberately: user_swipes is already capped at that window by ON DELETE CASCADE,
 # and both tables are UNIONed in the hourly-usage and top-endpoint panels. Keeping
@@ -206,7 +225,15 @@ limiter = Limiter(key_func=get_remote_address)
 
 
 def refresh_pipeline():
-    """One full refresh cycle: fetch + dedup new news, then purge week-old rows.
+    """One full refresh cycle: fetch + dedup new news, summarise the last
+    completed week, then purge week-old rows.
+
+    ORDER IS LOAD-BEARING. The summariser runs before the purge because the
+    purge is what destroys its input -- once those rows are gone the summary row
+    is the only surviving record of the week and there is no way to reconstruct
+    it. Putting this on its own APScheduler cron job instead would race the
+    purge; as a pipeline step the ordering is guaranteed by control flow. See
+    ADR-011.
 
     The three purges are one unit on purpose. purge_old_articles cascades into
     user_swipes; the other two trim the tables that are reported alongside it.
@@ -214,11 +241,25 @@ def refresh_pipeline():
     time windows in the same view. Run on startup and on the scheduled interval.
     """
     fetch_and_sync_news_to_db()
+
+    try:
+        summarizer.generate_weekly_summaries()
+    except Exception:
+        # A summariser failure must never stop the purge. Disk pressure on a
+        # 956 MB box with a shared Postgres volume is the more urgent problem,
+        # and the missing week is retried on the next tick anyway.
+        logging.getLogger("paperswap.summarizer").warning(
+            "Weekly summary generation failed; continuing to purge.", exc_info=True)
+
     db.purge_old_data(
         articles_days=PURGE_OLDER_THAN_DAYS,
         request_logs_days=REQUEST_LOG_RETENTION_DAYS,
         sessions_days=SESSION_RETENTION_DAYS,
     )
+    # Separate call, not folded into purge_old_data: that function's three
+    # tables share a window because they are reported side by side, whereas this
+    # table exists precisely to outlive it. Defaults to 0, meaning keep forever.
+    db.purge_old_summaries(summarizer.SUMMARY_RETENTION_WEEKS)
 
 
 # ---------------------------------------------------------------------------
@@ -712,6 +753,139 @@ def read_analytics_dashboard(request: Request):
         with open(template_path, "r", encoding="utf-8") as f:
             return HTMLResponse(content=f.read())
     return HTMLResponse(content="<h1>Analytics template missing</h1>", status_code=404)
+
+
+@app.get("/summaries", response_class=HTMLResponse, tags=["pages"])
+def read_summaries_page():
+    """Serve the weekly topic summary page."""
+    template_path = os.path.join(os.path.dirname(__file__), "templates", "summaries.html")
+    if os.path.exists(template_path):
+        with open(template_path, "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    return HTMLResponse(content="<h1>Summaries template missing</h1>", status_code=404)
+
+
+def _parse_week_start(raw: Optional[str]) -> Optional[datetime.date]:
+    """Parse ?week_start=YYYY-MM-DD and snap it to that week's Monday.
+
+    Snapping rather than rejecting a mid-week date: a caller who asks for
+    Wednesday means the week containing it, and 404-ing them would be pedantry.
+    A malformed string is still a 400 -- silently falling back to the latest week
+    would answer a different question than the one asked.
+    """
+    if not raw:
+        return None
+    try:
+        parsed = datetime.date.fromisoformat(raw.strip())
+    except ValueError:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "week_start must be an ISO date, e.g. 2026-08-31.",
+        )
+    return parsed - datetime.timedelta(days=parsed.weekday())
+
+
+@app.get("/api/v1/summaries", tags=["public"])
+@limiter.limit("60/minute")
+def get_weekly_summaries(
+    request: Request,
+    week_start: str = Query(
+        None,
+        description="ISO date inside the wanted week. Omit for the most recent week available."
+    ),
+):
+    """Weekly per-topic digests for one completed week.
+
+    A topic can legitimately be absent: if fewer than MIN_ARTICLES_FOR_SUMMARY
+    of its articles had a real publisher description that week, no row was
+    written rather than a thin one. `topics_missing` names them so a client can
+    say "not enough coverage" instead of rendering a blank card.
+    """
+    requested = _parse_week_start(week_start)
+    summaries = db.get_topic_summaries(requested)
+
+    if not summaries:
+        return JSONResponse(content={
+            "status": "ok",
+            "count": 0,
+            "week_start": requested.isoformat() if requested else None,
+            "summaries": [],
+            "detail": "No summaries stored for this week yet.",
+        })
+
+    present = {s["topic"] for s in summaries}
+    return JSONResponse(content={
+        "status": "ok",
+        "count": len(summaries),
+        "week_start": summaries[0]["week_start"],
+        "week_end": summaries[0]["week_end"],
+        "topics_missing": [s for s in db.CATEGORIES if s not in present],
+        "summaries": summaries,
+    })
+
+
+@app.get("/api/v1/summaries/{topic}", tags=["public"])
+@limiter.limit("60/minute")
+def get_topic_summary_history(
+    request: Request,
+    topic: str,
+    weeks: int = Query(8, ge=1, le=52, description="How many weeks back to return."),
+):
+    """One topic's summary history, newest week first.
+
+    This is the only place week-over-week history exists. The articles behind
+    every week but the most recent have already been purged.
+    """
+    cleaned = db.clean_category_filter(topic)
+    if not cleaned:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"Unknown topic '{topic}'. See GET /api/v1/categories.",
+        )
+
+    slug = cleaned[0]
+    history = db.get_summary_history(slug, weeks=weeks)
+    return JSONResponse(content={
+        "status": "ok",
+        "topic": slug,
+        "topic_label": db.CATEGORIES[slug]["label"],
+        "accent_color": db.CATEGORIES[slug]["accent"],
+        "count": len(history),
+        "summaries": history,
+    })
+
+
+@app.post(
+    "/api/v1/summaries/generate",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_admin_key)],
+    tags=["admin"],
+)
+@limiter.limit("4/hour")
+def trigger_summary_generation(
+    request: Request,
+    background: BackgroundTasks,
+    week_start: str = Query(None, description="ISO date inside the week to (re)generate."),
+    force: bool = Query(False, description="Regenerate topics that already have a row."),
+):
+    """Generate weekly summaries on demand.
+
+    Admin-only and POST for the same reasons as /api/v1/cards/refresh: it mutates
+    state, and under SUMMARY_GENERATOR=anthropic it spends money. A prefetcher
+    following a GET would do both.
+
+    It cannot resurrect a week whose articles have been purged. If the window is
+    empty it writes nothing rather than summarising the void.
+    """
+    requested = _parse_week_start(week_start)
+    background.add_task(
+        summarizer.generate_weekly_summaries, week_start=requested, force=force)
+    return {
+        "status": "accepted",
+        "week_start": requested.isoformat() if requested else "last completed week",
+        "force": force,
+        "detail": "Generation started in the background. Poll /api/v1/summaries for results.",
+    }
 
 
 @app.post("/api/v1/telemetry/heartbeat", tags=["public"])
