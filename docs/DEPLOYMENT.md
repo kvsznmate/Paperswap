@@ -1,16 +1,18 @@
 # Paperswap — Deployment Options (Budget Comparison)
 
+> **Current deployment:** Oracle Cloud Always Free, `VM.Standard.E2.1.Micro` (x86, 956 MB RAM + 2 GB swap), running `backend/docker-compose.yml`. Why: [ADR-003](ARCHITECTURE.md#adr-003--oracle-cloud-always-free-e21micro). This document is the option comparison that decision came from; use it if the host ever has to move.
+
 _Last verified: July 2026. Cloud free tiers and prices change constantly — reconfirm on each provider's pricing page before committing. Provider list prices are in USD; €≈USD is close enough for ranking here._
 
 ---
 
 ## What we're actually deploying
 
-One Dockerized **FastAPI container** + one **Postgres** database. The workload is tiny: ~50 rows, a news fetch every 3 hours, and occasional swipe writes. Images are hot-linked from the source (NewsAPI / Unsplash), so we store and serve almost no bytes ourselves. Requirements: **data persistence** + a **public HTTPS endpoint** the phone can reach.
+One Dockerized **FastAPI container** + one **Postgres** database. The workload is tiny: a few hundred article rows, a news fetch every 12 hours, and occasional swipe writes. Images are hot-linked from the source (NewsAPI / Unsplash), so we store and serve almost no bytes ourselves. Requirements: **data persistence** + a **public HTTPS endpoint** the phone can reach.
 
 Two things decide the cheapest viable choice:
 
-1. **Always-on vs scale-to-zero.** The 3-hour fetch runs *inside* the app (APScheduler), so it only fires while the container is running. On always-on hosts it just works. On "sleep"/scale-to-zero free tiers it won't fire while asleep — you'd trigger `/api/v1/refresh` from a free external cron (e.g. cron-job.org) or lean on the app's existing "fetch when the feed is empty" fallback.
+1. **Always-on vs scale-to-zero.** The 12-hour fetch runs *inside* the app (APScheduler), so it only fires while the container is running. On always-on hosts it just works. On "sleep"/scale-to-zero free tiers it won't fire while asleep — you'd trigger `POST /api/v1/cards/refresh` (with `X-API-Key`) from a free external cron (e.g. cron-job.org) or lean on the app's existing "fetch when the feed is empty" fallback.
 2. **Public HTTPS.** A PaaS gives you a free `*.provider.dev` HTTPS URL out of the box. Self-hosting (Pi / VM) needs either a tunnel or your own domain for clean HTTPS.
 
 ---
@@ -28,7 +30,7 @@ Two things decide the cheapest viable choice:
 
 ## At-a-glance comparison
 
-| Option | Monthly cost | DB persistence | Always-on (3h job) | Public HTTPS | Effort | Watch out for |
+| Option | Monthly cost | DB persistence | Always-on (12h job) | Public HTTPS | Effort | Watch out for |
 |---|---|---|---|---|---|---|
 | **Pi 400 + CF Tunnel** | ~€1–3 (power) | Yes (local disk) | Yes | CF Tunnel (free) | Medium | Home uptime, backups, SD-card wear |
 | **Oracle Always Free ARM** | €0 | Yes (block vol) | Yes | IP/domain or CF | Med–High | Capacity "out of stock", idle reclaim, June 2026 cut to 2 OCPU/12 GB |
@@ -48,20 +50,20 @@ Two things decide the cheapest viable choice:
 - **Cost:** electricity only. ~5–7 W average ⇒ ~4–5 kWh/month ⇒ **~€1.50/mo** even at NL's ~€0.30/kWh. No infra bill.
 - **Reaching it from a phone → Cloudflare Tunnel (free):** an outbound-only `cloudflared` container — no port-forwarding, no public IP, free HTTPS + DDoS protection on a domain you point at Cloudflare. A domain is the only extra cost (~€8–12/yr). It also sidesteps CGNAT/ISP issues that break plain port-forwarding.
   - _Alternative:_ **Tailscale** if the app is only for *your* devices (private WireGuard mesh). Public exposure via Tailscale **Funnel** is HTTPS-only with no custom domain on the free plan — fine for personal use, less so for a public app.
-- **Pros:** near-zero cost, full control, no vendor limits, the 3h scheduler just works (always-on).
+- **Pros:** near-zero cost, full control, no vendor limits, the 12h scheduler just works (always-on).
 - **Cons:** uptime = your home power/internet; you own backups (a cron `pg_dump`), SD-card wear (boot Postgres off a USB SSD, not the SD card), and OS/security patching.
 
 ### 2) Oracle Cloud Always Free — best €0 cloud
 - One **Ampere A1 (ARM) VM**. As of **15 June 2026 the always-free ARM allowance was halved to 2 OCPU / 12 GB** (was 4 / 24) — still far more than this app needs. Plus **200 GB block storage** and **10 TB/month egress**, free for life (unlike AWS/GCP's 12-month trials). Two small AMD micro VMs (1 GB) are also always-free.
 - Run the same `docker-compose` (ARM-friendly). Always-on ⇒ scheduler works. Free reserved public IP.
 - **Pros:** truly €0, always-on, huge egress allowance, a real VM you control.
-- **Cons:** sign-up needs a card; ARM capacity is often "out of capacity" in popular regions (retry, or use a creation script); **idle instances can be reclaimed** — keep light periodic activity (your 3h job helps). HTTPS needs a domain (+ Caddy/Let's Encrypt) or Cloudflare in front. You patch/secure the VM yourself.
+- **Cons:** sign-up needs a card; ARM capacity is often "out of capacity" in popular regions (retry, or use a creation script); **idle instances can be reclaimed** — keep light periodic activity (your 12h job helps). HTTPS needs a domain (+ Caddy/Let's Encrypt) or Cloudflare in front. You patch/secure the VM yourself.
 
 ### 3) Managed split — Neon (DB) + a free/cheap container host
-- **Neon** is the standout free managed Postgres: **0.5 GB storage**, scale-to-zero after 5 min idle but **resumes instantly**, and **permanent** (not time-limited). 50 rows is nothing; backups are included; you never babysit it.
+- **Neon** is the standout free managed Postgres: **0.5 GB storage**, scale-to-zero after 5 min idle but **resumes instantly**, and **permanent** (not time-limited). A few hundred rows is nothing; backups are included; you never babysit it.
   - _DB alternatives:_ **Supabase** — 500 MB free but the project **pauses after 1 week idle** (annoying for low traffic). **Aiven** — free with larger storage. **Render's own free Postgres is deleted after 30 days** — avoid for anything you keep.
 - Pair Neon with a container host:
-  - **Render free web service** — €0, but sleeps after 15 min (30–60 s cold start), and the in-app 3h fetch won't run while asleep → drive `/api/v1/refresh` from a free external cron (cron-job.org).
+  - **Render free web service** — €0, but sleeps after 15 min (30–60 s cold start), and the in-app 12h fetch won't run while asleep → drive `POST /api/v1/cards/refresh` (with `X-API-Key`) from a free external cron (cron-job.org).
   - **Small Fly.io machine** (~€2–4/mo) — stays warm, scheduler runs, no cold starts.
   - **Koyeb / Google Cloud Run** free tiers also work (Cloud Run scales to zero → same external-cron note).
 - **Pros:** least ops, a DB you never think about. **Cons:** cold starts on free compute, or a couple € to avoid them.
@@ -82,9 +84,9 @@ Two things decide the cheapest viable choice:
 
 ## Recommendation for Paperswap
 
-- **Absolute cheapest, and you already own the hardware → Raspberry Pi 400 + Cloudflare Tunnel.** ~€1.50/mo power (+ ~€10/yr domain). Your compose file runs as-is, the 3h scheduler works, and a nightly `pg_dump` to another disk/cloud covers backups.
+- **Absolute cheapest, and you already own the hardware → Raspberry Pi 400 + Cloudflare Tunnel.** ~€1.50/mo power (+ ~€10/yr domain). Your compose file runs as-is, the 12h scheduler works, and a nightly `pg_dump` to another disk/cloud covers backups.
 - **Want €0 but off your home network / more reliable → Oracle Always Free ARM VM.** Same compose, always-on, 10 TB egress — just budget an afternoon for sign-up + capacity hunting, and set a keep-alive so it isn't reclaimed.
-- **Want zero ops and don't mind a cold start → Neon (free) + Render free web + a free external cron** to hit `/api/v1/refresh`. Upgrade the web side to a small Fly machine (~€2–4/mo) if cold starts annoy you.
+- **Want zero ops and don't mind a cold start → Neon (free) + Render free web + a free external cron** to hit `POST /api/v1/cards/refresh` (with `X-API-Key`). Upgrade the web side to a small Fly machine (~€2–4/mo) if cold starts annoy you.
 
 For a personal project where the Pi is sitting there anyway, the **Pi wins on cost**; **Oracle** is the best hands-off €0 fallback if you'd rather not depend on home uptime.
 
@@ -93,7 +95,7 @@ For a personal project where the Pi is sitting there anyway, the **Pi wins on co
 ## Cross-cutting gotchas
 
 - **Backups.** Managed DBs (Neon / Supabase / Railway / Render) back up for you. On the Pi or Oracle you own it — schedule `pg_dump` (a cron writing to object storage or a second disk).
-- **The 3-hour fetch.** Only runs while the container is up. Always-on hosts (Pi / Oracle / Fly / Railway) = fine. Sleep / scale-to-zero free tiers = add an external cron pinging `/api/v1/refresh`.
+- **The 12-hour fetch.** Only runs while the container is up. Always-on hosts (Pi / Oracle / Fly / Railway) = fine. Sleep / scale-to-zero free tiers = add an external cron pinging `POST /api/v1/cards/refresh` (with `X-API-Key`).
 - **HTTPS.** PaaS gives a free HTTPS subdomain; self-hosting needs a tunnel or a domain.
 - **"Free forever" fine print.** Oracle just halved its ARM tier with no notice and reclaims idle boxes; Render deletes free DBs at 30 days; Supabase pauses at 1 week. Read the current terms before relying on any of them.
 

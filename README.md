@@ -5,24 +5,12 @@
 Paperswap borrows the Tinder interaction model for reading headlines. Instead of scrolling an endless list, you get one card at a time:
 
 - 👉 **Swipe right** — Interested. Opens the article on the publisher's site.
-- 👈 **Swipe left** — Pass. The card animates away and the next headline appears.
+- 👈 **Swipe left** — Pass. The next headline appears.
+- **Tap** — Flip the card to read extracted summary bullets.
 
-The repository contains a **Dockerized FastAPI + PostgreSQL backend** that ingests live news across seven topics, deduplicates it, serves a topic-balanced deck over REST, and records swipe feedback — plus a **native Android client** in Kotlin/Compose and a **touch-enabled web preview** you can open on a phone browser without installing anything.
+The repository contains a **Dockerized FastAPI + PostgreSQL backend** that ingests news across seven topics, deduplicates it, serves a topic-balanced deck over REST, records swipe feedback and writes a weekly per-topic digest. It also contains a **native Android client** (Kotlin/Compose) and a **touch-enabled web preview** served by the backend.
 
-> **TODO:** add a screenshot or GIF of the swipe UI here. This is the single highest-value addition to this file.
-
----
-
-## What it does
-
-| Capability | How it works |
-| --- | --- |
-| **Seven topics, balanced** | Tech, Finance, Sports, Politics, Programming, Science, Beauty. The deck interleaves topics round-robin so you never get twelve Sports cards before seeing anything else. |
-| **Never shows the same story twice** | Each article gets an MD5 key from its title + URL. Inserts use `ON CONFLICT DO NOTHING`, so deduplication is atomic rather than check-then-write. |
-| **Stays fresh on its own** | An APScheduler job refetches every 12 hours and purges articles older than 7 days, cascading their swipe records. |
-| **Server-driven topics** | Each article carries its own `category_label` and `accent_color`. Adding a topic server-side changes the app with no release. |
-| **Records behaviour** | Every swipe is written to `user_swipes`. Not yet used for ranking — see [Roadmap](#roadmap). |
-| **One image runs anywhere** | The same container runs locally and on Oracle Cloud, Render, Railway, Fly.io, or App Runner. |
+> **TODO:** add a screenshot or GIF of the swipe UI here.
 
 ---
 
@@ -30,63 +18,60 @@ The repository contains a **Dockerized FastAPI + PostgreSQL backend** that inges
 
 ```mermaid
 graph TD
-    A["📱 Android client (Kotlin + Compose)"] -->|"GET /api/v1/feed"| B["🐳 FastAPI + Uvicorn"]
+    A["📱 Android client (Kotlin + Compose)"] -->|"GET /api/v1/feed, /summaries"| B["🐳 FastAPI + Uvicorn"]
     A -->|"POST /api/v1/swipe"| B
     A -->|"Swipe right"| C["🌐 Publisher webpage"]
-    B --> D["⚡ news_fetcher.py — NewsAPI + Google News RSS"]
-    B --> E["🐘 PostgreSQL 16 — articles, categories, user_swipes, sessions, request_logs"]
-    F["⏰ APScheduler — every 12h"] --> B
+    S["⏰ APScheduler — every 12 h"] -->|"refresh_pipeline: fetch → summarise → purge"| B
+    B --> D["⚡ news_fetcher.py — NewsAPI + publisher RSS"]
+    B --> E["🐘 PostgreSQL 16"]
+    F["🧠 enrichment.py — cron, every 6 h, separate container"] -->|"full_text, bullets, embeddings"| E
 ```
 
-Cards are rendered **on the phone**, not on the server. An earlier version generated 720×1280 PNGs with Pillow; that was retired when the client went native, which removed the image pipeline, the disk volume, and the memory pressure that made Pillow painful on a 956 MB VM.
+The backend renders nothing. It stores article *fields* (headline, summary, source, image URL, link) and the client draws the card. See [ADR-001](docs/ARCHITECTURE.md).
 
 ### How a card reaches the screen
 
-1. **Fetch** — `news_fetcher.py` pulls `ARTICLES_PER_CATEGORY` (12) items per topic across 7 topics: 84 candidates per cycle. NewsAPI when a key is set, Google News RSS otherwise.
-2. **Classify** — a weighted keyword scorer can reassign an article away from the topic whose feed it arrived on, when the signal is strong enough.
-3. **Deduplicate** — `article_key = md5(title + url)` with a unique constraint. Repeat stories are dropped at insert time.
-4. **Balance** — `get_balanced_feed()` uses `ROW_NUMBER() OVER (PARTITION BY category ORDER BY id DESC)` to interleave topics evenly.
-5. **Serve** — `/api/v1/feed` returns metadata, an absolute image URL, and the source link.
-6. **Record** — the client posts each swipe to `/api/v1/swipe`.
+1. **Fetch.** `news_fetcher.py` pulls `ARTICLES_PER_CATEGORY` (12) items per topic, giving 84 candidates per refresh. It tries NewsAPI first and falls back to the publisher RSS feeds in `TOPIC_FEEDS`. **In production RSS is the only source that actually returns anything:** the free NewsAPI plan rejects requests from servers.
+2. **Classify.** A weighted keyword scorer reassigns an article away from its feed's topic only when another topic wins by a clear margin. Its accuracy is unmeasured ([ADR-007](docs/ARCHITECTURE.md)).
+3. **Deduplicate.** `article_key = md5(title + url)` is a unique column, and inserts use `ON CONFLICT DO NOTHING`, so dedup is atomic ([ADR-004](docs/ARCHITECTURE.md)).
+4. **Summarise and purge.** The weekly summariser runs inside the refresh, *before* the purge deletes its input. Articles are then purged after 9 days ([ADR-011](docs/ARCHITECTURE.md)).
+5. **Enrich.** A separate one-shot job extracts article bodies, ranks summary bullets and computes embeddings ([ADR-012](docs/ARCHITECTURE.md)).
+6. **Serve.** `/api/v1/feed` interleaves topics round-robin with a window function ([ADR-005](docs/ARCHITECTURE.md)). Each article carries its own `category_label` and `accent_color`, so adding a topic needs no client release ([ADR-006](docs/ARCHITECTURE.md)).
+7. **Record.** Swipes go to `user_swipes` (purged with the article, for analytics) and `swipe_events` (kept forever, the training set).
 
 ### Tech stack
 
-**Backend** — Python 3.12 · FastAPI · Uvicorn · psycopg2 · APScheduler · feedparser · PostgreSQL 16
-**Android** — Kotlin · Jetpack Compose · Retrofit · Coil · Custom Tabs
-**Web preview** — HTML5 + vanilla JS touch gesture engine
-**Infrastructure** — Docker · Docker Compose · Oracle Cloud (E2.1.Micro, Always Free)
+- **Backend:** Python 3.12 · FastAPI · psycopg2 (pooled) · APScheduler · slowapi · feedparser · PostgreSQL 16
+- **Enrichment:** trafilatura · onnxruntime (int8 all-MiniLM-L6-v2) · numpy TextRank
+- **Android:** Kotlin · Jetpack Compose · Retrofit · Coil · Custom Tabs
+- **Infrastructure:** Docker Compose on Oracle Cloud Always Free (E2.1.Micro, 956 MB RAM + 2 GB swap)
 
 ---
 
-## Folder structure
+## Repository layout
 
 ```
 Paperswap/
-├── README.md                      # This file
-├── PROJECT_STATUS.md              # Progress log and open items
-├── DEPLOYMENT.md                  # Hosting options and cost comparison
-├── DATABASE_AND_CLOUD_GUIDE.md    # Cloud concepts walkthrough
-│
-├── backend/
-│   ├── main.py                    # FastAPI app, routes, scheduler, CLI runner
-│   ├── database.py                # PostgreSQL schema, topic catalogue, queries
-│   ├── news_fetcher.py            # Ingestion, classification, summarisation
-│   ├── backfill_categories.py     # One-off reclassification migration (dry-run by default)
-│   ├── requirements.txt
-│   ├── Dockerfile
-│   ├── docker-compose.yml
-│   ├── .env.example               # Copy to .env and fill in
-│   └── templates/
-│       ├── mobile_preview.html    # Touch swipe UI      → /mobile
-│       ├── dashboard.html         # Card gallery        → /
-│       └── analytics.html         # Telemetry dashboard → /analytics
-│
-└── android/
-    └── app/src/main/java/com/newsswipe/app/
-        ├── MainActivity.kt
-        ├── data/{model,remote}/
-        ├── ui/{components,theme}/
-        └── viewmodel/NewsViewModel.kt
+├── README.md                 # This file
+├── CLAUDE.md                 # Working notes for coding agents: invariants and conventions
+├── docs/
+│   ├── ARCHITECTURE.md       # Decision records (ADR-001..012) and failure modes
+│   ├── DATABASE_GUIDE.md     # Tables, retention, how to inspect and back up Postgres
+│   ├── RATE_LIMITS.md        # Every rate limit and why it is set there
+│   └── DEPLOYMENT.md         # Hosting option comparison
+├── backend/                  # FastAPI service — see backend/README.md
+│   ├── main.py               # App, routes, auth, request-log buffer, scheduler, CLI
+│   ├── database.py           # Pool, schema/migrations, queries, purges, telemetry
+│   ├── news_fetcher.py       # Ingestion, classification, card blurbs
+│   ├── summarizer.py         # Weekly per-topic digests
+│   ├── enrichment.py         # One-shot body extraction / bullets / embeddings
+│   ├── check_feeds.py        # RSS feed health check
+│   ├── run_enrichment.sh     # Cron wrapper for enrichment.py
+│   ├── templates/            # mobile_preview.html, dashboard.html, analytics.html
+│   ├── tests/                # Standalone suites — see tests/README.md
+│   └── Dockerfile, docker-compose.yml, .env.example
+├── android/                  # Native client — see android/README.md
+└── tools/label_articles.py   # Hand-labelling tool for a classifier holdout set
 ```
 
 ---
@@ -97,121 +82,83 @@ Paperswap/
 
 ```bash
 cd backend
-cp .env.example .env      # then fill in the required values
+cp .env.example .env      # fill in the required values first
 docker compose up --build
 ```
 
-Compose refuses to start if `NEWS_API_KEY`, `POSTGRES_USER`, or `POSTGRES_PASSWORD` are unset — deliberately, so a missing secret fails loudly instead of silently booting on a weak default.
+Compose refuses to start without `NEWS_API_KEY`, `ADMIN_API_KEY`, `POSTGRES_USER` and `POSTGRES_PASSWORD`. This is deliberate: a missing secret should fail loudly rather than boot on a default ([ADR-008](docs/ARCHITECTURE.md)). Generate secrets with `openssl rand -hex 24` and never base64 ([ADR-009](docs/ARCHITECTURE.md)).
 
 ### Local Python
 
-Requires a PostgreSQL instance you can point at.
+You need a PostgreSQL instance to point at. `backend/.env` is loaded automatically.
 
 ```bash
 cd backend
 pip install -r requirements.txt
 export DATABASE_URL=postgresql://user:password@localhost:5432/newsdb
-python main.py
+python main.py            # server on :8000
+python main.py --cli      # sync once, print a per-topic summary, exit
 ```
-
-Add `--cli` to sync news once and exit without starting the server.
 
 ### Then open
 
 | URL | What you get |
 | --- | --- |
-| `http://localhost:8000/mobile` | Swipe UI — open this on a phone |
-| `http://localhost:8000` | Card gallery dashboard |
-| `http://localhost:8000/analytics` | Telemetry and engagement dashboard |
-| `http://localhost:8000/docs` | Interactive OpenAPI documentation |
+| `/mobile` | Touch swipe UI with the deck and weekly-summary tabs. Open it on a phone. `/summaries` deep-links to the second tab |
+| `/` | Card gallery dashboard |
+| `/analytics` | Telemetry dashboard. It is gated: sign in with `ADMIN_API_KEY` |
+| `/docs` | OpenAPI. Protected routes show a padlock |
+
+Configuration is documented in [`backend/.env.example`](backend/.env.example) and [`backend/README.md`](backend/README.md#environment).
 
 ---
 
-## Configuration
+## API
 
-Set in `backend/.env`. See `.env.example` for the template.
+| Method | Path | Auth | Notes |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/feed` | public | Query params: `categories` (comma-separated), `limit` (1–300, default 70), `balanced` (default `true`) |
+| `GET` | `/api/v1/categories` | public | Topic catalogue with label, accent colour and live article count |
+| `GET` | `/api/v1/summaries` | public | One week's digests. Pass `week_start` to pick a week; topics without enough coverage are listed in `topics_missing` |
+| `GET` | `/api/v1/summaries/{topic}` | public | One topic's history, newest week first (`weeks`, default 8) |
+| `POST` | `/api/v1/swipe` | public | Body: `{"article_id": int, "action": "read"\|"pass", "dwell_ms"?: int, "flipped"?: bool}` |
+| `POST` | `/api/v1/telemetry/heartbeat` | public | Session keepalive |
+| `POST` | `/api/v1/cards/refresh` | `X-API-Key` | Runs the refresh pipeline in the background and returns `202` |
+| `POST` | `/api/v1/summaries/generate` | `X-API-Key` | Regenerates a week's summaries (`week_start`, `force`) and returns `202` |
+| `GET` | `/api/v1/telemetry/stats`, `/logs` | `X-API-Key` or session cookie | Every numeric field declares whether it was `measured` ([ADR-010](docs/ARCHITECTURE.md)) |
+| `POST` | `/api/v1/auth/session`, `/logout` | — | Swaps the admin key for a browser session cookie, or ends that session |
 
-| Variable | Description | Default |
-| --- | --- | --- |
-| `NEWS_API_KEY` | [NewsAPI.org](https://newsapi.org/) key. Without it, Google News RSS is used. | **required** |
-| `POSTGRES_USER` | Database user | **required** |
-| `POSTGRES_PASSWORD` | Database password. Generate with `openssl rand -hex 24`. | **required** |
-| `POSTGRES_DB` | Database name | `newsdb` |
-| `DATABASE_URL` | Full connection string. Compose assembles this from the three variables above — set it only for non-Docker runs. | — |
-| `REFRESH_INTERVAL` | **Hours** between background refreshes | `12` |
-| `PURGE_OLDER_THAN_DAYS` | Articles older than this are deleted each cycle | `7` |
-| `ARTICLES_PER_CATEGORY` | Fetched per topic per cycle (× 7 topics = 84 candidates) | `12` |
-| `FEED_DEFAULT_LIMIT` | Default deck size from `/api/v1/feed` | `70` |
-
-> `REFRESH_INTERVAL` is in **hours**, not seconds. An earlier version of this file said seconds, which meant following it produced a refresh cycle roughly every five years.
-
-**Generate passwords as hex, not base64.** `DATABASE_URL` embeds the password in a URL, where `+` and `/` are structural characters. A base64 password containing either silently fails authentication in a way that looks like a wrong password.
-
----
-
-## API reference
-
-Interactive docs at `/docs`.
-
-| Method | Endpoint | Description |
-| --- | --- | --- |
-| `GET` | `/api/v1/feed` | The swipe deck. Query: `categories` (comma-separated), `limit` (1–300), `balanced` (default `true`). |
-| `GET` | `/api/v1/categories` | Topic catalogue with label, accent colour, sort order, and live article count. |
-| `GET` | `/api/v1/cards/refresh` | Trigger a fetch + dedup cycle. |
-| `POST` | `/api/v1/swipe` | Record a swipe. Body: `{"article_id": int, "action": "read" \| "pass"}`. |
-| `POST` | `/api/v1/telemetry/heartbeat` | Session keepalive. Body: `{"session_id": str, "user_agent": str?}`. |
-| `GET` | `/api/v1/telemetry/stats` | System and engagement metrics. |
-| `GET` | `/api/v1/telemetry/logs` | Recent application logs. |
-
-`GET /api/news` and `GET /api/cards/generate` remain as deprecated aliases.
-
-### Known API issues
-
-These are real and tracked, not oversights:
-
-- **`/api/v1/cards/refresh` is a `GET` that mutates state** and requires no authentication. A single request triggers 84 outbound calls. Should be an authenticated `POST`.
-- **No authentication anywhere**, including the telemetry endpoints.
-- **No pagination.** `/api/v1/feed` has `limit` but no `offset`, so the deck ends when the client exhausts it.
-- **`/api/v1/feed/next` does not exist** despite appearing in older documentation.
+Admin auth fails **closed**: with `ADMIN_API_KEY` unset, the admin endpoints return `503`. State-changing routes accept only the header, never the cookie, so they cannot be forged cross-site. Rate limits are listed in [docs/RATE_LIMITS.md](docs/RATE_LIMITS.md).
 
 ---
 
 ## Deployment
 
-Running on an Oracle Cloud E2.1.Micro (Always Free, 956 MB + 2 GB swap) under Docker Compose. See `DEPLOYMENT.md` for a cost comparison across providers.
-
-Deployment is currently manual: `git pull` on the VM, then `docker compose down && docker compose up -d`. There is no CI, no health gate, and no rollback. Building that pipeline is on the roadmap.
-
-**Currently serving plain HTTP.** HTTPS via DuckDNS + Caddy is the next infrastructure task, and a prerequisite for removing `usesCleartextTraffic` from the Android manifest.
+The app runs on an Oracle Cloud E2.1.Micro under Docker Compose ([ADR-003](docs/ARCHITECTURE.md); for other hosts see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)). Deploying is manual: `git pull` on the VM, then `docker compose down && docker compose up -d`. Use `down`/`up` and not `--force-recreate`, because the latter can carry stale environment forward.
 
 ---
 
-## Roadmap
+## Known gaps
 
-**Correctness and reliability**
-- Connection pooling — every query currently opens a new connection, and error paths leak them
-- Move request logging off the hot path; it currently blocks the event loop
-- Retry-tolerant startup so an unreachable database yields a `503` rather than a crash loop
-- Test suite and CI — there are currently no tests
+**Operations**
+- No CI. The test suites need a live Postgres and are run by hand (`backend/tests/README.md`).
+- The server is plain HTTP only. HTTPS through Caddy is planned, and it needs `X-Forwarded-For` handling for the rate limiter plus `ADMIN_COOKIE_SECURE=true`.
+- Startup has no database retry, so an unreachable Postgres crash-loops the container. There is no `/health` endpoint.
+- `swipe_events`, the one irreplaceable table, has no scheduled backup.
 
-**Security**
-- HTTPS via Caddy; close port 8000
-- API key on mutating and telemetry endpoints
-- Restrict SSH ingress
+**API**
+- `/api/v1/feed` has no `offset`, so the deck ends when the client exhausts it.
+- On a cold start, `/api/v1/feed` fetches news synchronously inside the request (see RATE_LIMITS.md).
 
-**Data science** — the substantial gap
-- The topic classifier is hand-tuned keyword scoring with **no labelled data and no measured accuracy**. Building an evaluation set and benchmarking it against TF-IDF and transformer baselines is the priority.
-- `user_swipes` has been collecting implicit feedback that nothing consumes. No personalisation exists; the feed is identical for every user.
-- Parts of the telemetry dashboard report estimated values as if measured. Those need to be measured or explicitly labelled.
+**Android**
+- No offline support, no topic filter on the deck, and no automated tests. See [android/README.md](android/README.md#known-issues).
 
----
-
-## Project visibility
-
-Development happens on `dev` branches merged to `main` via pull request. [Issues](../../issues) and [Pull Requests](../../pulls) are public.
+**Data science**
+- The topic classifier, the summary bullets and the weekly digests have never been evaluated against labelled data or a baseline.
+- `swipe_events` collects implicit feedback that nothing consumes yet. The feed is identical for every user.
 
 ---
 
 ## Contributing
 
-To request access, email `mate.kovasznai@gmail.com`. Bug reports and feature suggestions are welcome via Issues.
+Development happens on feature branches merged to `main` via pull request. To request access, email `mate.kovasznai@gmail.com`. Bug reports and feature suggestions are welcome via Issues.
