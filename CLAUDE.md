@@ -23,6 +23,7 @@ Swipe-based news reader. FastAPI + PostgreSQL 16 backend (`backend/`), Kotlin/Co
 9. **Name columns explicitly in feed queries.** `articles.embedding` is `BYTEA` and is not JSON-serialisable.
 10. **No database I/O on the request path for logging.** The middleware appends to an in-memory deque, and the scheduler flushes it.
 11. **Escape server data before it reaches `innerHTML`** in the templates. Request paths and RSS titles are attacker-influenced.
+12. **Every public write path is bounded globally, not just per IP** (`public_limits.py`: swipe and new-session budgets, per-session swipe dedupe, cold-start gate). A new public endpoint that writes rows or calls out needs the same.
 
 ## Working conventions
 

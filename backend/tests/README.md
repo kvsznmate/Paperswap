@@ -14,6 +14,7 @@ docker compose exec news-cards-backend python tests/test_api_security.py
 docker compose exec news-cards-backend python tests/test_swipe_logging.py
 docker compose exec news-cards-backend python tests/test_dedup.py
 docker compose exec news-cards-backend python tests/test_topic_summaries.py
+docker compose exec news-cards-backend python tests/test_public_limits.py
 ```
 
 Or all of them:
@@ -31,6 +32,7 @@ docker compose exec news-cards-backend sh -c 'for t in tests/test_*.py; do echo 
 | `test_api_security.py` | yes | Safe methods, admin auth, input validation, rate limits |
 | `test_swipe_logging.py` | yes | Swipes written once, charts still complete, real status codes logged, request logs buffered off the request path and bounded by retention |
 | `test_dedup.py` | yes | `save_article` reports whether it inserted; no read-then-write pre-check; concurrent inserts of one key produce exactly one winner |
+| `test_public_limits.py` | yes | Global swipe/new-session budgets return 503 + Retry-After; one stored swipe per session per article; heartbeat field limits; gzip and Cache-Control; feed served from memory; one cold-start fetch per topic selection per cooldown |
 | `test_topic_summaries.py` | yes | Week arithmetic and the half-open UTC window; boilerplate descriptions never reach the generator; `number_of_articles` describes what was read and `articles_in_window` what was seen; no placeholder row on failure; the summariser runs before the purge and its output outlives the articles |
 
 ## Notes

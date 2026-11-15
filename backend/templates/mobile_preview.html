@@ -808,16 +808,26 @@
         function logSwipe(article, direction) {
             // right = interested/read, left = pass
             const action = direction === 'right' ? 'read' : 'pass';
+            // Same id as the heartbeat. Lets the server store at most one swipe
+            // per article for this browser; storage may be unavailable, in which
+            // case the field is simply omitted.
+            let sessionId = null;
+            try { sessionId = localStorage.getItem('paperswap_session_id'); } catch (e) {}
+            const body = { article_id: article.id, action };
+            if (sessionId) body.session_id = sessionId.slice(0, 64);
             fetch('/api/v1/swipe', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ article_id: article.id, action })
+                body: JSON.stringify(body)
             }).then(res => {
                 if (res.ok) return;
                 // A swallowed failure here is invisible: the deck keeps working
                 // because swiping is client-side, so the only symptom would be
                 // silently missing engagement data. Surface it instead.
-                if (res.status === 429) {
+                if (res.status === 503) {
+                    console.warn('swipe rejected (503): server-wide swipe budget is spent');
+                    showSwipeWarning('The server is busy - swipes are not being recorded right now.');
+                } else if (res.status === 429) {
                     console.warn('swipe rate limited (429) - this swipe was NOT recorded');
                     showSwipeWarning('Swiping faster than the server accepts - some swipes are not being recorded.');
                 } else {
