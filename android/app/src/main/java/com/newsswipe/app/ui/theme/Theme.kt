@@ -1,7 +1,6 @@
 package com.newsswipe.app.ui.theme
 
 import android.app.Activity
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
@@ -12,8 +11,8 @@ import androidx.core.view.WindowCompat
 
 private val DarkColorScheme = darkColorScheme(
     primary = TechIndigo,
-    secondary = FinanceEmerald,
-    background = DarkObsidian,
+    secondary = ReadGreen,
+    background = AppBackground,
     surface = CardBackground,
     onPrimary = TextPrimary,
     onSecondary = TextPrimary,
@@ -25,18 +24,19 @@ private val DarkColorScheme = darkColorScheme(
 fun NewsSwipeAndroidTheme(
     content: @Composable () -> Unit
 ) {
-    val colorScheme = DarkColorScheme
     val view = LocalView.current
     if (!view.isInEditMode) {
         SideEffect {
             val window = (view.context as Activity).window
-            window.statusBarColor = DarkObsidian.toArgb()
+            // Matches the top of the app's background gradient. A status bar a
+            // shade darker than the screen under it reads as a seam.
+            window.statusBarColor = AppBackgroundTop.toArgb()
             WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = false
         }
     }
 
     MaterialTheme(
-        colorScheme = colorScheme,
+        colorScheme = DarkColorScheme,
         content = content
     )
 }

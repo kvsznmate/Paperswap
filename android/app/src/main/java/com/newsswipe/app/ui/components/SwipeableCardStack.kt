@@ -1,10 +1,13 @@
 package com.newsswipe.app.ui.components
 
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -26,23 +29,68 @@ import com.newsswipe.app.ui.theme.PassRed
 import com.newsswipe.app.ui.theme.ReadGreen
 import kotlinx.coroutines.launch
 
+// A swipe commits once the card passes this fraction of the screen width.
+private const val SWIPE_THRESHOLD_FRACTION = 0.30f
+
+// Tilt at the moment the swipe commits, in degrees.
+//
+// Rotation used to be measured against the SCREEN WIDTH -- `(dragX /
+// screenWidthPx) * 20f` -- which meant about 3 degrees during an ordinary drag
+// and only 6 at the point the card actually commits. Present in the code,
+// invisible on the glass. Adding the top nav bar shortened the card, which cut
+// the apparent corner travel further and tipped it from "barely there" to "not
+// there".
+//
+// Measuring against the THRESHOLD instead ties the tilt to the thing the user
+// cares about: the card is unmistakably angled exactly when it is about to fly
+// off, and holds that angle rather than winding up further on a long drag.
+private const val MAX_CARD_ROTATION = 16f
+
+// Card flip: tap turns the card over to show the enrichment bullets
+// (NewsCardBack). They arrive with the feed, so flipping costs no request.
+private const val FLIP_DURATION_MS = 420
+
+// Perspective depth for the Y-axis flip. Without raising this from the default
+// the card appears to balloon toward the viewer at 90 degrees instead of
+// turning on the spot -- the higher the value, the flatter and more card-like
+// the rotation reads.
+private const val FLIP_CAMERA_DISTANCE = 14f
+
 @Composable
 fun SwipeableCardStack(
     articles: List<NewsArticle>,
     currentIndex: Int,
-    onSwipeRight: (NewsArticle) -> Unit,
-    onSwipeLeft: (NewsArticle) -> Unit,
+    /** Called after the fly-off animation; `read` is true for a right swipe. */
+    onSwipe: (read: Boolean) -> Unit,
+    // Fired the first time the user turns a card over. Feeds user_swipes.flipped,
+    // which the backend documents as "a stronger interest signal than direction
+    // alone" -- so the flip is not only a reading affordance, it is training data.
+    onFlip: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val configuration = LocalConfiguration.current
-    val density = LocalDensity.current
-    val screenWidthPx = with(density) { configuration.screenWidthDp.dp.toPx() }
+    // Named localDensity, NOT density. GraphicsLayerScope also exposes a
+    // `density` -- a Float -- and a local of the same name in the enclosing
+    // scope beats the implicit receiver's property. With this called `density`,
+    // `FLIP_CAMERA_DISTANCE * density` inside graphicsLayer{} resolved to
+    // Float * Density and failed to compile.
+    val localDensity = LocalDensity.current
+    val screenWidthPx = with(localDensity) { configuration.screenWidthDp.dp.toPx() }
+    val swipeThresholdPx = screenWidthPx * SWIPE_THRESHOLD_FRACTION
 
     val coroutineScope = rememberCoroutineScope()
     val offsetX = remember { Animatable(0f) }
     val offsetY = remember { Animatable(0f) }
 
     val activeArticle = articles.getOrNull(currentIndex)
+
+    fun flyOff(read: Boolean) = coroutineScope.launch {
+        val direction = if (read) 1f else -1f
+        offsetX.animateTo(direction * screenWidthPx * 1.5f, animationSpec = tween(250))
+        onSwipe(read)
+        offsetX.snapTo(0f)
+        offsetY.snapTo(0f)
+    }
 
     Box(
         modifier = modifier
@@ -82,7 +130,19 @@ fun SwipeableCardStack(
             // Top Interactive Active Card
             if (activeArticle != null) {
                 val dragX = offsetX.value
-                val rotationAngle = (dragX / screenWidthPx) * 20f
+                // Capped at the threshold, so dragging far past the commit point
+                // does not keep spinning the card.
+                val rotationAngle =
+                    (dragX / swipeThresholdPx).coerceIn(-1f, 1f) * MAX_CARD_ROTATION
+
+                // Keyed on currentIndex, so the next card always arrives face up
+                // and an undo does not restore a card mid-flip.
+                var isFlipped by remember(currentIndex) { mutableStateOf(false) }
+                val flipRotation by animateFloatAsState(
+                    targetValue = if (isFlipped) 180f else 0f,
+                    animationSpec = tween(FLIP_DURATION_MS, easing = FastOutSlowInEasing),
+                    label = "cardFlip"
+                )
 
                 Box(
                     modifier = Modifier
@@ -92,29 +152,29 @@ fun SwipeableCardStack(
                             translationY = offsetY.value
                             rotationZ = rotationAngle
                         }
+                        // Tap and drag live in separate pointerInput blocks on
+                        // purpose. They coexist because onDrag consumes the
+                        // movement, which cancels the tap detector -- so a swipe
+                        // never also registers as a tap, and a tap that never
+                        // moves past touch slop never starts a drag.
+                        .pointerInput(currentIndex) {
+                            detectTapGestures(
+                                onTap = {
+                                    // Report only the turn TO the back. Flipping
+                                    // it back is not a second act of reading.
+                                    if (!isFlipped) onFlip()
+                                    isFlipped = !isFlipped
+                                }
+                            )
+                        }
                         .pointerInput(currentIndex) {
                             detectDragGestures(
                                 onDragEnd = {
-                                    val threshold = screenWidthPx * 0.30f
-                                    if (offsetX.value > threshold) {
-                                        // Swipe Right (Read)
-                                        coroutineScope.launch {
-                                            offsetX.animateTo(screenWidthPx * 1.5f, animationSpec = tween(250))
-                                            onSwipeRight(activeArticle)
-                                            offsetX.snapTo(0f)
-                                            offsetY.snapTo(0f)
-                                        }
-                                    } else if (offsetX.value < -threshold) {
-                                        // Swipe Left (Pass)
-                                        coroutineScope.launch {
-                                            offsetX.animateTo(-screenWidthPx * 1.5f, animationSpec = tween(250))
-                                            onSwipeLeft(activeArticle)
-                                            offsetX.snapTo(0f)
-                                            offsetY.snapTo(0f)
-                                        }
-                                    } else {
-                                        // Spring back
-                                        coroutineScope.launch {
+                                    when {
+                                        offsetX.value > swipeThresholdPx -> flyOff(read = true)
+                                        offsetX.value < -swipeThresholdPx -> flyOff(read = false)
+                                        else -> coroutineScope.launch {
+                                            // Spring back
                                             offsetX.animateTo(0f, animationSpec = tween(200))
                                             offsetY.animateTo(0f, animationSpec = tween(200))
                                         }
@@ -130,50 +190,65 @@ fun SwipeableCardStack(
                             )
                         }
                 ) {
-                    NewsCard(article = activeArticle)
+                    // Only the two faces sit inside the flipping layer. The
+                    // swipe badges below must stay outside it, or they would be
+                    // rendered mirrored once the card passes 90 degrees.
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                rotationY = flipRotation
+                                cameraDistance = FLIP_CAMERA_DISTANCE * density
+                            }
+                    ) {
+                        if (flipRotation <= 90f) {
+                            NewsCard(article = activeArticle)
+                        } else {
+                            // Counter-rotated, otherwise the back face renders
+                            // as a mirror image of itself.
+                            NewsCardBack(
+                                article = activeArticle,
+                                modifier = Modifier.graphicsLayer { rotationY = 180f }
+                            )
+                        }
+                    }
 
-                    // Overlay Swipe Badges
+                    // Drag feedback, outside the flipping layer so it is never mirrored.
                     if (dragX > 40f) {
-                        val alphaVal = (dragX / 200f).coerceIn(0f, 1f)
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .padding(top = 40.dp, end = 30.dp)
-                                .rotate(15f)
-                                .alpha(alphaVal)
-                                .border(3.dp, ReadGreen, RoundedCornerShape(12.dp))
-                                .background(Color(0x3310B981))
-                                .padding(horizontal = 20.dp, vertical = 6.dp)
-                        ) {
-                            Text(
-                                text = "READ →",
-                                color = ReadGreen,
-                                fontSize = 24.sp,
-                                fontWeight = FontWeight.ExtraBold
-                            )
-                        }
+                        SwipeBadge("READ →", ReadGreen, Alignment.TopEnd, 15f, dragX / 200f)
                     } else if (dragX < -40f) {
-                        val alphaVal = (-dragX / 200f).coerceIn(0f, 1f)
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.TopStart)
-                                .padding(top = 40.dp, start = 30.dp)
-                                .rotate(-15f)
-                                .alpha(alphaVal)
-                                .border(3.dp, PassRed, RoundedCornerShape(12.dp))
-                                .background(Color(0x33EF4444))
-                                .padding(horizontal = 20.dp, vertical = 6.dp)
-                        ) {
-                            Text(
-                                text = "SKIP",
-                                color = PassRed,
-                                fontSize = 24.sp,
-                                fontWeight = FontWeight.ExtraBold
-                            )
-                        }
+                        SwipeBadge("SKIP", PassRed, Alignment.TopStart, -15f, -dragX / 200f)
                     }
                 }
             }
         }
+    }
+}
+
+/** The READ / SKIP stamp that fades in while a card is dragged. */
+@Composable
+private fun BoxScope.SwipeBadge(
+    text: String,
+    color: Color,
+    alignment: Alignment,
+    angle: Float,
+    strength: Float
+) {
+    Box(
+        modifier = Modifier
+            .align(alignment)
+            .padding(top = 40.dp, start = 30.dp, end = 30.dp)
+            .rotate(angle)
+            .alpha(strength.coerceIn(0f, 1f))
+            .border(3.dp, color, RoundedCornerShape(12.dp))
+            .background(color.copy(alpha = 0.2f))
+            .padding(horizontal = 20.dp, vertical = 6.dp)
+    ) {
+        Text(
+            text = text,
+            color = color,
+            fontSize = 24.sp,
+            fontWeight = FontWeight.ExtraBold
+        )
     }
 }

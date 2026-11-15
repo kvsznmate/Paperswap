@@ -1,82 +1,178 @@
 package com.newsswipe.app.viewmodel
 
+import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.newsswipe.app.data.model.NewsArticle
 import com.newsswipe.app.data.model.SwipeRecordRequest
 import com.newsswipe.app.data.remote.RetrofitInstance
+import com.newsswipe.app.data.remote.apiCall
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 sealed class NewsUiState {
     object Loading : NewsUiState()
-    data class Success(val articles: List<NewsArticle>, val currentIndex: Int = 0) : NewsUiState()
+    data class Success(
+        val articles: List<NewsArticle>,
+        val currentIndex: Int = 0,
+        /** Set when a swipe could not be recorded; cleared by the next success. */
+        val swipeNotice: String? = null
+    ) : NewsUiState() {
+        val currentArticle: NewsArticle? get() = articles.getOrNull(currentIndex)
+        val canUndo: Boolean get() = currentIndex > 0
+    }
     data class Error(val message: String) : NewsUiState()
 }
 
 class NewsViewModel : ViewModel() {
 
+    private companion object {
+        /** Backend rejects dwell above an hour (the backgrounded-app case). */
+        const val MAX_DWELL_MS = 3_600_000L
+
+        /**
+         * How long a swipe is held before it is sent. Undo inside this window
+         * cancels the swipe outright, so the permanent swipe_events table never
+         * records a swipe the user took back.
+         */
+        const val UNDO_WINDOW_MS = 5_000L
+    }
+
     private val _uiState = MutableStateFlow<NewsUiState>(NewsUiState.Loading)
     val uiState: StateFlow<NewsUiState> = _uiState.asStateFlow()
-
-    private val historyStack = mutableListOf<Int>() // Stack of swiped indices for Undo
 
     init {
         loadNewsFeed()
     }
 
     fun loadNewsFeed() {
+        _uiState.value = NewsUiState.Loading
         viewModelScope.launch {
-            _uiState.value = NewsUiState.Loading
-            try {
-                val response = RetrofitInstance.api.getNewsFeed()
-                if (response.isSuccessful && response.body() != null) {
-                    val articles = response.body()!!.articles
-                    _uiState.value = NewsUiState.Success(articles = articles, currentIndex = 0)
-                    historyStack.clear()
-                } else {
-                    _uiState.value = NewsUiState.Error("Server response error: ${response.code()}")
+            apiCall { RetrofitInstance.api.getNewsFeed() }
+                .onSuccess {
+                    _uiState.value = NewsUiState.Success(articles = it.articles)
+                    resetCardSignals()
                 }
-            } catch (e: Exception) {
-                _uiState.value = NewsUiState.Error("Failed to connect to Oracle VM (${e.localizedMessage})")
-            }
+                .onFailure { _uiState.value = NewsUiState.Error(it.message.orEmpty()) }
         }
     }
 
-    fun onSwipe(direction: String) {
-        val currentState = _uiState.value
-        if (currentState is NewsUiState.Success) {
-            val articles = currentState.articles
-            val currentIndex = currentState.currentIndex
+    // --- Swiping ---------------------------------------------------------------
 
-            if (currentIndex < articles.size) {
-                val article = articles[currentIndex]
-                val action = if (direction == "right") "read" else "pass"
+    private var pendingSwipe: SwipeRecordRequest? = null
+    private var pendingSwipeJob: Job? = null
 
-                // Log swipe to backend DB
-                viewModelScope.launch {
-                    try {
-                        RetrofitInstance.api.recordSwipe(
-                            SwipeRecordRequest(articleId = article.id, action = action)
-                        )
-                    } catch (e: Exception) {
-                        // Silent fallback if log fails
-                    }
-                }
+    /** Swipe the current card: right ([read] = true) or left. */
+    fun onSwipe(read: Boolean) {
+        val state = _uiState.value as? NewsUiState.Success ?: return
+        val article = state.currentArticle ?: return
 
-                historyStack.add(currentIndex)
-                _uiState.value = currentState.copy(currentIndex = currentIndex + 1)
-            }
+        // Captured before the state update, so they describe the card being
+        // swiped rather than the one that replaces it.
+        val request = SwipeRecordRequest(
+            articleId = article.id,
+            action = if (read) "read" else "pass",
+            dwellMs = currentDwellMs(),
+            flipped = currentCardFlipped
+        )
+
+        // Only the latest swipe is undoable, so the previous one goes out now.
+        flushPendingSwipe()
+        pendingSwipe = request
+        pendingSwipeJob = viewModelScope.launch {
+            delay(UNDO_WINDOW_MS)
+            pendingSwipeJob = null   // this job is finishing; do not cancel it
+            flushPendingSwipe()
         }
+
+        resetCardSignals()
+        _uiState.value = state.copy(currentIndex = state.currentIndex + 1)
     }
 
+    /**
+     * Step back one card. If that card's swipe is still inside the undo window
+     * it is cancelled; after that it has already been recorded and stays so.
+     */
     fun undoSwipe() {
-        val currentState = _uiState.value
-        if (currentState is NewsUiState.Success && historyStack.isNotEmpty()) {
-            val lastIndex = historyStack.removeAt(historyStack.size - 1)
-            _uiState.value = currentState.copy(currentIndex = lastIndex)
-        }
+        val state = _uiState.value as? NewsUiState.Success ?: return
+        if (!state.canUndo) return
+
+        pendingSwipeJob?.cancel()
+        pendingSwipeJob = null
+        pendingSwipe = null
+
+        resetCardSignals()
+        _uiState.value = state.copy(currentIndex = state.currentIndex - 1)
+    }
+
+    /** Send the held swipe immediately, if there is one. */
+    private fun flushPendingSwipe() {
+        val request = pendingSwipe ?: return
+        pendingSwipe = null
+        pendingSwipeJob?.cancel()
+        pendingSwipeJob = null
+        viewModelScope.launch { sendSwipe(request) }
+    }
+
+    private suspend fun sendSwipe(request: SwipeRecordRequest) {
+        val result = apiCall { RetrofitInstance.api.recordSwipe(request) }
+        val notice = result.exceptionOrNull()?.let { "Swipe not saved: ${it.message}" }
+        _uiState.update { if (it is NewsUiState.Success) it.copy(swipeNotice = notice) else it }
+    }
+
+    // --- Interaction signals ---------------------------------------------------
+    //
+    // dwell_ms counts only time the deck is actually on screen. The timer pauses
+    // when the deck is hidden (Summaries tab, Custom Tab opened by a right swipe,
+    // app in background), so that time is not charged to the next card.
+    //
+    // elapsedRealtime, not currentTimeMillis: monotonic, so a clock change
+    // mid-session cannot produce a negative or absurd dwell.
+
+    private var dwellAccumulatedMs = 0L
+    private var visibleSinceMs: Long? = null
+    private var currentCardFlipped = false
+
+    /** The deck became visible (screen shown and app in the foreground). */
+    fun onDeckShown() {
+        if (visibleSinceMs == null) visibleSinceMs = SystemClock.elapsedRealtime()
+    }
+
+    /**
+     * The deck stopped being visible. Also sends any held swipe now, because
+     * once the app is backgrounded the ViewModel may be cleared before the undo
+     * window ends, and viewModelScope dies with it.
+     */
+    fun onDeckHidden() {
+        visibleSinceMs?.let { dwellAccumulatedMs += SystemClock.elapsedRealtime() - it }
+        visibleSinceMs = null
+        flushPendingSwipe()
+    }
+
+    /** Called by the card stack when the user turns the current card over. */
+    fun onCardFlipped() {
+        currentCardFlipped = true
+    }
+
+    private fun resetCardSignals() {
+        dwellAccumulatedMs = 0L
+        if (visibleSinceMs != null) visibleSinceMs = SystemClock.elapsedRealtime()
+        currentCardFlipped = false
+    }
+
+    /**
+     * Milliseconds the current card was on screen, or null if that is not a
+     * usable measurement. Out-of-range values are dropped, not clamped --
+     * clamping would invent a reading.
+     */
+    private fun currentDwellMs(): Int? {
+        val running = visibleSinceMs?.let { SystemClock.elapsedRealtime() - it } ?: 0L
+        val total = dwellAccumulatedMs + running
+        return if (total in 1..MAX_DWELL_MS) total.toInt() else null
     }
 }

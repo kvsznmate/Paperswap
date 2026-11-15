@@ -1,5 +1,6 @@
 package com.newsswipe.app.data.remote
 
+import com.newsswipe.app.BuildConfig
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
@@ -8,14 +9,14 @@ import java.util.concurrent.TimeUnit
 
 object RetrofitInstance {
 
-    // Tailscale address of the backend VM. Stable across Oracle's ephemeral
-    // public-IP rotations, and reachable from any network the phone is on as
-    // long as Tailscale is connected. Requires the device to be signed into
-    // the same tailnet -- the app will not work for anyone outside it.
-    private const val BASE_URL = "http://100.67.178.57:8000/"
-
     private val loggingInterceptor = HttpLoggingInterceptor().apply {
-        level = HttpLoggingInterceptor.Level.BODY
+        // Full payloads in logcat are a debugging aid, not something a release
+        // build should do.
+        level = if (BuildConfig.DEBUG) {
+            HttpLoggingInterceptor.Level.BODY
+        } else {
+            HttpLoggingInterceptor.Level.NONE
+        }
     }
 
     private val client = OkHttpClient.Builder()
@@ -26,9 +27,10 @@ object RetrofitInstance {
         .readTimeout(20, TimeUnit.SECONDS)
         .build()
 
+    /** Base URL comes from app/build.gradle.kts (`paperswap.baseUrl`). */
     val api: NewsApiService by lazy {
         Retrofit.Builder()
-            .baseUrl(BASE_URL)
+            .baseUrl(BuildConfig.BASE_URL)
             .client(client)
             .addConverterFactory(GsonConverterFactory.create())
             .build()

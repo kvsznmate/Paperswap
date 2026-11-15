@@ -8,8 +8,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -46,7 +44,7 @@ fun ActionButtons(
             contentAlignment = Alignment.Center
         ) {
             Icon(
-                imageVector = Icons.Default.Undo,
+                imageVector = UndoIcon,
                 contentDescription = "Undo",
                 tint = UndoAmber,
                 modifier = Modifier.size(24.dp)
