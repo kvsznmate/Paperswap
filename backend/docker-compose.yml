@@ -49,6 +49,12 @@ services:
       SESSION_RETENTION_DAYS: ${SESSION_RETENTION_DAYS:-${PURGE_OLDER_THAN_DAYS:-9}}
       SESSION_METRIC_WINDOW_DAYS: ${SESSION_METRIC_WINDOW_DAYS:-${SESSION_RETENTION_DAYS:-${PURGE_OLDER_THAN_DAYS:-9}}}
       LOG_FLUSH_INTERVAL: ${LOG_FLUSH_INTERVAL:-10}   # seconds between request-log flushes
+      ARTICLES_PER_CATEGORY: ${ARTICLES_PER_CATEGORY:-12}
+      FEED_DEFAULT_LIMIT: ${FEED_DEFAULT_LIMIT:-70}
+      ADMIN_SESSION_TTL: ${ADMIN_SESSION_TTL:-43200}  # /analytics sign-in lifetime, seconds
+      # Flip to true once HTTPS terminates in front; a Secure cookie over plain
+      # HTTP is silently dropped and the sign-in form just reloads.
+      ADMIN_COOKIE_SECURE: ${ADMIN_COOKIE_SECURE:-false}
       # --- Weekly topic summaries ---
       # Unset ANTHROPIC_API_KEY is fine: the default generator is offline.
       SUMMARY_GENERATOR: ${SUMMARY_GENERATOR:-extractive:v1}
@@ -65,7 +71,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # Nightly enrichment (ADR-011). One-shot, not a server -- it exits when done.
+  # Enrichment, run every 6 h from cron via run_enrichment.sh (ADR-012). One-shot, not a server -- it exits when done.
   #
   #   docker compose run --rm enrichment python enrichment.py --dry-run
   #   docker compose run --rm enrichment python enrichment.py --limit 5

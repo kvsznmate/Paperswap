@@ -126,7 +126,7 @@ _api_key_header = APIKeyHeader(
 # admin surface on a single-container deployment.
 SESSION_COOKIE = "paperswap_admin_session"
 SESSION_TTL_SECONDS = int(os.getenv("ADMIN_SESSION_TTL", "43200"))   # 12 h
-# Set true once HTTPS is in front (see PROJECT_STATUS.md, Caddy). Left false by
+# Set true once HTTPS (Caddy) is in front. Left false by
 # default because a Secure cookie is silently dropped over plain HTTP, which
 # would present as "the login form just reloads forever".
 COOKIE_SECURE = os.getenv("ADMIN_COOKIE_SECURE", "false").lower() == "true"
@@ -217,9 +217,8 @@ def require_admin_session(
 # single container, and avoids running Redis on a 956 MB VM.
 #
 # NOTE: keyed on the client IP. Behind a reverse proxy every request appears to
-# come from the proxy, collapsing all users into one bucket. Deploying Caddy in
-# front of this (planned, see PROJECT_STATUS.md) requires X-Forwarded-For
-# handling before these limits mean anything per-client.
+# come from the proxy, collapsing all users into one bucket. Putting Caddy in
+# front requires X-Forwarded-For handling first -- see docs/RATE_LIMITS.md.
 # ---------------------------------------------------------------------------
 limiter = Limiter(key_func=get_remote_address)
 
@@ -279,6 +278,19 @@ def refresh_pipeline():
 # request path does no database work at all.
 # ---------------------------------------------------------------------------
 logger = logging.getLogger("paperswap.request_log")
+
+# Last 100 log lines, served to the analytics dashboard by /api/v1/telemetry/logs.
+RECENT_LOGS = collections.deque(maxlen=100)
+
+
+def add_log_entry(message: str, level: str = "INFO"):
+    """Append a timestamped line to RECENT_LOGS and echo it to stdout."""
+    entry = f"[{datetime.datetime.now():%H:%M:%S}] [{level}] {message}"
+    RECENT_LOGS.append(entry)
+    print(entry)
+
+
+add_log_entry("Application process initialized. Telemetry system online.", "SYSTEM")
 
 # Bounded, so a traffic spike costs a fixed slice of memory instead of growing
 # until this 956 MB VM starts swapping. At a 10 s interval, 10k slots absorbs a
@@ -392,11 +404,11 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="PaperSwap Multi-Topic News Feed API",
+    title="Paperswap News Feed API",
     description=(
-        "Dockerized API serving 9:16 mobile swipe news cards backed by PostgreSQL. "
-        "Topics: Tech, Finance, Sports, Politics, Programming, Science, Beauty. "
-        "Cards are rendered on the phone.\n\n"
+        "JSON API behind the Paperswap swipe deck: a topic-balanced news feed, "
+        "swipe recording, and weekly per-topic summaries. Cards are rendered on "
+        "the client.\n\n"
         "**Authentication.** Read endpoints are public. Endpoints that mutate state "
         "or expose operational data require an `X-API-Key` header and are marked "
         "with a padlock below."
@@ -573,24 +585,28 @@ _GATE_PAGE = """<!DOCTYPE html>
 </body></html>"""
 
 
+TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
+
+
+def _serve_template(name: str) -> HTMLResponse:
+    """Return a file from templates/ verbatim (no templating engine involved)."""
+    path = os.path.join(TEMPLATE_DIR, name)
+    if not os.path.exists(path):
+        return HTMLResponse(content=f"<h1>{name} missing</h1>", status_code=404)
+    with open(path, "r", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
+
+
 @app.get("/", response_class=HTMLResponse, tags=["pages"])
 def read_root():
     """Serve the desktop/gallery dashboard."""
-    template_path = os.path.join(os.path.dirname(__file__), "templates", "dashboard.html")
-    if os.path.exists(template_path):
-        with open(template_path, "r", encoding="utf-8") as f:
-            return HTMLResponse(content=f.read())
-    return HTMLResponse(content="<h1>Dashboard template missing</h1>", status_code=404)
+    return _serve_template("dashboard.html")
 
 
 @app.get("/mobile", response_class=HTMLResponse, tags=["pages"])
 def read_mobile_app():
-    """Serve the Tinder-Style Mobile Swipe App UI."""
-    template_path = os.path.join(os.path.dirname(__file__), "templates", "mobile_preview.html")
-    if os.path.exists(template_path):
-        with open(template_path, "r", encoding="utf-8") as f:
-            return HTMLResponse(content=f.read())
-    return HTMLResponse(content="<h1>Mobile template missing</h1>", status_code=404)
+    """Serve the touch swipe UI (deck + weekly summaries tabs)."""
+    return _serve_template("mobile_preview.html")
 
 
 @app.get("/api/v1/categories", tags=["public"])
@@ -748,21 +764,20 @@ def read_analytics_dashboard(request: Request):
     if not (ADMIN_API_KEY and _valid_session(request.cookies.get(SESSION_COOKIE))):
         return HTMLResponse(content=_GATE_PAGE, status_code=status.HTTP_401_UNAUTHORIZED)
 
-    template_path = os.path.join(os.path.dirname(__file__), "templates", "analytics.html")
-    if os.path.exists(template_path):
-        with open(template_path, "r", encoding="utf-8") as f:
-            return HTMLResponse(content=f.read())
-    return HTMLResponse(content="<h1>Analytics template missing</h1>", status_code=404)
+    return _serve_template("analytics.html")
 
 
 @app.get("/summaries", response_class=HTMLResponse, tags=["pages"])
 def read_summaries_page():
-    """Serve the weekly topic summary page."""
-    template_path = os.path.join(os.path.dirname(__file__), "templates", "summaries.html")
-    if os.path.exists(template_path):
-        with open(template_path, "r", encoding="utf-8") as f:
-            return HTMLResponse(content=f.read())
-    return HTMLResponse(content="<h1>Summaries template missing</h1>", status_code=404)
+    """Deep link straight to the weekly summaries tab.
+
+    Serves the SAME template as /mobile rather than a second page. The two views
+    live behind a nav bar in one document, so a separate summaries.html would be
+    a second copy of the rendering logic, and the copies would drift the first
+    time the payload changed. The client reads window.location.pathname and opens
+    the right tab.
+    """
+    return read_mobile_app()
 
 
 def _parse_week_start(raw: Optional[str]) -> Optional[datetime.date]:
@@ -898,19 +913,6 @@ def user_heartbeat(request: Request, req: HeartbeatRequest):
     return JSONResponse(content={"status": "ok", "session_id": req.session_id})
 
 
-RECENT_LOGS = collections.deque(maxlen=100)
-
-def add_log_entry(message: str, level: str = "INFO"):
-    """Helper to append timestamped application logs for live dashboard streaming."""
-    now_str = datetime.datetime.now().strftime("%H:%M:%S")
-    entry = f"[{now_str}] [{level}] {message}"
-    RECENT_LOGS.append(entry)
-    print(entry)
-
-# Log startup message
-add_log_entry("Application process initialized. Telemetry system online.", "SYSTEM")
-
-
 @app.get(
     "/api/v1/telemetry/stats",
     dependencies=[Depends(require_admin_session)],
@@ -972,7 +974,7 @@ def run_cli_mode():
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Tech & Finance News Feed API")
+    parser = argparse.ArgumentParser(description="Paperswap news feed API")
     parser.add_argument("--cli", action="store_true", help="Run in CLI mode to sync news directly")
     parser.add_argument("--port", type=int, default=8000, help="Port for the FastAPI web server")
     args = parser.parse_args()

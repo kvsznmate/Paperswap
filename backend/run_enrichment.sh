@@ -17,9 +17,7 @@
 # 12-hour refresh, so running 4x/day means a card back is never empty for more
 # than a few hours, at a cost of about 20 minutes of CPU per day.
 #
-# (ADR-011 describes this as a nightly job. The reasoning is unchanged -- one
-# shot, separate process, exits when done -- but the cadence in that document is
-# now out of date.)
+# Design rationale (one-shot, separate process, exits when done): ADR-012.
 
 set -euo pipefail
 

@@ -3,11 +3,8 @@ import re
 import requests
 import feedparser
 from datetime import datetime
-from dotenv import load_dotenv
 
-import database as db
-
-load_dotenv()
+import database as db  # also loads backend/.env
 
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "").strip()
 
@@ -146,10 +143,6 @@ TOPIC_FEEDS = {
     },
 }
 
-# Backwards-compatible alias: older code imported CATEGORY_IMAGES directly.
-CATEGORY_IMAGES = {slug: cfg["images"] for slug, cfg in TOPIC_FEEDS.items()}
-
-
 def get_topic_config(category: str) -> dict:
     """Return the feed config for a topic, falling back to the default topic."""
     slug = db.normalize_category(category)
@@ -176,7 +169,7 @@ def clean_html(text: str) -> str:
 # The category used to be decided by WHICH QUERY returned the article, so a
 # beauty story that happened to match "market" was stored as FINANCE. These
 # keywords let us read the article text and label it properly instead.
-# Add a new topic by adding one entry here (plus CATEGORY_IMAGES below).
+# Add a new topic by adding one entry here.
 # ---------------------------------------------------------------------------
 CATEGORY_KEYWORDS = {
     "BEAUTY": [
@@ -303,7 +296,7 @@ def classify_category(title: str, description: str, fallback: str) -> str:
 
 # Lets us tell "generic topic filler" apart from a real article photo, so that
 # relabelling an article swaps its filler image but never clobbers a real one.
-_STOCK_IMAGES = {url for urls in CATEGORY_IMAGES.values() for url in urls}
+_STOCK_IMAGES = {url for cfg in TOPIC_FEEDS.values() for url in cfg["images"]}
 
 
 def extract_rss_image(entry) -> str:
@@ -429,16 +422,6 @@ def _title_mentions(title_lower: str, keywords) -> bool:
     politics and sports stories were handed the AI model-scaling blurb.
     """
     return any(re.search(r"\b" + re.escape(kw) + r"\b", title_lower) for kw in keywords)
-
-
-def generate_short_summary(title: str, category: str, raw_desc: str, source: str) -> str:
-    """Text-only wrapper around generate_short_summary_tiered().
-
-    Kept because callers and tests that only want the blurb should not have to
-    care about the tier. Everything that WRITES an article should use the tiered
-    form so the provenance is stored rather than thrown away.
-    """
-    return generate_short_summary_tiered(title, category, raw_desc, source)[0]
 
 
 def generate_short_summary_tiered(title: str, category: str, raw_desc: str,
