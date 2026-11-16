@@ -103,6 +103,18 @@ GLOBAL_NEW_SESSIONS_PER_HOUR = int(os.getenv("GLOBAL_NEW_SESSIONS_PER_HOUR", "50
 SWIPE_BUDGET = GlobalBudget("swipes", GLOBAL_SWIPES_PER_HOUR)
 SESSION_BUDGET = GlobalBudget("new_sessions", GLOBAL_NEW_SESSIONS_PER_HOUR)
 
+# Every request, every route, every client, per minute. The last line of the
+# load-shedding stack (#58): uvicorn's --limit-concurrency caps work in flight,
+# this caps throughput, and both answer 503 rather than letting memory grow.
+# A circuit breaker, not a fairness mechanism -- one client can spend it for
+# everyone. See docs/RATE_LIMITS.md, "Load shedding".
+GLOBAL_REQUESTS_PER_MINUTE = int(os.getenv("GLOBAL_REQUESTS_PER_MINUTE", "1800"))
+REQUEST_BUDGET = GlobalBudget("requests", GLOBAL_REQUESTS_PER_MINUTE, window_seconds=60.0)
+
+# /docs, /redoc and /openapi.json. The schema maps every route, parameter and
+# admin endpoint for whoever asks; turn it off once the API is public (#32).
+API_DOCS_ENABLED = os.getenv("API_DOCS_ENABLED", "true").lower() == "true"
+
 # Public GET payloads are identical for every client. Served from memory for
 # this long, and sent with a matching Cache-Control so an edge cache can too.
 PUBLIC_CACHE_SECONDS = int(os.getenv("PUBLIC_CACHE_SECONDS", "60"))
@@ -465,7 +477,10 @@ app = FastAPI(
         "with a padlock below."
     ),
     version="3.1.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url="/docs" if API_DOCS_ENABLED else None,
+    redoc_url="/redoc" if API_DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if API_DOCS_ENABLED else None,
 )
 
 app.state.limiter = limiter
@@ -571,6 +586,69 @@ async def log_requests_middleware(request: Request, call_next):
                   "ERROR" if status_code >= 400 else "HTTP")
 
     return response
+
+
+# Monotonic time of the last "ceiling reached" warning; one per window, so a
+# flood produces one log line a minute rather than one per rejected request.
+_CEILING_LAST_WARNED = float("-inf")
+
+
+class GlobalRequestCeiling:
+    """Answer 503 + Retry-After once GLOBAL_REQUESTS_PER_MINUTE requests have
+    arrived in the current minute, counting every client and every route.
+
+    Pure ASGI and registered last, so it is the OUTERMOST layer: a shed request
+    costs one counter increment and never reaches routing, the request log or
+    gzip. Shed requests are therefore not in request_logs; they are counted in
+    REQUEST_BUDGET.rejected and reported under global_limits.requests in
+    /api/v1/telemetry/stats.
+
+    Why not slowapi's application_limits, which the issue suggested: its
+    middleware skips any route that already has a @limiter.limit decorator --
+    every API route here -- and it keys on client IP, so it is neither global
+    nor applied where the load is.
+
+    Admin requests (a valid X-API-Key or admin session cookie) bypass the
+    ceiling and do not spend it, so the operator can still open /analytics
+    and trigger a refresh during the incident the ceiling is reacting to.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        request = Request(scope)
+        if (_key_matches(request.headers.get("x-api-key"))
+                or _valid_session(request.cookies.get(SESSION_COOKIE))):
+            return await self.app(scope, receive, send)
+
+        if REQUEST_BUDGET.take():
+            return await self.app(scope, receive, send)
+
+        global _CEILING_LAST_WARNED
+        now = time.monotonic()
+        if now - _CEILING_LAST_WARNED >= REQUEST_BUDGET.window:
+            _CEILING_LAST_WARNED = now
+            logging.getLogger("paperswap.limits").warning(
+                "Global request ceiling reached (%d/min); shedding load.",
+                REQUEST_BUDGET.limit)
+            add_log_entry(
+                f"Request ceiling reached ({REQUEST_BUDGET.limit}/min); "
+                f"answering 503 until the window resets.", "ERROR")
+        response = JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": "The server is busy. Try again shortly."},
+            headers={"Retry-After": str(REQUEST_BUDGET.retry_after())},
+        )
+        await response(scope, receive, send)
+
+
+# Registered after the logging middleware above, so it wraps it (Starlette runs
+# the most recently added middleware first).
+app.add_middleware(GlobalRequestCeiling)
 
 
 class SwipeRequest(BaseModel):
@@ -1073,6 +1151,7 @@ def get_telemetry_stats(request: Request):
     """
     stats = db.get_telemetry_summary(session_window_days=SESSION_METRIC_WINDOW_DAYS)
     stats["global_limits"] = {
+        "requests": REQUEST_BUDGET.snapshot(),
         "swipes": SWIPE_BUDGET.snapshot(),
         "new_sessions": SESSION_BUDGET.snapshot(),
         "unmatched_requests_not_stored": {
@@ -1139,4 +1218,11 @@ if __name__ == "__main__":
     else:
         import uvicorn
         print(f"Starting server on http://localhost:{args.port} ...")
-        uvicorn.run("main:app", host="0.0.0.0", port=args.port, reload=False)
+        # The uvicorn CLI (the Dockerfile CMD) reads UVICORN_* from the
+        # environment by itself; uvicorn.run() does not, so pass them on here
+        # to keep `python main.py` shedding load the same way the container does.
+        uvicorn.run(
+            "main:app", host="0.0.0.0", port=args.port, reload=False,
+            limit_concurrency=int(os.getenv("UVICORN_LIMIT_CONCURRENCY", "64")),
+            timeout_keep_alive=int(os.getenv("UVICORN_TIMEOUT_KEEP_ALIVE", "3")),
+        )

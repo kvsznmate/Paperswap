@@ -85,6 +85,9 @@ Set in `.env` (see `.env.example` for the annotated version). Compose refuses to
 | `REFRESH_INTERVAL` | `12` | Hours between background refreshes |
 | `LOG_FLUSH_INTERVAL` | `10` | Seconds between request-log buffer flushes |
 | `GLOBAL_SWIPES_PER_HOUR` / `GLOBAL_NEW_SESSIONS_PER_HOUR` | `3000` / `500` | Limits across all clients; 503 + `Retry-After` when spent. See docs/RATE_LIMITS.md |
+| `GLOBAL_REQUESTS_PER_MINUTE` | `1800` | Ceiling on all requests together; 503 + `Retry-After` past it. Admin requests bypass it |
+| `UVICORN_LIMIT_CONCURRENCY` / `UVICORN_TIMEOUT_KEEP_ALIVE` | `64` / `3` | uvicorn answers 503 above this many open connections or in-flight requests. See docs/RATE_LIMITS.md, "Load shedding" |
+| `API_DOCS_ENABLED` | `true` | Serves `/docs`, `/redoc`, `/openapi.json`. Set `false` once public |
 | `PUBLIC_CACHE_SECONDS` / `SUMMARY_CACHE_SECONDS` | `60` / `600` | In-memory cache and `Cache-Control` max-age for the public GET endpoints |
 | `FEED_COLD_FETCH_COOLDOWN` | `600` | Seconds between synchronous fetches for an empty topic selection |
 | `SUMMARY_GENERATOR` | `extractive:v1` | `anthropic` uses `ANTHROPIC_API_KEY` + `SUMMARY_MODEL`; see `.env.example` for the rest of the summary settings |

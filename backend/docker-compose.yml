@@ -17,6 +17,17 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    # Memory (#58). The point of every mem_limit in this file is that, on a
+    # 956 MB VM, the kernel's OOM killer picks by size, and Postgres is the
+    # biggest process. Capping the API and enrichment makes a runaway there kill
+    # itself; this cap and the oom_score_adj keep Postgres the last thing to go.
+    # 384m = 128 MB shared_buffers + ~20 pool connections at a few MB each, with
+    # the remainder as page cache (cgroup memory includes it, and the kernel
+    # reclaims cache before it OOM-kills anything inside the cgroup). Sizing
+    # table in docs/RATE_LIMITS.md, "Load shedding".
+    mem_limit: 384m
+    # -500 makes the host OOM killer pass over Postgres for anything else.
+    oom_score_adj: -500
     restart: unless-stopped
 
   news-cards-backend:
@@ -52,6 +63,13 @@ services:
       # Global (all-client) limits and caching -- see docs/RATE_LIMITS.md.
       GLOBAL_SWIPES_PER_HOUR: ${GLOBAL_SWIPES_PER_HOUR:-3000}
       GLOBAL_NEW_SESSIONS_PER_HOUR: ${GLOBAL_NEW_SESSIONS_PER_HOUR:-500}
+      # Load shedding (#58). All three answer 503 instead of queueing work.
+      GLOBAL_REQUESTS_PER_MINUTE: ${GLOBAL_REQUESTS_PER_MINUTE:-1800}
+      # Read by the uvicorn CLI itself (auto_envvar_prefix=UVICORN).
+      UVICORN_LIMIT_CONCURRENCY: ${UVICORN_LIMIT_CONCURRENCY:-64}
+      UVICORN_TIMEOUT_KEEP_ALIVE: ${UVICORN_TIMEOUT_KEEP_ALIVE:-3}
+      # /docs, /redoc, /openapi.json. Set false once public (#32).
+      API_DOCS_ENABLED: ${API_DOCS_ENABLED:-true}
       PUBLIC_CACHE_SECONDS: ${PUBLIC_CACHE_SECONDS:-60}
       SUMMARY_CACHE_SECONDS: ${SUMMARY_CACHE_SECONDS:-600}
       FEED_COLD_FETCH_COOLDOWN: ${FEED_COLD_FETCH_COOLDOWN:-600}
@@ -72,6 +90,11 @@ services:
       SUMMARY_MAX_ARTICLES: ${SUMMARY_MAX_ARTICLES:-80}
       # 0 = keep forever. These rows outlive the articles they describe.
       SUMMARY_RETENTION_WEEKS: ${SUMMARY_RETENTION_WEEKS:-0}
+    # The API measures ~130 MB RSS on the VM. 256m is twice that: room for a
+    # burst of in-flight requests (bounded by UVICORN_LIMIT_CONCURRENCY) and a
+    # refresh running alongside, while a leak or a flood hits this ceiling and
+    # restarts the API (restart: unless-stopped) instead of starving Postgres.
+    mem_limit: 256m
     depends_on:
       db:
         condition: service_healthy
