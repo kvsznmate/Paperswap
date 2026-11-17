@@ -90,7 +90,8 @@ Set in `.env` (see `.env.example` for the annotated version). Compose refuses to
 | `API_DOCS_ENABLED` | `true` | Serves `/docs`, `/redoc`, `/openapi.json`. Set `false` once public |
 | `PUBLIC_CACHE_SECONDS` / `SUMMARY_CACHE_SECONDS` | `60` / `600` | In-memory cache and `Cache-Control` max-age for the public GET endpoints |
 | `FEED_COLD_FETCH_COOLDOWN` | `600` | Seconds between synchronous fetches for an empty topic selection |
-| `SUMMARY_GENERATOR` | `extractive:v1` | `anthropic` uses `ANTHROPIC_API_KEY` + `SUMMARY_MODEL`; see `.env.example` for the rest of the summary settings |
+| `SUMMARY_GENERATOR` | `stories:v2` | `extractive:v1` is the old offline generator; `anthropic` uses `ANTHROPIC_API_KEY` + `SUMMARY_MODEL`; see `.env.example` for the rest of the summary settings |
+| `SUMMARY_STORY_SIMILARITY` | `0.45` | `stories:v2` grouping threshold; tune with `python summarizer.py --explain` |
 | `DB_POOL_MIN` / `DB_POOL_MAX` / `DB_POOL_TIMEOUT` | `3` / `20` / `5.0` | Connection pool sizing (not passed through by Compose; local runs only) |
 
 ### Retention windows

@@ -291,7 +291,7 @@ That framing creates three problems the obvious implementation gets wrong.
 
 **Two counts, both measured.** `number_of_articles` is what the generator read. `articles_in_window` is what the topic saw before filtering. Storing only the first hides how thin a week was; storing only the second attaches a number to prose that does not describe it. The page renders "summarised from 34 of 61 articles", which doubles as a health signal on the fetcher.
 
-**A generated summary carries `generator`, not `measured`.** ADR-010's contract is two-valued and neither value fits a sentence written by a model. So the row names what produced it — `extractive:v1` or `anthropic:<model-id>` — and when. Both can coexist in the history.
+**A generated summary carries `generator`, not `measured`.** ADR-010's contract is two-valued and neither value fits a sentence written by a model. So the row names what produced it — `stories:v2` (the default since the revision below), `extractive:v1` or `anthropic:<model-id>` — and when. All of them can coexist in the history.
 
 **On failure, no row.** The generator raises rather than returning a placeholder. A gap is visible and, while the articles survive, recoverable. A placeholder becomes permanent and indistinguishable from a real summary the moment the purge runs.
 
@@ -301,7 +301,7 @@ That framing creates three problems the obvious implementation gets wrong.
 
 Some topics have no row some weeks. Beauty and Programming are the likely absentees — narrow topics on Google News RSS, where publisher descriptions are often missing. The API returns them in `topics_missing` so a client can say "not enough coverage" rather than render a blank card. This is the system working, and it will look like a bug to anyone who has not read this record.
 
-The extractive generator ships first and is the default. It is not eloquent; every clause is derived from the input and it asserts nothing it cannot count. It exists so the window arithmetic, filtering, counts, upsert and scheduling could all be built and tested before the LLM question was settled, and so the feature degrades to something honest rather than to nothing if a key goes missing.
+The extractive generator shipped first and was the default until `stories:v2` replaced it (see the revision below). It is not eloquent; every clause is derived from the input and it asserts nothing it cannot count. It exists so the window arithmetic, filtering, counts, upsert and scheduling could all be built and tested before the LLM question was settled, and so the feature degrades to something honest rather than to nothing if a key goes missing.
 
 Retention rose by two days across three tables to protect a feature that touches one. That is the cost of a calendar week; a rolling 7-day window would have avoided it at the price of a digest nobody can date.
 
@@ -310,6 +310,52 @@ What this feature does **not** fix: topic assignment is still the unmeasured key
 ### Enforcement
 
 `backend/tests/test_topic_summaries.py`. The count-integrity and no-placeholder checks are the ADR-010 checks in this feature's clothing. The one that matters most is the ordering check: it seeds a real week, runs the summariser, then runs the purge, and asserts the summary exists and survives. A static read of `refresh_pipeline` can be satisfied by two calls in the right order that do the wrong thing; only the behavioural check proves the week was still there to be read.
+
+### Revision (2026-11, #53) — `stories:v2` becomes the default
+
+**Problem.** `extractive:v1` saw only headlines and blurbs, so its digests read "N articles were collected… Recurring terms: … Representative stories: headline; headline". They said what words were frequent, not what happened. Meanwhile ADR-012's enrichment job was already storing two better inputs per article that the summariser never selected: TextRank `summary_bullets` from the body, and a MiniLM `embedding` of `title. description`.
+
+**Decision.** `stories:v2`, offline, deterministic, no new dependency:
+
+1. `get_articles_for_week` also returns `summary_bullets` (parsed list) and `embedding` (raw `bytes`). Those rows reach only the summariser; a test asserts `main.py` never calls it, because `BYTEA` is not JSON-serialisable.
+2. Articles are grouped into stories by **average-linkage** agglomerative clustering on cosine similarity, stopping when no pair of groups averages `SUMMARY_STORY_SIMILARITY` (default **0.45**). Average linkage rather than single linkage, because single linkage chains (A~B, B~C ⇒ A, C together) and glues one topic's distinct stories into a blob.
+3. Stories are ranked by distinct outlets, then size.
+4. Each line is the **first bullet** of the member closest to the story centroid, among the members that have bullets. Bullets are kept in document order and news is written lede first, so this is normally what happened. A story with no enriched member uses its headline. Articles without a usable embedding become single-article stories.
+5. Output: an opening line with the exact count, then up to 5 stories covered by 2+ articles (topped up to 3 with single-article stories), each as `• <sentence> (5 articles · Reuters, BBC and 2 others)`. The text quotes extracted sentences verbatim and adds only counts. A week with no repeated story says so rather than calling anything "most covered".
+
+`number_of_articles` / `articles_in_window` keep their meaning. The boilerplate filter stays on, because the embedding includes the description, and twenty copies of one canned description would pull unrelated articles into one "story" for the same reason they used to dominate v1's term counts.
+
+It is pure Python (`struct` + `operator.mul`), not numpy. The API process otherwise never imports numpy, and this runs in its scheduler, so numpy would stay resident on a 956 MB box for a computation that takes tens of milliseconds once a week.
+
+`SUMMARY_GENERATOR=anthropic` now feeds the model the story lines (coverage, headline, extracted sentence) instead of raw rows. Thinking is disabled: current models think by default, thinking is billed as output and counts against `max_tokens`, and rewording a ranked list needs none. Any `stop_reason` other than `end_turn` is treated as a failure. A failed call falls back to `stories:v2`. That is not a placeholder: it is a complete digest whose `generator` column says `stories:v2`. The API's per-row `basis` sentence is now chosen per generator, so v1 rows in the history still describe how v1 worked.
+
+**Cost.** The LLM path has a fixed worst case of under $1 a year, set by caps in code, not by how much news arrives. With Haiku 5.5 at $0.10 / $0.50 per million input / output tokens (verified 2026-11):
+
+| per call | cap | worst-case cost |
+|---|---|---|
+| input | story list clipped to 8,000 chars (headline 200, lede 300); ~9.5k chars of prompt. Even at 1 char per token: | $0.00095 |
+| output | `max_tokens` 800, thinking disabled | $0.00040 |
+
+That is 7 topics × 52 weeks = 364 calls, about **$0.49 a year** in the worst case. A typical prompt is about 3k tokens, which puts the expected cost nearer $0.15. A topic-week is generated at most once, because `topics_missing_summary()` skips rows that exist and a failed call falls back to a stored `stories:v2` row instead of retrying. The only extra calls are manual `python summarizer.py` regenerations, at about $0.001 each. Each call logs its measured `usage` token counts. The bound assumes Haiku: a larger `SUMMARY_MODEL` multiplies it by that model's price. A monthly spend limit on the Anthropic key is the backstop if code or prices change.
+
+**Threshold.** The ticket guessed 0.6. Measured with the production model (Xenova `all-MiniLM-L6-v2` int8, the same `title. description` input enrichment embeds) on 21 hand-written articles: 6 multi-article stories written as deliberate paraphrases, 5 same-subject-different-event near misses (e.g. *Fed holds rates* vs *Fed governor resigns*; *Nvidia beats earnings* vs *Nvidia faces export curbs*), and unrelated singletons:
+
+| pairs | n | min | mean | max |
+|---|---|---|---|---|
+| same story | 10 | 0.508 | 0.589 | 0.788 |
+| same subject, different event | 12 | 0.139 | 0.287 | 0.407 |
+| unrelated | 188 | −0.108 | 0.066 | 0.334 |
+
+| threshold | 0.35 | 0.40 | 0.45 | 0.50 | 0.55 | 0.60 | 0.65 |
+|---|---|---|---|---|---|---|---|
+| stories fully grouped (of 6) | 5 | 6 | 6 | 6 | 3 | 2 | 1 |
+| groups mixing two events | 1 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+At 0.6, four of six stories would have been reported as separate stories. 0.45 is near the middle of the clean 0.41–0.51 gap. The weakest true pairs are short, vocabulary-disjoint rewrites (*Apple unveils iPhone 18…* ~ *New iPhones arrive…* = 0.508; *Federal Reserve leaves rates unchanged…* ~ *US central bank pauses again* = 0.514). Real wire copy usually shares more named entities than these, so real paraphrases should score higher, not lower.
+
+**Not yet done:** the same check on a real exported week. Hand-written fixtures can't show how dense a real topic-week's same-subject coverage is. Run `docker compose exec news-cards-backend python summarizer.py --explain --week <Monday>` on the VM. It prints every multi-article group at thresholds 0.35–0.60 and the digest at the configured value, without writing anything. Then record the verdict here.
+
+**Enforcement.** `backend/tests/test_stories.py` uses synthetic embeddings built from an exact Gram matrix, so every similarity is chosen rather than whatever a model produces. It covers paraphrases grouping where v1's word overlap does not, near misses staying apart, no chaining, ranking, lede selection and fallback, exact counts, the Anthropic fallback, and the database round trip.
 
 ---
 
