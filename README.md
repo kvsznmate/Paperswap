@@ -143,7 +143,7 @@ The app runs on an Oracle Cloud E2.1.Micro under Docker Compose ([ADR-003](docs/
 ## Known gaps
 
 **Operations**
-- CI (`.github/workflows/ci.yml`) lints, runs every backend suite against Postgres 16, boots the Compose stack and builds both APKs on each PR. It does not deploy, and there are no Android tests, only the compile.
+- CI (`.github/workflows/ci.yml`) lints, runs every backend suite against Postgres 16, boots the Compose stack and builds both APKs on each PR. It does not deploy, and there are no Android tests, only the compile. Pushing a `vX.Y` tag runs `.github/workflows/release.yml`, which attaches a signed APK to a GitHub Release (`android/README.md`, Releasing).
 - The server is plain HTTP only. HTTPS through Caddy is planned, and it needs `X-Forwarded-For` handling for the rate limiter plus `ADMIN_COOKIE_SECURE=true`.
 - Startup has no database retry, so an unreachable Postgres crash-loops the container. There is no `/health` endpoint.
 - `swipe_events`, the one irreplaceable table, has no scheduled backup.
