@@ -1,6 +1,10 @@
 package com.newsswipe.app.ui.theme
 
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.luminance
+import kotlin.math.max
+import kotlin.math.min
 
 /**
  * Colour helpers for values that arrive from the backend rather than the theme.
@@ -18,20 +22,33 @@ import androidx.compose.ui.graphics.Color
  * `Color.parseColor` throws IllegalArgumentException on anything it dislikes,
  * and one bad row in the catalogue should not blank the whole feed.
  */
-fun parseAccent(hex: String?, fallback: Color = TechIndigo): Color =
+fun parseAccent(hex: String?, fallback: Color = FallbackAccent): Color =
     runCatching { Color(android.graphics.Color.parseColor(hex)) }.getOrDefault(fallback)
 
+/** WCAG contrast ratio between two colours, 1 to 21. */
+fun contrastRatio(a: Color, b: Color): Float {
+    val la = a.luminance()
+    val lb = b.luminance()
+    return (max(la, lb) + 0.05f) / (min(la, lb) + 0.05f)
+}
+
 /**
- * Readable foreground for an arbitrary background, by BT.601 perceived
- * luminance.
+ * The accent, moved toward black (on a light background) or white (on a dark
+ * one) just far enough to reach [minRatio] against [background].
  *
- * A fixed white would fail on light accents such as Finance's amber, which
- * needs dark text; the darker accents (indigo, red, pink, purple) take white.
- * Computing it means a topic added server-side is legible on arrival instead of
- * waiting for someone to extend a hand-tuned map.
+ * The server's accents were picked for the old dark UI: on paper, Finance's
+ * amber or Sports' green as small text fail 4.5:1, and at night indigo does.
+ * Computing the adjustment keeps topic colours server-driven (ADR-006) and
+ * makes a topic added later legible on arrival. Hue is kept; only lightness
+ * moves, in 5% steps, so the colour stays recognisably the topic's.
  */
-fun contrastOn(background: Color): Color {
-    val luminance =
-        (background.red * 299f + background.green * 587f + background.blue * 114f) / 1000f
-    return if (luminance > 0.588f) Color(0xFF0B0F18) else Color.White
+fun readableOn(accent: Color, background: Color, minRatio: Float = 4.5f): Color {
+    val target = if (background.luminance() > 0.5f) Color.Black else Color.White
+    var colour = accent
+    var steps = 0
+    while (contrastRatio(colour, background) < minRatio && steps < 20) {
+        colour = lerp(accent, target, 0.05f * (steps + 1))
+        steps++
+    }
+    return colour
 }

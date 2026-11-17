@@ -296,7 +296,35 @@ def classify_category(title: str, description: str, fallback: str) -> str:
 
 # Lets us tell "generic topic filler" apart from a real article photo, so that
 # relabelling an article swaps its filler image but never clobbers a real one.
+# The feed also exposes it per article (image_is_stock), so the clients can drop
+# a filler photo instead of showing a laptop over an aviation story (ADR-013).
 _STOCK_IMAGES = {url for cfg in TOPIC_FEEDS.values() for url in cfg["images"]}
+
+# BBC feeds link a 240 px thumbnail; a card shows it 4-9x enlarged. The same
+# image is served at larger widths by changing that path segment (976 checked
+# 2026-11: 6 KB at 240 px, 72 KB at 976 px).
+_BBC_THUMB = re.compile(r"(//ichef\.bbci\.co\.uk/ace/standard/)240/")
+
+
+def upgrade_image_url(url: str) -> str:
+    """Swap a known low-resolution thumbnail URL for a larger one. Anything else,
+    including '' and None, comes back unchanged."""
+    if not url:
+        return url
+    return _BBC_THUMB.sub(r"\g<1>976/", url)
+
+
+def present_for_client(articles: list) -> list:
+    """Per-article fields the feed adds for the clients. Mutates and returns.
+
+    Done at serve time rather than only at fetch time so rows stored before the
+    BBC upgrade get it too (they live up to PURGE_OLDER_THAN_DAYS).
+    """
+    for item in articles:
+        url = item.get('image_url') or ''
+        item['image_is_stock'] = url in _STOCK_IMAGES
+        item['image_url'] = upgrade_image_url(url)
+    return articles
 
 
 def extract_rss_image(entry) -> str:
@@ -483,7 +511,7 @@ def fetch_from_news_api(category: str, count: int = ARTICLES_PER_CATEGORY) -> li
         articles = resp.json().get("articles", [])
         results = []
         for idx, art in enumerate(articles[:count]):
-            img = art.get("urlToImage") or fallback_image(category, idx)
+            img = upgrade_image_url(art.get("urlToImage")) or fallback_image(category, idx)
 
             pub_time = art.get("publishedAt", "")
             try:
@@ -594,7 +622,7 @@ def fetch_from_rss(category: str, count: int = ARTICLES_PER_CATEGORY) -> list:
                 "source": source,
                 "published_at": pub_str,
                 "category": category,
-                "image_url": extract_rss_image(entry) or fallback_image(category, len(results)),
+                "image_url": upgrade_image_url(extract_rss_image(entry)) or fallback_image(category, len(results)),
                 "url": entry.get("link", "#"),
             })
 

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.NewsSwipeAndroid" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/paper_ground</item>
+        <item name="android:statusBarColor">@color/paper_ground</item>
+        <item name="android:navigationBarColor">@color/paper_ground</item>
+    </style>
+
+    <color name="paper_ground">#FF14120E</color>
+</resources>

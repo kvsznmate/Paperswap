@@ -10,7 +10,10 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -25,8 +28,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.newsswipe.app.data.model.NewsArticle
-import com.newsswipe.app.ui.theme.PassRed
-import com.newsswipe.app.ui.theme.ReadGreen
+import com.newsswipe.app.ui.theme.Paper
+import com.newsswipe.app.ui.theme.PaperSans
+import com.newsswipe.app.ui.theme.PaperSerif
 import kotlinx.coroutines.launch
 
 // A swipe commits once the card passes this fraction of the screen width.
@@ -66,6 +70,8 @@ fun SwipeableCardStack(
     // which the backend documents as "a stronger interest signal than direction
     // alone" -- so the flip is not only a reading affordance, it is training data.
     onFlip: () -> Unit = {},
+    /** "Start again" on the empty deck: reloads the feed. */
+    onRestart: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val configuration = LocalConfiguration.current
@@ -94,22 +100,39 @@ fun SwipeableCardStack(
 
     Box(
         modifier = modifier
-            .fillMaxWidth()
-            .fillMaxHeight(0.85f),
+            .fillMaxSize(),
         contentAlignment = Alignment.Center
     ) {
         if (currentIndex >= articles.size) {
-            // Empty Deck State
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
+            val c = Paper.colors
+            Column(
+                modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically)
             ) {
                 Text(
-                    text = "🎉 All News Swiped!",
-                    color = Color.White,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold
+                    text = "That’s the whole deck.",
+                    fontFamily = PaperSerif,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 26.sp,
+                    lineHeight = 32.sp,
+                    color = c.ink
                 )
+                Text(
+                    text = "New stories arrive with the next refresh, every 12 hours.",
+                    fontFamily = PaperSans,
+                    fontSize = 14.sp,
+                    lineHeight = 21.sp,
+                    color = c.muted
+                )
+                OutlinedButton(
+                    onClick = onRestart,
+                    shape = CardShape,
+                    border = BorderStroke(1.5.dp, c.ink),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = c.ink),
+                    modifier = Modifier.height(48.dp)
+                ) {
+                    Text("Start again", fontFamily = PaperSans, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                }
             }
         } else {
             // Render background stacked depth card
@@ -202,7 +225,10 @@ fun SwipeableCardStack(
                             }
                     ) {
                         if (flipRotation <= 90f) {
-                            NewsCard(article = activeArticle)
+                            NewsCard(
+                                article = activeArticle,
+                                position = "${currentIndex + 1} / ${articles.size}"
+                            )
                         } else {
                             // Counter-rotated, otherwise the back face renders
                             // as a mirror image of itself.
@@ -214,10 +240,12 @@ fun SwipeableCardStack(
                     }
 
                     // Drag feedback, outside the flipping layer so it is never mirrored.
+                    // Each stamp sits on the side the card moves AWAY from; on the
+                    // leading side it would slide off-screen with the card.
                     if (dragX > 40f) {
-                        SwipeBadge("READ →", ReadGreen, Alignment.TopEnd, 15f, dragX / 200f)
+                        SwipeBadge("READ →", Paper.colors.ink, Alignment.TopStart, -12f, dragX / 200f)
                     } else if (dragX < -40f) {
-                        SwipeBadge("SKIP", PassRed, Alignment.TopStart, -15f, -dragX / 200f)
+                        SwipeBadge("PASS", Paper.colors.muted, Alignment.TopEnd, 12f, -dragX / 200f)
                     }
                 }
             }
@@ -225,7 +253,7 @@ fun SwipeableCardStack(
     }
 }
 
-/** The READ / SKIP stamp that fades in while a card is dragged. */
+/** The READ / PASS stamp that fades in while a card is dragged: an ink stamp on paper. */
 @Composable
 private fun BoxScope.SwipeBadge(
     text: String,
@@ -240,14 +268,16 @@ private fun BoxScope.SwipeBadge(
             .padding(top = 40.dp, start = 30.dp, end = 30.dp)
             .rotate(angle)
             .alpha(strength.coerceIn(0f, 1f))
-            .border(3.dp, color, RoundedCornerShape(12.dp))
-            .background(color.copy(alpha = 0.2f))
-            .padding(horizontal = 20.dp, vertical = 6.dp)
+            .border(2.5.dp, color, RoundedCornerShape(4.dp))
+            .background(Paper.colors.card)
+            .padding(horizontal = 16.dp, vertical = 4.dp)
     ) {
         Text(
             text = text,
             color = color,
-            fontSize = 24.sp,
+            fontFamily = PaperSans,
+            fontSize = 22.sp,
+            letterSpacing = 1.5.sp,
             fontWeight = FontWeight.ExtraBold
         )
     }
