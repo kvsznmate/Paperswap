@@ -1,0 +1,10 @@
+# Test and lint tools. Not installed in the Docker image: the API never imports
+# them, and the image runs on a 956 MB VM.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+
+# FastAPI's TestClient is built on httpx, and five suites use TestClient.
+httpx>=0.27
+# Pinned exactly: a new ruff release can add checks to a rule family and turn
+# CI red on code nobody touched. Bump it deliberately.
+ruff==0.17.5

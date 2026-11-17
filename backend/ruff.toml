@@ -1,0 +1,13 @@
+# Lint, not style. CI fails on these and only these:
+#   F   pyflakes: undefined names, unused or broken imports, redefinitions.
+#       This is the family that catches an import break like PS-02 before deploy.
+#   E9  syntax errors and code that cannot be parsed or compiled.
+#
+# Deliberately NOT enabled: formatting (`ruff format`) and the stylistic
+# families. Turning them on today would reformat or flag most of the codebase in
+# one unreviewable diff. Add a family when you are ready to fix it everywhere in
+# the same PR, so CI never goes red on code nobody touched.
+target-version = "py312"
+
+[lint]
+select = ["F", "E9"]
