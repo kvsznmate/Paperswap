@@ -3,9 +3,22 @@
 Standalone scripts, not a pytest suite. Each prints `PASS` / `FAIL` per check and
 exits non-zero on failure, so they work equally well by hand or in CI.
 
+**CI runs all of them** on every PR into `dev` or `main` (`.github/workflows/ci.yml`),
+against a fresh Postgres 16. Any new file named `tests/test_*.py` is picked up
+without editing the workflow, as long as it exits non-zero when a check fails.
+
+The image does not include the test-only dependencies (`requirements-dev.txt`:
+httpx, which FastAPI's TestClient needs, and ruff). Install them once per
+container before running the suites:
+
+```bash
+docker compose exec news-cards-backend pip install -r requirements-dev.txt
+```
+
 Run them from inside the backend container:
 
 ```bash
+docker compose exec news-cards-backend python tests/test_classifier.py
 docker compose exec news-cards-backend python tests/test_pool.py
 docker compose exec news-cards-backend python tests/test_live_pg.py
 docker compose exec news-cards-backend python tests/test_telemetry_provenance.py
@@ -27,6 +40,7 @@ docker compose exec news-cards-backend sh -c 'for t in tests/test_*.py; do echo 
 
 | File | Needs Postgres | What it guards |
 |---|---|---|
+| `test_classifier.py` | no | Topic classification relabels only on a clear keyword lead (title hits count double, ties and narrow leads keep the query's label), every keyword can actually match, `normalize_category` / `clean_category_filter` reduce untrusted input to catalogue slugs, and the `article_key` recipe stays frozen |
 | `test_pool.py` | no | Connection lifecycle: no leak on any error path, bounded acquisition, thread-safe init |
 | `test_live_pg.py` | yes | The same guarantees against a real server, incl. the 500-bad-swipes scenario |
 | `test_telemetry_provenance.py` | yes | No fabricated metrics; every field declares `measured` |

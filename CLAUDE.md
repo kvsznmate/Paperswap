@@ -42,7 +42,13 @@ cd backend
 docker compose exec news-cards-backend sh -c 'for t in tests/test_*.py; do echo "== $t"; python "$t" || exit 1; done'
 ```
 
-`tests/README.md` describes what each suite guards. There is no CI and no Android test suite.
+`tests/README.md` describes what each suite guards. The image does not ship the test-only dependencies, so run `pip install -r requirements-dev.txt` first, in the container or anywhere else (httpx for TestClient, ruff).
+
+CI (`.github/workflows/ci.yml`) runs on every PR into `dev` or `main`: `ruff check` (pyflakes + syntax only, see `backend/ruff.toml`), every `tests/test_*.py` against Postgres 16, a Compose boot with dummy secrets plus a smoke test of the public and admin routes, and the Android debug + release builds. A new test file is picked up automatically if it matches `tests/test_*.py` and exits non-zero on failure. There is no Android test suite.
+
+## Branches
+
+`main` is production; the VM deploys from it. Feature branches start from `dev` and every PR targets `dev` (`gh pr create --base dev`, because GitHub's default base is `main`). `dev` is merged into `main` only as a deliberate release. Never open a PR from a feature branch straight to `main`.
 
 Android has no tests. The check is that it compiles. Gradle 8.8 / AGP 8.5 needs JDK 17–22 (`JAVA_HOME`); Android Studio's bundled JBR 25 is too new for the command line:
 
