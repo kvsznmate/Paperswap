@@ -67,9 +67,50 @@ android/app/src/main/java/com/newsswipe/app/
 
 ---
 
+## Releasing
+
+Release APKs are signed with one key that is kept outside the repo (#65). Android installs an update only if it is signed with the same key as the installed app, so **this key is the app's identity**. If it is lost, no existing install can ever be updated again.
+
+**One-time setup on the machine that signs.** Generate the key with any JDK 17 `keytool`. Put its values in `~/.gradle/gradle.properties`, never in the repo (`*.jks` is gitignored):
+
+```bash
+keytool -genkeypair -keystore ~/.paperswap-keys/paperswap-release.jks -storetype PKCS12 \
+  -alias paperswap -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=Paperswap"
+```
+```properties
+paperswap.signing.storeFile=C:/Users/<you>/.paperswap-keys/paperswap-release.jks
+paperswap.signing.storePassword=...
+paperswap.signing.keyAlias=paperswap
+# PKCS12 uses the store password for the key too.
+paperswap.signing.keyPassword=...
+```
+
+Back up the `.jks` file **and** the password together; a password manager can hold both. Each property can also come from an environment variable: `PAPERSWAP_SIGNING_STORE_FILE`, `..._STORE_PASSWORD`, `..._KEY_ALIAS` and `..._KEY_PASSWORD`. If none is set, `assembleRelease` builds an unsigned APK, as before. If only some are set, the build fails and names the missing ones.
+
+**Build a signed APK locally.** `./gradlew :app:assembleRelease` writes `app/build/outputs/apk/release/app-release.apk`; the name loses `-unsigned` once the APK is signed. Check it with `apksigner verify --print-certs`.
+
+**Publish a release** (`.github/workflows/release.yml`):
+
+1. Bump `versionCode` (+1) and `versionName` in `app/build.gradle.kts`. Open a PR into `dev`, then release `dev` into `main`.
+2. Tag the commit on `main` and push the tag: `git tag v1.1 && git push origin v1.1`. The tag must equal `v` + `versionName`.
+3. The workflow builds, signs and verifies `paperswap-1.1.apk`, then attaches it to a GitHub Release with generated notes.
+
+The workflow needs four repository secrets:
+
+- `PAPERSWAP_KEYSTORE_BASE64`: the output of `base64 -w0 paperswap-release.jks`
+- `PAPERSWAP_SIGNING_STORE_PASSWORD`
+- `PAPERSWAP_SIGNING_KEY_ALIAS`
+- `PAPERSWAP_SIGNING_KEY_PASSWORD`
+
+The optional repository variable `PAPERSWAP_BASE_URL` sets the backend that the release APK talks to. If it is unset, the APK keeps the Tailscale default and only works on the tailnet until #32 lands.
+
+**Installing over a debug build.** The debug APK is signed with the debug key of the machine that built it, so a signed release cannot install over it. Uninstall the debug build once (this clears Saved and the topic filter), then install the release.
+
+---
+
 ## App size
 
-The release APK is **~1.07 MB**, down from 11.0 MB.
+The release APK is **~1.1 MB**, down from 11.0 MB.
 
 | Change | Release APK |
 | --- | --- |
@@ -89,7 +130,5 @@ About 56% of the remaining code is Compose itself (ui, runtime, foundation), the
 - **`usesCleartextTraffic="true"`** in the manifest is a workaround for the backend serving plain HTTP. Remove it once HTTPS lands.
 - **Failed swipes are not retried.** A notice appears under the deck, but the swipe itself is dropped. Any swipe still in its 5-second undo window when the process is killed outright is also lost. Backgrounding the app sends it immediately.
 - **No repository layer.** The ViewModels call Retrofit through `apiCall {}` directly, so there is no seam for a cache or a test fake.
-- **The deck ignores topic filtering.** It never passes `?categories=` to `/api/v1/feed`.
 - **No offline support.** A cold start without connectivity shows only an error.
 - **No tests.** There is no unit or instrumented test source set.
-- **Release builds are unsigned.** There is no `signingConfig` for `release`, so the ~1 MB release APK has to be signed (Android Studio → *Build → Generate Signed App Bundle / APK*) before it can be installed. The debug build (~16 MB, unshrunk) is what *Run ▶* installs.

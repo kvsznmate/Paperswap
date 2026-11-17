@@ -3,6 +3,29 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Release signing (#65). The key never lives in the repo. Each value comes
+// from a Gradle property (put them in ~/.gradle/gradle.properties) or, for
+// CI, from the matching environment variable:
+//   paperswap.signing.storeFile      PAPERSWAP_SIGNING_STORE_FILE
+//   paperswap.signing.storePassword  PAPERSWAP_SIGNING_STORE_PASSWORD
+//   paperswap.signing.keyAlias       PAPERSWAP_SIGNING_KEY_ALIAS
+//   paperswap.signing.keyPassword    PAPERSWAP_SIGNING_KEY_PASSWORD
+// None set: the release APK is built unsigned, as before, so CI and other
+// contributors need no secret. Some but not all set: the build fails, because
+// a silently unsigned "release" is the mistake this guards against.
+fun signingValue(name: String): String? {
+    val env = "PAPERSWAP_SIGNING_" + name.replace(Regex("([A-Z])"), "_$1").uppercase()
+    return ((project.findProperty("paperswap.signing.$name") as String?) ?: System.getenv(env))
+        ?.takeIf { it.isNotBlank() }
+}
+val signingValues = listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
+    .associateWith { signingValue(it) }
+val releaseSigningEnabled = signingValues.values.all { it != null }
+if (!releaseSigningEnabled && signingValues.values.any { it != null }) {
+    val missing = signingValues.filterValues { it == null }.keys.joinToString()
+    throw GradleException("Release signing is partly configured; missing: $missing (see android/README.md)")
+}
+
 android {
     namespace = "com.newsswipe.app"
     compileSdk = 34
@@ -11,6 +34,9 @@ android {
         applicationId = "com.newsswipe.app"
         minSdk = 24
         targetSdk = 34
+        // Bump both for every release (android/README.md, "Releasing").
+        // Android refuses an update whose versionCode is not higher than the
+        // installed one; the release workflow checks the tag matches versionName.
         versionCode = 1
         versionName = "1.0"
 
@@ -27,8 +53,20 @@ android {
         resourceConfigurations += listOf("en")
     }
 
+    if (releaseSigningEnabled) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(signingValues.getValue("storeFile")!!)
+                storePassword = signingValues.getValue("storePassword")
+                keyAlias = signingValues.getValue("keyAlias")
+                keyPassword = signingValues.getValue("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (releaseSigningEnabled) signingConfig = signingConfigs.getByName("release")
             // R8 removes unused code (most of Compose, OkHttp, Coil and Kotlin
             // stdlib that the app never touches) and then unused resources.
             // Reflection-dependent classes are kept in proguard-rules.pro.
