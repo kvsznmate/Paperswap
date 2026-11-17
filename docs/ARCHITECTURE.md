@@ -389,6 +389,49 @@ Bullet quality and the ranker are both unevaluated; see Open questions.
 
 ---
 
+## ADR-013 — Paper design: the headline leads, a photo only when it is real
+
+**Status:** Accepted (2026-11, #13)
+
+### Context
+
+The first UI was a dark, photo-led card: the hero image took all spare height (`NewsCard.kt`, `weight(1f)`), and the headline sat below it. A 69-card deck from a local refresh (17 Nov 2026, RSS only) showed that the photo is the weakest part of most cards:
+
+| hero image | cards |
+|---|---|
+| real publisher photo | 26 |
+| BBC 240 px thumbnail, shown 4–9× enlarged | 21 |
+| stock filler from `TOPIC_FEEDS[...]["images"]` | 22 |
+
+The stock filler is worse than no picture: the FAA ground-stop story showed a laptop reading "REVENUE". At least 12 of the 69 cards also showed a canned topic blurb ("Match results, transfer moves…") as if it summarised the story. The weekly-summaries tab opened on seven two-letter circles and nothing to read.
+
+### Decision
+
+A light "paper" design that follows the phone's dark mode, on Android and the web preview alike:
+
+- **Cards lead with a serif headline.** A photo appears only when the publisher sent one; without one, the headline grows and the blurb gets more lines, so a type-only card is a designed state. A canned blurb is hidden.
+- **The feed says which is which.** `/api/v1/feed` gains `image_is_stock` (the URL is in `_STOCK_IMAGES`) and returns `description_source`, which `articles` already stored. A NULL source (rows older than the column) stays null, and the client shows that blurb (invariant 5).
+- **BBC thumbnails are upgraded** from `/ace/standard/240/` to `/976/` (`upgrade_image_url`), at fetch time and again at serve time for rows stored before the change.
+- **Topic colours stay server-driven** (ADR-006). The server's accents were tuned for the dark UI, so the clients adjust each one toward black on paper (or white at night) until it reaches 4.5:1 against the card: `readableOn()` in Android, `readable()` on the web.
+- **Bottom navigation** (Deck · This week · Saved) replaces the segmented pill that took 118 dp above the card.
+- **The week is one edition**: every topic's digest for one week from `GET /api/v1/summaries`, one line per stories:v2 story with its coverage under it, both article counts per topic, and a line for topics with no digest.
+- **Save for later is local only.** A copy of headline, link and source on the phone (`LocalStore`, SharedPreferences) or in the browser (`localStorage`). It is not a swipe: no row in `swipe_events`, and the deck does not advance. A copy, not an id, because the server deletes the article after 9 days.
+- **The topic filter is local too** (part of #19). It sends the existing `?categories=` parameter; every topic selected is stored as "no filter", so a topic added later is not silently excluded.
+
+Headlines use Noto Serif: it is Android's `FontFamily.Serif`, so the APK gains no font file (release APK 1.16 MB), and the web preview loads the same face from Google Fonts.
+
+### Consequences
+
+- About a third of cards (the stock ones) now carry no image at all. That is the intent, not a regression.
+- The web preview now sends `flipped` with each swipe, because a card can be turned over there too. It still sends no `dwell_ms`: it does not measure one.
+- `GET /api/v1/summaries/{topic}` has no client left. It stays, as the only per-topic history endpoint.
+
+### Enforcement
+
+`backend/tests/test_paper_feed.py`: the URL upgrade, `image_is_stock`, `description_source` passed through and never backfilled, and no embedding in the payload.
+
+---
+
 ## Failure modes we've hit
 
 Hard-won operational facts. Each of these caused a real outage.

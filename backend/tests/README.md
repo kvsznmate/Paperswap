@@ -3,9 +3,22 @@
 Standalone scripts, not a pytest suite. Each prints `PASS` / `FAIL` per check and
 exits non-zero on failure, so they work equally well by hand or in CI.
 
+**CI runs all of them** on every PR into `dev` or `main` (`.github/workflows/ci.yml`),
+against a fresh Postgres 16. Any new file named `tests/test_*.py` is picked up
+without editing the workflow, as long as it exits non-zero when a check fails.
+
+The image does not include the test-only dependencies (`requirements-dev.txt`:
+httpx, which FastAPI's TestClient needs, and ruff). Install them once per
+container before running the suites:
+
+```bash
+docker compose exec news-cards-backend pip install -r requirements-dev.txt
+```
+
 Run them from inside the backend container:
 
 ```bash
+docker compose exec news-cards-backend python tests/test_classifier.py
 docker compose exec news-cards-backend python tests/test_pool.py
 docker compose exec news-cards-backend python tests/test_live_pg.py
 docker compose exec news-cards-backend python tests/test_telemetry_provenance.py
@@ -17,6 +30,7 @@ docker compose exec news-cards-backend python tests/test_topic_summaries.py
 docker compose exec news-cards-backend python tests/test_stories.py
 docker compose exec news-cards-backend python tests/test_public_limits.py
 docker compose exec news-cards-backend python tests/test_load_shedding.py
+docker compose exec news-cards-backend python tests/test_paper_feed.py
 ```
 
 Or all of them:
@@ -27,6 +41,7 @@ docker compose exec news-cards-backend sh -c 'for t in tests/test_*.py; do echo 
 
 | File | Needs Postgres | What it guards |
 |---|---|---|
+| `test_classifier.py` | no | Topic classification relabels only on a clear keyword lead (title hits count double, ties and narrow leads keep the query's label), every keyword can actually match, `normalize_category` / `clean_category_filter` reduce untrusted input to catalogue slugs, and the `article_key` recipe stays frozen |
 | `test_pool.py` | no | Connection lifecycle: no leak on any error path, bounded acquisition, thread-safe init |
 | `test_live_pg.py` | yes | The same guarantees against a real server, incl. the 500-bad-swipes scenario |
 | `test_telemetry_provenance.py` | yes | No fabricated metrics; every field declares `measured` |
@@ -38,6 +53,7 @@ docker compose exec news-cards-backend sh -c 'for t in tests/test_*.py; do echo 
 | `test_load_shedding.py` | yes | The global request ceiling returns 503 + Retry-After past its limit, sheds before routing and logging, and lets admin requests through without spending it; `API_DOCS_ENABLED=false` removes the docs; every `UVICORN_*` variable in the Dockerfile and compose file is a real uvicorn option |
 | `test_topic_summaries.py` | yes | Week arithmetic and the half-open UTC window; boilerplate descriptions never reach the generator; `number_of_articles` describes what was read and `articles_in_window` what was seen; no placeholder row on failure; the summariser runs before the purge and its output outlives the articles |
 | `test_stories.py` | yes (section 7 only) | `stories:v2`: paraphrases with no shared words group by embedding, near-miss stories stay apart, average linkage does not chain, distinct outlets outrank size, each line is the first bullet of the most central enriched article (headline otherwise), every article lands in exactly one story, a failed or truncated Anthropic call falls back to `stories:v2`, and the week query (which carries BYTEA) never reaches a route |
+| `test_paper_feed.py` | yes | The feed fields behind the Paper cards (ADR-013): BBC 240 px thumbnails served at 976 px, stock filler flagged `image_is_stock`, `description_source` passed through as stored and a NULL never backfilled, and no embedding in the payload |
 
 ## Notes
 

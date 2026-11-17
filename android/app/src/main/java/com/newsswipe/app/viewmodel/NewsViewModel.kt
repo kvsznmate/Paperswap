@@ -1,9 +1,12 @@
 package com.newsswipe.app.viewmodel
 
+import android.app.Application
 import android.os.SystemClock
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.newsswipe.app.data.local.LocalStore
 import com.newsswipe.app.data.model.NewsArticle
+import com.newsswipe.app.data.model.NewsCategory
 import com.newsswipe.app.data.model.SwipeRecordRequest
 import com.newsswipe.app.data.remote.RetrofitInstance
 import com.newsswipe.app.data.remote.apiCall
@@ -30,7 +33,7 @@ sealed class NewsUiState {
     data class Error(val message: String) : NewsUiState()
 }
 
-class NewsViewModel : ViewModel() {
+class NewsViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         /** Backend rejects dwell above an hour (the backgrounded-app case). */
@@ -50,20 +53,56 @@ class NewsViewModel : ViewModel() {
     private val _uiState = MutableStateFlow<NewsUiState>(NewsUiState.Loading)
     val uiState: StateFlow<NewsUiState> = _uiState.asStateFlow()
 
+    private val store = LocalStore.get(application)
+
+    /** Selected topic slugs, kept on the phone. Empty = every topic. */
+    val selectedTopics: StateFlow<Set<String>> = store.topics
+
+    private val _catalogue = MutableStateFlow<List<NewsCategory>>(emptyList())
+    /** Topic catalogue for the filter sheet; loaded the first time it opens. */
+    val catalogue: StateFlow<List<NewsCategory>> = _catalogue.asStateFlow()
+
     init {
         loadNewsFeed()
     }
 
     fun loadNewsFeed() {
         _uiState.value = NewsUiState.Loading
+        // Sorted so the same choice always sends the same query string, which
+        // the server and any edge cache key on.
+        val categories = selectedTopics.value.sorted().joinToString(",").ifEmpty { null }
         viewModelScope.launch {
-            apiCall { RetrofitInstance.api.getNewsFeed() }
+            apiCall { RetrofitInstance.api.getNewsFeed(categories) }
                 .onSuccess {
                     _uiState.value = NewsUiState.Success(articles = it.articles)
                     resetCardSignals()
                 }
                 .onFailure { _uiState.value = NewsUiState.Error(it.message.orEmpty()) }
         }
+    }
+
+    // --- Topic filter (part of #19) --------------------------------------------
+
+    fun loadCatalogueIfNeeded() {
+        if (_catalogue.value.isNotEmpty()) return
+        viewModelScope.launch {
+            apiCall { RetrofitInstance.api.getCategories() }
+                .onSuccess { _catalogue.value = it.categories }
+        }
+    }
+
+    /**
+     * Store the choice and reload the deck. Every topic selected is stored as
+     * the empty set, so a topic added on the server later is included rather
+     * than silently filtered out.
+     */
+    fun setTopics(slugs: Set<String>) {
+        val all = _catalogue.value.map { it.slug }.toSet()
+        val normalised = if (slugs.isEmpty() || (all.isNotEmpty() && slugs.containsAll(all))) emptySet() else slugs
+        if (normalised == selectedTopics.value) return
+        flushPendingSwipe()
+        store.setTopics(normalised)
+        loadNewsFeed()
     }
 
     // --- Swiping ---------------------------------------------------------------

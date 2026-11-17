@@ -31,7 +31,19 @@ data class NewsArticle(
     // Nullable rather than defaulted: Gson skips Kotlin default values, so an
     // older backend that omits the key would leave a non-null List null anyway.
     // Call sites use .orEmpty().
-    @SerializedName("summary_bullets") val summaryBullets: List<String>? = null
+    @SerializedName("summary_bullets") val summaryBullets: List<String>? = null,
+
+    // True when image_url is one of the backend's generic topic photos rather
+    // than the publisher's own. The card then shows no photo at all: a stock
+    // laptop over an aviation story is worse than no picture (ADR-013).
+    // Nullable: an older backend omits it, and null means "show the image".
+    @SerializedName("image_is_stock") val imageIsStock: Boolean? = null,
+
+    // Where `description` came from: "publisher", or one of the backend's
+    // canned tiers ("keyword_template", "topic_fallback"). The card hides a
+    // canned blurb, because it reads as a summary of this story and is not.
+    // Null = not recorded (older row or backend); the blurb is then shown.
+    @SerializedName("description_source") val descriptionSource: String? = null
 )
 
 data class CategoriesResponse(

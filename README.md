@@ -1,5 +1,7 @@
 # Paperswap
 
+[![CI](https://github.com/kvsznmate/Paperswap/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/kvsznmate/Paperswap/actions/workflows/ci.yml)
+
 **Swipe your news.**
 
 Paperswap borrows the Tinder interaction model for reading headlines. Instead of scrolling an endless list, you get one card at a time:
@@ -104,7 +106,7 @@ python main.py --cli      # sync once, print a per-topic summary, exit
 
 | URL | What you get |
 | --- | --- |
-| `/mobile` | Touch swipe UI with the deck and weekly-summary tabs. Open it on a phone. `/summaries` deep-links to the second tab |
+| `/mobile` | Touch swipe UI in the Paper design: the deck, the week and Saved. Open it on a phone. `/summaries` deep-links to the week |
 | `/` | Card gallery dashboard |
 | `/analytics` | Telemetry dashboard. It is gated: sign in with `ADMIN_API_KEY` |
 | `/docs` | OpenAPI. Protected routes show a padlock. Off when `API_DOCS_ENABLED=false` |
@@ -141,7 +143,7 @@ The app runs on an Oracle Cloud E2.1.Micro under Docker Compose ([ADR-003](docs/
 ## Known gaps
 
 **Operations**
-- No CI. The test suites need a live Postgres and are run by hand (`backend/tests/README.md`).
+- CI (`.github/workflows/ci.yml`) lints, runs every backend suite against Postgres 16, boots the Compose stack and builds both APKs on each PR. It does not deploy, and there are no Android tests, only the compile.
 - The server is plain HTTP only. HTTPS through Caddy is planned, and it needs `X-Forwarded-For` handling for the rate limiter plus `ADMIN_COOKIE_SECURE=true`.
 - Startup has no database retry, so an unreachable Postgres crash-loops the container. There is no `/health` endpoint.
 - `swipe_events`, the one irreplaceable table, has no scheduled backup.
