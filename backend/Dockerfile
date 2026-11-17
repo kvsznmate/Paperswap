@@ -19,5 +19,16 @@ COPY . .
 # Expose port
 EXPOSE 8000
 
-# Run FastAPI app with Uvicorn
+# Load shedding (#58). The uvicorn CLI reads any UVICORN_<OPTION> variable as
+# that flag, so docker-compose.yml can override these without a rebuild.
+#   LIMIT_CONCURRENCY  open connections OR in-flight requests above which
+#                      uvicorn answers 503 before the app sees the request.
+#                      Idle keep-alive connections count, hence the short
+#                      keep-alive below. See docs/RATE_LIMITS.md.
+#   TIMEOUT_KEEP_ALIVE seconds an idle connection is held open.
+ENV UVICORN_LIMIT_CONCURRENCY=64
+ENV UVICORN_TIMEOUT_KEEP_ALIVE=3
+
+# Run FastAPI app with Uvicorn. Exec form, so uvicorn is PID 1 and receives
+# SIGTERM directly: the lifespan shutdown flushes the buffered request logs.
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

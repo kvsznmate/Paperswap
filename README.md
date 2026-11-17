@@ -107,7 +107,7 @@ python main.py --cli      # sync once, print a per-topic summary, exit
 | `/mobile` | Touch swipe UI with the deck and weekly-summary tabs. Open it on a phone. `/summaries` deep-links to the second tab |
 | `/` | Card gallery dashboard |
 | `/analytics` | Telemetry dashboard. It is gated: sign in with `ADMIN_API_KEY` |
-| `/docs` | OpenAPI. Protected routes show a padlock |
+| `/docs` | OpenAPI. Protected routes show a padlock. Off when `API_DOCS_ENABLED=false` |
 
 Configuration is documented in [`backend/.env.example`](backend/.env.example) and [`backend/README.md`](backend/README.md#environment).
 

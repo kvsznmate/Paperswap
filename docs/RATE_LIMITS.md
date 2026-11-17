@@ -48,6 +48,73 @@ the count of unmatched requests.
 Fixed windows, like the per-IP limits: up to 2× the limit can pass across a
 window boundary. That is still a hard bound, which is the point.
 
+## Load shedding (#58)
+
+The limits above bound what gets *stored*. These bound what gets *processed*,
+so that too much traffic gets a fast 503 instead of growing memory until the
+kernel's OOM killer picks a process on the 956 MB VM. The OOM killer picks by
+size, and the biggest process is Postgres.
+
+| Layer | Default | When exceeded | Where |
+|---|---|---|---|
+| `UVICORN_LIMIT_CONCURRENCY` | 64 | uvicorn answers 503 before the app sees the request | Dockerfile `ENV`, overridable in compose |
+| `UVICORN_TIMEOUT_KEEP_ALIVE` | 3 s | idle connection closed | same |
+| `GLOBAL_REQUESTS_PER_MINUTE` | 1800 | 503 + `Retry-After`, all clients and routes together | `GlobalRequestCeiling` in `main.py` |
+| `mem_limit` (API) | 256m | the API container is killed and restarted | `docker-compose.yml` |
+| `mem_limit` (Postgres) | 384m, `oom_score_adj: -500` | — | `docker-compose.yml` |
+| `mem_limit` (enrichment) | 400m | the batch dies, the next cron run retries | `docker-compose.yml` |
+| `API_DOCS_ENABLED` | true | `/docs`, `/redoc`, `/openapi.json` return 404 when false | `main.py` |
+
+**Concurrency, 64.** uvicorn counts *open connections or in-flight requests*,
+whichever is higher, and idle keep-alive connections count. Above the limit it
+answers 503 itself, so these rejections never reach the app or its telemetry;
+they show up only as `Exceeded concurrency limit.` warnings in the container
+log. 64 is above the 40-thread pool that runs the sync handlers, so the pool
+stays busy before anything is refused, and it bounds the queue in front of the
+20 database connections. The 3 s keep-alive (uvicorn's default is 5) frees the
+slot of a client that has gone quiet; the Android client and cloudflared both
+reconnect transparently.
+
+**Ceiling, 1800/min (30 req/s).** A session makes ~65 requests a minute (one
+feed, ~60 swipes, four heartbeats), so this is ~28 people swiping at the same
+moment, far above current use. It is *not* a measured capacity of the VM; that
+needs a load test on the VM itself. It is a circuit breaker, **not a fairness
+mechanism**: one client fast enough to spend it locks everyone out until the
+minute rolls over. That is the accepted tradeoff for a hard global bound.
+Stopping a single client before it gets that far is the edge's job
+(Cloudflare, #32). Requests with a valid `X-API-Key` or admin session cookie
+bypass the ceiling and do not spend it, so the dashboard and a manual refresh
+still work during the incident. Shed requests are counted in
+`/api/v1/telemetry/stats` → `global_limits.requests`.
+
+Not slowapi's `application_limits`, which the issue first suggested: slowapi's
+middleware skips any route that already has a `@limiter.limit` decorator (every
+API route here), and it keys on client IP, so it is neither global nor applied
+where the load is.
+
+**Memory.** Measured locally (2026-11-16, Docker Desktop, 84-article deck): the
+API idles at 75–110 MB RSS and peaks at 121 MB with 400 concurrent clients
+under the concurrency limit, versus 132 MB without it. That matches the ~130 MB
+seen on the VM. Each connection costs little memory. At this scale the
+concurrency limit mostly bounds *latency* (the slowest round took 5.9 s with the
+limit, 11.5 s without), and the `mem_limit`s are what guarantee that a leak or
+a flood kills the API rather than Postgres. On the VM's 1/8 OCPU, requests take
+longer, so more of them are in flight at once and the limit matters more than
+these local figures show.
+
+| Container | Cap | Typical | Why this number |
+|---|---|---|---|
+| Postgres | 384m | ~250 MB | 128 MB `shared_buffers` + ~20 connections at a few MB each, the rest page cache. cgroup memory includes page cache, which the kernel reclaims before it OOM-kills anything in the cgroup |
+| API | 256m | ~130 MB | 2× the measured peak, for a refresh running during a burst |
+| enrichment | 400m | ~250 MB | ONNX session, tokenizer, lxml; runs a few minutes every 6 h |
+
+Steady state is 640 MB of caps for ~380 MB of use. With enrichment running,
+the caps add up to more than the box (1040 MB), and that is deliberate: caps are
+ceilings, not reservations. Enrichment also refuses to start below
+`ENRICH_MIN_AVAILABLE_MB` (250) of free host memory. `oom_score_adj: -500` on
+Postgres makes the host OOM killer pass over it for anything else, so if the
+whole box does run out, Postgres goes last.
+
 ## Caching
 
 The deck, the topic catalogue and the summaries are identical for every client.
@@ -149,10 +216,15 @@ above are correct only until that day.
 ## Verifying
 
 `backend/tests/test_api_security.py` asserts the swipe limiter trips above
-120/min and that a realistic 60-swipe session is never rejected:
+120/min and that a realistic 60-swipe session is never rejected.
+`backend/tests/test_load_shedding.py` covers the request ceiling, the admin
+bypass, the docs flag, and checks that every `UVICORN_*` variable in the
+Dockerfile and compose file is an option uvicorn actually reads. A misspelt one
+is silently ignored, and the server then runs with no concurrency limit at all.
 
 ```bash
 docker compose exec news-cards-backend python tests/test_api_security.py
+docker compose exec news-cards-backend python tests/test_load_shedding.py
 ```
 
 Because counters are in-memory and per-process, running two suites that both
