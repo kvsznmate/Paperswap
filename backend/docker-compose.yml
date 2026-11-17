@@ -81,7 +81,8 @@ services:
       ADMIN_COOKIE_SECURE: ${ADMIN_COOKIE_SECURE:-false}
       # --- Weekly topic summaries ---
       # Unset ANTHROPIC_API_KEY is fine: the default generator is offline.
-      SUMMARY_GENERATOR: ${SUMMARY_GENERATOR:-extractive:v1}
+      SUMMARY_GENERATOR: ${SUMMARY_GENERATOR:-stories:v2}
+      SUMMARY_STORY_SIMILARITY: ${SUMMARY_STORY_SIMILARITY:-0.45}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       SUMMARY_MODEL: ${SUMMARY_MODEL:-}
       SUMMARY_TIMEOUT: ${SUMMARY_TIMEOUT:-60}

@@ -1176,10 +1176,19 @@ def get_articles_for_week(topic: str, week_start: date,
     `publisher_only` defaults to True so the boilerplate-contaminated path has to
     be asked for explicitly rather than being what you get by forgetting. See
     news_fetcher's KEYWORD_SUMMARY_RULES comment for why it matters.
+
+    Also returns what enrichment.py stored, for the stories:v2 generator:
+      summary_bullets  list of str, [] when the article was never enriched or
+                       the body could not be extracted
+      embedding        the raw little-endian float32 BYTEA as `bytes`, or None.
+                       Bytes rather than a numpy array so the API process never
+                       imports numpy (summarizer decodes it with struct). Not
+                       JSON-serialisable: this result feeds the summariser only
+                       and must never be returned from a route (invariant 9).
     """
     sql = f'''
         SELECT id, title, description, source, published_at, category, url,
-               description_source, created_at
+               description_source, created_at, summary_bullets, embedding
         FROM articles
         WHERE category = %s AND {_WEEK_WINDOW_SQL}
     '''
@@ -1203,6 +1212,20 @@ def get_articles_for_week(topic: str, week_start: date,
         item = dict(row)
         if item.get('created_at') is not None:
             item['created_at'] = item['created_at'].isoformat()
+
+        raw_bullets = item.get('summary_bullets')
+        bullets = []
+        if raw_bullets:
+            try:
+                parsed = json.loads(raw_bullets)
+                if isinstance(parsed, list):
+                    bullets = [b.strip() for b in parsed if isinstance(b, str) and b.strip()]
+            except (ValueError, TypeError):
+                logger.warning("Unparseable summary_bullets on article %s", item.get('id'))
+        item['summary_bullets'] = bullets
+
+        if item.get('embedding') is not None:
+            item['embedding'] = bytes(item['embedding'])
         articles.append(item)
     return articles
 
@@ -1300,6 +1323,21 @@ def save_topic_summary(topic: str, week_start: date, week_end: date, summary: st
               number_of_articles, articles_in_window, top_sources or None, generator))
 
 
+def _summary_basis(generator: str) -> str:
+    """One sentence on what a summary row was built from, per generator."""
+    generator = generator or ""
+    if generator.startswith("stories:"):
+        return ("Articles ingested during this window, grouped into stories by "
+                "similarity. Each line quotes one sentence extracted from an article "
+                "in that story. Ingest time, not publication time.")
+    if generator.startswith("anthropic:"):
+        return ("Written by a language model from the window's headlines and "
+                "extracted sentences, not from full articles. Ingest time, not "
+                "publication time.")
+    return ("Generated from publisher-written article summaries ingested during "
+            "this window. Ingest time, not publication time.")
+
+
 def _decorate_summaries(rows: list) -> list:
     """JSON-safe dates plus the topic label and accent colour, so clients never
     keep their own colour map (ADR-006) -- the same contract _decorate_articles
@@ -1318,10 +1356,9 @@ def _decorate_summaries(rows: list) -> list:
         item['top_sources'] = item.get('top_sources') or []
         # Stated on every row rather than once in the envelope, because a single
         # summary object gets copied out of the payload and then read without it.
-        item['basis'] = (
-            "Generated from publisher-written article summaries ingested during "
-            "this window. Ingest time, not publication time."
-        )
+        # Keyed on the generator so a v1 row in the history keeps describing how
+        # v1 actually worked.
+        item['basis'] = _summary_basis(item.get('generator'))
         out.append(item)
     return out
 
