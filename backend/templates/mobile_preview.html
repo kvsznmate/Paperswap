@@ -327,6 +327,185 @@
             font-size: 15px;
             box-shadow: 0 8px 20px rgba(99, 102, 241, 0.4);
         }
+        /* ---- Top navigation ---- */
+        .main-nav {
+            display: flex;
+            gap: 5px;
+            padding: 4px;
+            margin: 0 20px 10px;
+            background: rgba(30, 41, 59, 0.5);
+            border: 1px solid rgba(255, 255, 255, 0.07);
+            border-radius: 14px;
+            flex: 0 0 auto;
+            z-index: 20;
+        }
+        .nav-tab {
+            flex: 1;
+            font-family: inherit;
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.2px;
+            padding: 9px 0;
+            border: none;
+            border-radius: 10px;
+            background: transparent;
+            color: var(--text-sub);
+            cursor: pointer;
+            transition: background 0.18s ease, color 0.18s ease;
+        }
+        .nav-tab:active { transform: scale(0.97); }
+        .nav-tab.active {
+            background: linear-gradient(135deg, var(--accent-blue), #4f46e5);
+            color: #fff;
+            box-shadow: 0 4px 14px rgba(99, 102, 241, 0.35);
+        }
+
+        /* Each view owns the remaining height and scrolls internally, so the
+           header and nav never move. [hidden] needs an explicit rule because
+           display:flex below would otherwise beat the attribute's default. */
+        .view {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+        .view[hidden] { display: none; }
+
+        /* ---- Summaries: topic chooser ---- */
+        .topic-circles {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 14px 10px;
+            padding: 4px 16px 14px;
+            flex: 0 0 auto;
+        }
+        .topic-circle {
+            width: 66px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 6px;
+            padding: 0;
+            border: none;
+            background: none;
+            font-family: inherit;
+            cursor: pointer;
+        }
+        .circle-dot {
+            width: 52px;
+            height: 52px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 15px;
+            font-weight: 800;
+            letter-spacing: 0.5px;
+            transition: transform 0.18s cubic-bezier(0.175, 0.885, 0.32, 1.275),
+                        opacity 0.18s ease, box-shadow 0.18s ease;
+        }
+        .topic-circle:active .circle-dot { transform: scale(0.9); }
+        .circle-label {
+            font-size: 10.5px;
+            font-weight: 600;
+            line-height: 1.25;
+            text-align: center;
+            color: var(--text-sub);
+            transition: color 0.18s ease;
+        }
+        .topic-circle.selected .circle-dot { transform: scale(1.07); }
+        .topic-circle.selected .circle-label { color: var(--text-main); }
+        /* Dim the unpicked ones only once something IS picked, so the default
+           state reads as an even choice rather than as six disabled buttons. */
+        .topic-circles.has-selection .topic-circle:not(.selected) .circle-dot { opacity: 0.34; }
+
+        /* ---- Summaries: detail panel ---- */
+        .summary-panel {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
+            padding: 0 22px 30px;
+        }
+        .summary-topic {
+            font-size: 25px;
+            font-weight: 800;
+            letter-spacing: -0.6px;
+            line-height: 1.15;
+        }
+        .summary-dates {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 5px;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-sub);
+        }
+        .week-step {
+            width: 22px;
+            height: 22px;
+            flex: 0 0 auto;
+            border-radius: 50%;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            background: rgba(30, 41, 59, 0.65);
+            color: var(--text-sub);
+            font-size: 12px;
+            line-height: 1;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .week-step:disabled { opacity: 0.22; cursor: default; }
+        .summary-text {
+            margin-top: 17px;
+            font-size: 15px;
+            line-height: 1.62;
+            color: #dbe2ec;
+            user-select: text;
+            -webkit-user-select: text;
+        }
+        .stat {
+            margin-top: 18px;
+            padding-top: 15px;
+            border-top: 1px solid rgba(255, 255, 255, 0.07);
+        }
+        .stat-label {
+            font-size: 10px;
+            font-weight: 800;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            color: #6b7688;
+        }
+        .stat-value { font-size: 16px; font-weight: 700; margin-top: 6px; }
+        .stat-sub { font-size: 12px; color: var(--text-sub); margin-top: 4px; line-height: 1.45; }
+        .chips { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+        .chip {
+            font-size: 11.5px;
+            font-weight: 600;
+            padding: 5px 11px;
+            border-radius: 999px;
+            background: rgba(30, 41, 59, 0.7);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            color: #aeb7c7;
+        }
+        .summary-foot {
+            margin-top: 22px;
+            font-size: 10.5px;
+            line-height: 1.55;
+            color: #5a6474;
+        }
+        .summary-prompt,
+        .summary-empty {
+            text-align: center;
+            padding: 34px 14px;
+            font-size: 13.5px;
+            line-height: 1.6;
+            color: var(--text-sub);
+        }
+        .summary-empty strong { color: var(--text-main); font-weight: 700; display: block; margin-bottom: 8px; }
     </style>
 </head>
 <body>
@@ -348,21 +527,35 @@
             <div class="queue-counter" id="queue-counter">Card 1 / 50</div>
         </header>
 
-        <div class="topic-bar" id="topic-bar"></div>
+        <nav class="main-nav">
+            <button class="nav-tab active" id="tab-cards" onclick="switchView('cards')">Cards</button>
+            <button class="nav-tab" id="tab-summaries" onclick="switchView('summaries')">Weekly Summaries</button>
+        </nav>
 
-        <div class="deck-container" id="deck-container">
-            <div class="empty-state" id="empty-state">
-                <h3>All caught up!</h3>
-                <p id="empty-message">You've swiped every headline in this mix. Pull a fresh batch or switch topics to keep going.</p>
-                <button class="btn-reload" onclick="reloadFeed()">Reload Feed</button>
+        <div class="view" id="view-cards">
+            <div class="topic-bar" id="topic-bar"></div>
+
+            <div class="deck-container" id="deck-container">
+                <div class="empty-state" id="empty-state">
+                    <h3>All caught up!</h3>
+                    <p id="empty-message">You've swiped every headline in this mix. Pull a fresh batch or switch topics to keep going.</p>
+                    <button class="btn-reload" onclick="reloadFeed()">Reload Feed</button>
+                </div>
             </div>
+
+            <footer class="app-actions">
+                <button class="action-btn btn-undo" title="Undo last swipe" onclick="undoSwipe()">↩</button>
+                <button class="action-btn btn-pass" title="Pass / Skip" onclick="triggerSwipe('left')">✖</button>
+                <button class="action-btn btn-read" title="Read Article" onclick="triggerSwipe('right')">💚</button>
+            </footer>
         </div>
 
-        <footer class="app-actions">
-            <button class="action-btn btn-undo" title="Undo last swipe" onclick="undoSwipe()">↩</button>
-            <button class="action-btn btn-pass" title="Pass / Skip" onclick="triggerSwipe('left')">✖</button>
-            <button class="action-btn btn-read" title="Read Article" onclick="triggerSwipe('right')">💚</button>
-        </footer>
+        <div class="view" id="view-summaries" hidden>
+            <div class="topic-circles" id="topic-circles"></div>
+            <div class="summary-panel" id="summary-panel">
+                <div class="summary-prompt">Pick a topic above to read its week.</div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -695,6 +888,190 @@
             loadFeed();
         }
 
+        /* ================= VIEW SWITCHING ================= */
+
+        let activeView = 'cards';
+
+        function switchView(view) {
+            activeView = view;
+            document.getElementById('view-cards').hidden = (view !== 'cards');
+            document.getElementById('view-summaries').hidden = (view !== 'summaries');
+            document.getElementById('tab-cards').classList.toggle('active', view === 'cards');
+            document.getElementById('tab-summaries').classList.toggle('active', view === 'summaries');
+            // The card counter describes the deck, so it has nothing to say here.
+            document.getElementById('queue-counter').style.visibility =
+                (view === 'cards') ? 'visible' : 'hidden';
+
+            // Views are shown and hidden rather than reloaded, so the deck keeps
+            // its position and the user does not lose their place by glancing at
+            // a summary.
+            if (view === 'summaries' && summaryTopics.length === 0) {
+                loadSummaryTopics();
+            }
+        }
+
+        /* ================= WEEKLY SUMMARIES ================= */
+
+        let summaryTopics = [];        // catalogue, for the circles
+        let selectedTopic = null;      // slug currently being read
+        let summaryHistory = [];       // that topic's weeks, newest first
+        let weekIndex = 0;             // which week of summaryHistory is shown
+
+        // Two letters from the slug rather than one. TECH/FINANCE/SPORTS are all
+        // distinct on their initial, but POLITICS and PROGRAMMING are not, and a
+        // hardcoded icon map would drift from the server-side catalogue the
+        // moment a topic is added (see ADR-006).
+        function topicInitials(slug) {
+            return String(slug || '?').slice(0, 2).toUpperCase();
+        }
+
+        // Both dates are formatted by the locale rather than assembled by hand.
+        // Appending the year manually produced "Aug 30 2026" in en-US, which is
+        // missing the comma the locale would have added; letting Intl place the
+        // year also keeps day/month order right for en-GB and friends.
+        function fmtDay(iso, withYear) {
+            const opts = { day: 'numeric', month: 'short', timeZone: 'UTC' };
+            if (withYear) opts.year = 'numeric';
+            return new Date(iso + 'T00:00:00Z').toLocaleDateString(undefined, opts);
+        }
+
+        function fmtRange(startIso, endIso) {
+            return fmtDay(startIso, false) + ' \u2013 ' + fmtDay(endIso, true);
+        }
+
+        async function loadSummaryTopics() {
+            try {
+                const res = await fetch('/api/v1/categories');
+                const data = await res.json();
+                summaryTopics = data.categories || [];
+                renderTopicCircles();
+            } catch (err) {
+                document.getElementById('topic-circles').innerHTML = '';
+                document.getElementById('summary-panel').innerHTML =
+                    '<div class="summary-empty"><strong>Could not load topics.</strong>' +
+                    'Check that the backend is reachable and try again.</div>';
+            }
+        }
+
+        function renderTopicCircles() {
+            const wrap = document.getElementById('topic-circles');
+            wrap.classList.toggle('has-selection', selectedTopic !== null);
+
+            wrap.innerHTML = summaryTopics.map(t => {
+                const on = t.slug === selectedTopic;
+                // Colour comes from the API, so the palette stays in one place on
+                // the backend. contrastText keeps the initials legible on amber
+                // and on indigo without a per-topic override.
+                const ring = on
+                    ? 'box-shadow:0 0 0 3px ' + t.accent_color + '55, 0 6px 18px ' + t.accent_color + '66;'
+                    : '';
+                return '<button class="topic-circle ' + (on ? 'selected' : '') + '"' +
+                       ' onclick="selectTopic(\'' + t.slug + '\')"' +
+                       ' aria-pressed="' + on + '"' +
+                       ' title="' + escapeHtml(t.label) + '">' +
+                       '<span class="circle-dot" style="background:' + t.accent_color +
+                       ';color:' + contrastText(t.accent_color) + ';' + ring + '">' +
+                       topicInitials(t.slug) + '</span>' +
+                       '<span class="circle-label">' + escapeHtml(t.label) + '</span>' +
+                       '</button>';
+            }).join('');
+        }
+
+        async function selectTopic(slug) {
+            selectedTopic = slug;
+            weekIndex = 0;
+            summaryHistory = [];
+            renderTopicCircles();
+
+            const panel = document.getElementById('summary-panel');
+            panel.innerHTML = '<div class="summary-prompt">Loading\u2026</div>';
+            panel.scrollTop = 0;
+
+            try {
+                const res = await fetch('/api/v1/summaries/' + encodeURIComponent(slug) + '?weeks=8');
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                summaryHistory = data.summaries || [];
+                renderSummary();
+            } catch (err) {
+                panel.innerHTML =
+                    '<div class="summary-empty"><strong>Could not load this summary.</strong>' +
+                    escapeHtml(err.message) + '</div>';
+            }
+        }
+
+        function stepWeek(delta) {
+            const next = weekIndex + delta;
+            if (next < 0 || next >= summaryHistory.length) return;
+            weekIndex = next;
+            renderSummary();
+        }
+
+        function renderSummary() {
+            const panel = document.getElementById('summary-panel');
+            const topic = summaryTopics.find(t => t.slug === selectedTopic);
+
+            if (!summaryHistory.length) {
+                // Not an error. A topic gets no row for a week when too few of its
+                // articles carried a real publisher description, and saying so is
+                // more useful than an empty card.
+                panel.innerHTML =
+                    '<div class="summary-empty"><strong>No summary yet for ' +
+                    escapeHtml(topic ? topic.label : selectedTopic) + '.</strong>' +
+                    'Summaries are written once a week, for the last completed ' +
+                    'Monday\u2013Sunday. A topic is skipped when too few of its articles ' +
+                    'that week came with a real publisher description.</div>';
+                return;
+            }
+
+            const s = summaryHistory[weekIndex];
+            const filtered = s.number_of_articles !== s.articles_in_window;
+
+            const sources = (s.top_sources || []).length
+                ? '<div class="chips">' + s.top_sources.map(x =>
+                      '<span class="chip">' + escapeHtml(x) + '</span>').join('') + '</div>'
+                : '<div class="stat-sub">No source breakdown stored for this week.</div>';
+
+            const articleNote = filtered
+                ? 'Summarised from ' + s.number_of_articles + ' of the ' +
+                  s.articles_in_window + ' collected this week. The rest carried a generic ' +
+                  'description rather than the publisher\u2019s own.'
+                : 'Every article collected this week was used.';
+
+            panel.innerHTML =
+                '<div class="summary-topic" style="color:' + s.accent_color + '">' +
+                    escapeHtml(s.topic_label) +
+                '</div>' +
+
+                '<div class="summary-dates">' +
+                    '<button class="week-step" onclick="stepWeek(1)" title="Earlier week"' +
+                        (weekIndex >= summaryHistory.length - 1 ? ' disabled' : '') +
+                        '>\u2039</button>' +
+                    '<span>' + fmtRange(s.week_start, s.week_end) + '</span>' +
+                    '<button class="week-step" onclick="stepWeek(-1)" title="Later week"' +
+                        (weekIndex <= 0 ? ' disabled' : '') +
+                        '>\u203a</button>' +
+                '</div>' +
+
+                '<p class="summary-text">' + escapeHtml(s.summary) + '</p>' +
+
+                '<div class="stat">' +
+                    '<div class="stat-label">Articles</div>' +
+                    '<div class="stat-value">' + s.number_of_articles + '</div>' +
+                    '<div class="stat-sub">' + articleNote + '</div>' +
+                '</div>' +
+
+                '<div class="stat">' +
+                    '<div class="stat-label">Top sources</div>' +
+                    sources +
+                '</div>' +
+
+                '<div class="summary-foot">' + escapeHtml(s.basis || '') +
+                    ' Written by <b>' + escapeHtml(s.generator) + '</b>.</div>';
+
+            panel.scrollTop = 0;
+        }
+
         // Telemetry Active Session Heartbeat
         (function initTelemetry() {
             let sessionId = localStorage.getItem('paperswap_session_id');
@@ -715,6 +1092,12 @@
 
         loadTopics();
         loadFeed();
+
+        // Deep link: /summaries opens straight on that tab, so the route still
+        // works and can be bookmarked. Everything else lands on the deck.
+        if (window.location.pathname.replace(/\/+$/, '') === '/summaries') {
+            switchView('summaries');
+        }
     </script>
 </body>
 </html>

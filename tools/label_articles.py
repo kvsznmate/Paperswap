@@ -24,7 +24,7 @@ Three design choices that matter more than the code
    holdout measures agreement with the keyword classifier rather than truth.
 
 2. YOU SEE EXACTLY WHAT THE MODEL SEES -- title and description, nothing more.
-   The classifier embeds title + description (ADR-011), so labelling from the
+   The classifier embeds title + description (ADR-012), so labelling from the
    full article would grade the model against evidence it never had.
 
 3. LABELS ARE MULTI-SELECT. An Apple earnings story is genuinely Tech and

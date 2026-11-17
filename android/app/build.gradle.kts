@@ -14,15 +14,26 @@ android {
         versionCode = 1
         versionName = "1.0"
 
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        vectorDrawables {
-            useSupportLibrary = true
-        }
+        // Backend address. Defaults to the server Tailscale address (the phone
+        // must be on the same tailnet). Override without editing this file:
+        //   ./gradlew assembleDebug -Ppaperswap.baseUrl=http://10.0.2.2:8000/
+        // or put paperswap.baseUrl=... in ~/.gradle/gradle.properties.
+        val baseUrl = (project.findProperty("paperswap.baseUrl") as String?)
+            ?: "http://100.67.178.57:8000/"
+        buildConfigField("String", "BASE_URL", "\"$baseUrl\"")
+
+        // The UI is English-only, so drop the translated strings that AndroidX
+        // libraries bundle for ~80 locales.
+        resourceConfigurations += listOf("en")
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 removes unused code (most of Compose, OkHttp, Coil and Kotlin
+            // stdlib that the app never touches) and then unused resources.
+            // Reflection-dependent classes are kept in proguard-rules.pro.
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -38,13 +49,25 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.14"
     }
     packaging {
         resources {
-            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            excludes += listOf(
+                "/META-INF/{AL2.0,LGPL2.1}",
+                // Only read by kotlin-reflect, which the app does not use.
+                "/kotlin/**",
+                "/kotlin-tooling-metadata.json",
+                // Coroutines debug-agent probes, for debuggers attaching to
+                // the process; not needed at runtime.
+                "/DebugProbesKt.bin",
+                // Library version markers for tooling. NOT META-INF/services:
+                // coroutines uses ServiceLoader there to find Dispatchers.Main.
+                "/META-INF/*.version"
+            )
         }
     }
 }
@@ -61,7 +84,9 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
+    // Core set only (Close, Favorite). The one extended icon, Undo, is copied
+    // into ui/components/UndoIcon.kt rather than pulling ~thousands of icons in.
+    implementation("androidx.compose.material:material-icons-core")
 
     // ViewModel Compose
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
@@ -79,5 +104,4 @@ dependencies {
 
     // Tooling
     debugImplementation("androidx.compose.ui:ui-tooling")
-    debugImplementation("androidx.compose.ui:ui-test-manifest")
 }

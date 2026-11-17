@@ -5,8 +5,6 @@ __pycache__/
 .env
 .git
 .gitignore
-output/cards/*
-!output/cards/.gitkeep
 
 # ONNX weights are bind-mounted at runtime (see docker-compose enrichment
 # service), never baked into the image. Excluding them keeps ~25 MB out of the

@@ -98,18 +98,19 @@ Modern Python web framework. Fast, lightweight, and generates interactive API do
 
 | Table | Holds |
 | --- | --- |
-| `articles` | Headline, summary, source, topic, image URL, link, and `article_key`. Plus the enrichment columns written nightly: `full_text`, `summary_bullets`, `embedding`, `enriched_at` |
+| `articles` | Headline, summary, source, topic, image URL, link, and `article_key`. Plus the enrichment columns: `full_text`, `summary_bullets`, `embedding`, `enriched_at`, `enrich_attempts`, and `description_source` (where the description came from) |
 | `categories` | The topic catalogue, synced from `database.CATEGORIES` on every boot |
 | `user_swipes` | One row per swipe — `read` or `pass` — cascading on article delete |
 | `swipe_events` | The same swipe, denormalised and **never purged**. The training set |
 | `user_sessions` | Session heartbeats, used for engagement metrics |
 | `request_logs` | One row per HTTP request, for peak-hour analysis |
+| `topic_summaries` | One weekly digest per topic. **Never purged** — the only history that outlives the articles (ADR-011) |
 
 ### Why swipes are stored twice
 
 This looks like a mistake and is not. A swipe is written to `user_swipes` **and** `swipe_events` in one transaction, because the two have incompatible retention needs.
 
-`user_swipes` is cascade-deleted when its article is purged at seven days. The analytics dashboard depends on that: its panels UNION `user_swipes` with `request_logs`, so both windows must stay equal or a chart silently mixes two periods.
+`user_swipes` is cascade-deleted when its article is purged (`PURGE_OLDER_THAN_DAYS`, 9 days). The analytics dashboard depends on that: its panels UNION `user_swipes` with `request_logs`, so both windows must stay equal or a chart silently mixes two periods.
 
 `swipe_events` has no foreign key and is never deleted. It snapshots the title, description, category, and source at swipe time, so a row stays usable long after its article is gone. That duplication is deliberate — it is the only reason old swipes remain trainable.
 
@@ -119,11 +120,11 @@ It stores no embedding on purpose. Vectors are recomputed off-box from the store
 
 ### The enrichment columns
 
-Written by `backend/enrichment.py`, a one-shot nightly job that runs outside the API process (ADR-011). It is safe to run by hand at any time:
+Written by `backend/enrichment.py`, a one-shot job that runs outside the API process every 6 hours via `run_enrichment.sh` (ADR-012). It is safe to run by hand at any time:
 
 ```bash
-docker compose exec news-cards-backend python enrichment.py --dry-run
-docker compose exec news-cards-backend python enrichment.py --limit 5
+docker compose run --rm enrichment python enrichment.py --dry-run
+docker compose run --rm enrichment python enrichment.py --limit 5
 ```
 
 | Column | Type | Notes |
@@ -274,8 +275,9 @@ Oracle Cloud (rented data-centre computer)
                                └── Volume: pgdata  ← the actual data
                                       ├── articles
                                       ├── categories
-                                      ├── user_swipes      (purged at 7d)
+                                      ├── user_swipes      (purged with articles, 9d)
                                       ├── swipe_events     (never purged)
+                                      ├── topic_summaries  (never purged)
                                       ├── user_sessions
                                       └── request_logs
 ```

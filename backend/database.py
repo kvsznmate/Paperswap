@@ -6,13 +6,19 @@ import hashlib
 import logging
 import threading
 import subprocess
-from datetime import date, timedelta
+from datetime import date
 from contextlib import contextmanager
 
+from dotenv import load_dotenv
 from psycopg2.extras import RealDictCursor, execute_values
 from psycopg2.pool import PoolError, ThreadedConnectionPool
 
 logger = logging.getLogger("paperswap.database")
+
+# Loaded here, not in news_fetcher: DATABASE_URL is read at import time below,
+# and every entry point imports this module first. No-op under Docker Compose,
+# which injects the environment directly.
+load_dotenv()
 
 
 def _database_url() -> str:
@@ -583,7 +589,7 @@ def get_enabled_categories() -> list:
 
 
 def _category_stats(cursor) -> list:
-    """Core of get_category_stats(), operating on a caller-supplied cursor so
+    """Article volume and swipe engagement per topic. Takes a cursor so
     get_telemetry_summary() can run all its panels on one connection."""
     cursor.execute('''
         SELECT c.slug, c.label, c.accent_color,
@@ -607,13 +613,6 @@ def _category_stats(cursor) -> list:
         item['read_ratio_percent'] = round(item['read_count'] / total * 100, 1) if total else 0.0
         results.append(item)
     return results
-
-
-def get_category_stats() -> list:
-    """Article volume and swipe engagement broken down per topic, so the
-    analytics dashboard can show which topics actually earn right-swipes."""
-    with db_cursor() as cursor:
-        return _category_stats(cursor)
 
 
 def generate_article_key(title: str, url: str) -> str:
@@ -959,12 +958,6 @@ def _active_users_count(cursor, window_seconds: int = 60) -> int:
     return row['active_count'] if row else 0
 
 
-def get_active_users_count(window_seconds: int = 60) -> int:
-    """Return count of users with heartbeat recorded in the last `window_seconds`."""
-    with db_cursor() as cursor:
-        return _active_users_count(cursor, window_seconds)
-
-
 def _avg_session_duration_minutes(cursor, days: int) -> float:
     """Mean session length over the last `days`, in minutes.
 
@@ -986,17 +979,6 @@ def _avg_session_duration_minutes(cursor, days: int) -> float:
     row = cursor.fetchone()
     avg_sec = float(row['avg_seconds']) if row else 0.0
     return round(avg_sec / 60.0, 1)
-
-
-def get_avg_session_duration_minutes(days: int) -> float:
-    """Single-query path for the windowed session average.
-
-    Currently unused -- get_telemetry_summary computes this on its own shared
-    connection. `days` is deliberately required: a default would let a caller
-    reintroduce the lifetime average without noticing.
-    """
-    with db_cursor() as cursor:
-        return _avg_session_duration_minutes(cursor, days)
 
 
 def _hourly_usage_distribution(cursor) -> list:
@@ -1036,12 +1018,6 @@ def _hourly_usage_distribution(cursor) -> list:
     return result
 
 
-def get_hourly_usage_distribution() -> list:
-    """Return request counts grouped by hour of the day (0..23)."""
-    with db_cursor() as cursor:
-        return _hourly_usage_distribution(cursor)
-
-
 def _top_swiped_articles(cursor, limit: int = 6) -> list:
     cursor.execute('''
         SELECT a.id, a.title, a.source, a.category, a.image_url, a.url, a.published_at,
@@ -1065,12 +1041,6 @@ def _top_swiped_articles(cursor, limit: int = 6) -> list:
         item['like_ratio_percent'] = round((reads / total * 100), 1) if total > 0 else 0
         results.append(item)
     return results
-
-
-def get_top_swiped_articles(limit: int = 6) -> list:
-    """Retrieve articles with the highest number of 'read' (swipe right) actions."""
-    with db_cursor() as cursor:
-        return _top_swiped_articles(cursor, limit)
 
 
 def _top_api_endpoints(cursor, limit: int = 6) -> list:
@@ -1117,12 +1087,6 @@ def _top_api_endpoints(cursor, limit: int = 6) -> list:
     return results
 
 
-def get_top_api_endpoints(limit: int = 6) -> list:
-    """Retrieve top API endpoints by total request hits and percentage distribution."""
-    with db_cursor() as cursor:
-        return _top_api_endpoints(cursor, limit)
-
-
 # ---------------------------------------------------------------------------
 # WEEKLY TOPIC SUMMARIES
 #
@@ -1165,11 +1129,6 @@ def _boilerplate_patterns() -> list:
     """
     from news_fetcher import boilerplate_like_patterns
     return boilerplate_like_patterns()
-
-
-def week_end_for(week_start: date) -> date:
-    """Sunday of the Mon-anchored week beginning `week_start` (inclusive)."""
-    return week_start + timedelta(days=6)
 
 
 def get_articles_for_week(topic: str, week_start: date,
@@ -1663,12 +1622,6 @@ def _database_storage_sizes(cursor) -> dict:
     }
 
 
-def get_database_storage_sizes() -> dict:
-    """Standalone wrapper around _database_storage_sizes()."""
-    with db_cursor() as cursor:
-        return _database_storage_sizes(cursor)
-
-
 def _database_detailed_analytics(cursor) -> dict:
     cursor.execute("SELECT COUNT(*) as total_articles, MIN(created_at) as oldest, MAX(created_at) as newest FROM articles")
     art_stats = cursor.fetchone() or {}
@@ -1707,12 +1660,6 @@ def _database_detailed_analytics(cursor) -> dict:
     }
 
 
-def get_database_detailed_analytics() -> dict:
-    """Retrieve database stats: oldest entry, newest entry, total reads vs passes, article counts."""
-    with db_cursor() as cursor:
-        return _database_detailed_analytics(cursor)
-
-
 # Oracle Cloud Always Free published allowances.
 #
 # These are LIMITS, not measurements — documented facts with a verification date,
@@ -1722,11 +1669,9 @@ def get_database_detailed_analytics() -> dict:
 # Source:  https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm
 # Verified: 2026-08-26
 #
-# IMPORTANT: this deployment runs VM.Standard.E2.1.Micro (x86) per
-# PROJECT_STATUS.md — the AMD micro allowance. A previous version of this file
-# used the Ampere A1 (Arm) allowance of 2 OCPU / 12 GB, which describes a
-# machine this project does not have. The micro shape gets 1/8 OCPU and 1 GB of
-# memory per instance, two instances per tenancy.
+# This deployment runs VM.Standard.E2.1.Micro (x86), not Ampere A1 -- see
+# ADR-003. The micro shape gets 1/8 OCPU and 1 GB of memory per instance, two
+# instances per tenancy.
 ALWAYS_FREE = {
     "is_limit": True,
     "verified_on": "2026-08-26",

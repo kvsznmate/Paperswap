@@ -1,4 +1,4 @@
-"""Nightly enrichment: article body extraction, extractive bullets, embeddings.
+"""Scheduled enrichment: article body extraction, extractive bullets, embeddings.
 
 Runs as a SEPARATE ONE-SHOT PROCESS, not as an APScheduler job inside the API.
 That is the whole design constraint. This deployment is an OCI E2.1.Micro with
@@ -10,8 +10,9 @@ anything else that can be avoided, and if the process exits when it is done.
     docker compose run --rm enrichment python enrichment.py --limit 5
     docker compose run --rm enrichment python enrichment.py
 
-Measured on the deployed instance: ~6.2 s/article, so a full 84-article batch
-takes roughly 9 minutes. That matches the estimate in ADR-011.
+Run every 6 hours by run_enrichment.sh (cron on the VM); a no-op when nothing
+is pending. Measured cost is a few seconds per article, so a full 84-article
+batch takes ~5-9 minutes. Design rationale: ADR-012 in docs/ARCHITECTURE.md.
 
 Cost of the models chosen, on this box:
 

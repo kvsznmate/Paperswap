@@ -7,7 +7,6 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# No Pillow/font system libraries needed any more — cards are rendered on the phone.
 # psycopg2-binary ships its own libs, so no build deps are required.
 
 # Copy requirements and install dependencies

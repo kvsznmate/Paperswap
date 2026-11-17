@@ -25,7 +25,7 @@ venv/
 ENV/
 env/
 
-# Test & coverage output (arrives with PS-16 / PS-17)
+# Test & coverage output
 .pytest_cache/
 .coverage
 .coverage.*
@@ -98,18 +98,10 @@ release/
 .artifacts/
 
 # -----------------------------------------------------------------------------
-# Generated media
-# -----------------------------------------------------------------------------
-# Server-side card rendering was retired when rendering moved to the phone.
-# Kept as a guard so no PNG batch can be committed by accident.
-backend/output/cards/
-!backend/output/cards/.gitkeep
-
-# -----------------------------------------------------------------------------
 # ML weights & local data artifacts
 # -----------------------------------------------------------------------------
 # ONNX weights are downloaded once by hand and bind-mounted into the enrichment
-# container (ADR-011). ~23 MB of binary that git would keep forever, and it is
+# container (ADR-012). ~23 MB of binary that git would keep forever, and it is
 # reproducible from a URL, so it does not belong here.
 backend/models/
 

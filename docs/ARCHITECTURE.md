@@ -70,7 +70,7 @@ Oracle Cloud Always Free. The intended A1.Flex ARM shape was persistently out of
 
 €0/month, always-on, 10 TB egress. The 956 MB ceiling directly motivated ADR-001.
 
-Risks accepted: Oracle reclaims idle instances (the refresh job provides enough activity), the free ARM allowance was halved in June 2026 with no notice, and the public IP is ephemeral — which is why hardcoding it in the Android client is a known defect.
+Risks accepted: Oracle reclaims idle instances (the refresh job provides enough activity), the free ARM allowance was halved in June 2026 with no notice, and the public IP is ephemeral. The Android client now reaches the server over a Tailscale address instead, so the IP no longer matters to it — but that address is still hardcoded in `RetrofitInstance.kt`, and the phone must be on the same tailnet.
 
 ---
 
@@ -90,7 +90,7 @@ The same story appears across multiple feeds, and topic feeds overlap heavily �
 
 Deduplication is atomic and race-free. Two threads inserting the same story concurrently produce one row with no application-level locking.
 
-**Do not add a check-then-insert around this.** The current code calls `is_article_in_db()` before `save_article()`, which is redundant, doubles connection count, and reintroduces the race the constraint exists to prevent. Removing it is a tracked task.
+**Do not add a check-then-insert around this.** An earlier `is_article_in_db()` pre-check doubled the connection count and reintroduced the race the constraint exists to prevent; it has been removed. `save_article()` returns `(id, was_inserted)` from the INSERT's own `RETURNING`, and `tests/test_dedup.py` guards against the pre-check coming back.
 
 ---
 
@@ -208,7 +208,7 @@ Generate with `openssl rand -hex 24`. Hex is `[0-9a-f]` only: no character speci
 
 ### Consequences
 
-Removes an entire class of silent failure. **The better fix is structural** — pass discrete connection parameters (`host`, `dbname`, `user`, `password`) to `psycopg2.connect()` instead of composing a URI, which makes any character safe. That is planned alongside connection pooling.
+Removes an entire class of silent failure. **The better fix is structural** — pass discrete connection parameters (`host`, `dbname`, `user`, `password`) instead of composing a URI, which makes any character safe. Connection pooling has since shipped, but the pool is still built from `DATABASE_URL`, so this remains open.
 
 ---
 
@@ -313,6 +313,36 @@ What this feature does **not** fix: topic assignment is still the unmeasured key
 
 ---
 
+## ADR-012 — Enrichment runs off-process; swipes are kept forever in `swipe_events`
+
+**Status:** Accepted
+
+### Context
+
+Card backs need more than the one- or two-sentence feed description: an extractive summary needs the article body, and a future ranker needs an embedding per article. Both need models, and the box has 956 MB of RAM shared with Postgres and the API.
+
+Separately, `user_swipes` is purged with its article (`ON DELETE CASCADE`, 9-day window) so the analytics panels stay aligned (ADR-010, ADR-011). That is correct for analytics and fatal for a recommender: a swipe is the one thing in the database that cannot be regenerated.
+
+### Decision
+
+**Enrichment is a one-shot process, not an APScheduler job.** `backend/enrichment.py` extracts the body with trafilatura, ranks sentences with TextRank into `summary_bullets`, and embeds with an int8 ONNX export of all-MiniLM-L6-v2 (~150 MB peak RSS; torch alone would cost ~350 MB on import). `run_enrichment.sh` runs it from cron every 6 hours through the `enrichment` compose service; it exits when done, so the model is never resident alongside the API. A `MemAvailable` guard refuses to start on a starved box.
+
+**Resumable by construction.** `enriched_at` is set only after every stage succeeds and is the resume point (`WHERE enriched_at IS NULL`); `enrich_attempts` caps retries so a permanently unreadable page stops after `ENRICH_MAX_ATTEMPTS`.
+
+**Feeds must link to publishers.** Google News RSS returns redirect wrappers that server-side extraction cannot follow, so every topic moved to publisher feeds (`news_fetcher.TOPIC_FEEDS`). `check_feeds.py --extract` verifies a feed actually yields text.
+
+**Swipes are written twice, in one transaction.** `user_swipes` keeps feeding analytics. `swipe_events` has no foreign key, is never purged, and snapshots title, description, category and source at swipe time, so a row stays trainable after its article is gone. It stores text, not vectors, so the whole history can be re-embedded when the model changes. `dwell_ms` and `flipped` are nullable and never backfilled: NULL means "not measured", not zero.
+
+### Consequences
+
+The API process carries no ML dependencies at runtime (they share the image, but are imported lazily by the job only). Card backs can be empty for up to a refresh-plus-cron interval after an article arrives.
+
+`swipe_events` is the only irreplaceable table and currently has **no backup** — it lives on one free-tier volume. A scheduled `pg_dump` / local archive is the open follow-up (see [DATABASE_GUIDE.md](DATABASE_GUIDE.md)).
+
+Bullet quality and the ranker are both unevaluated; see Open questions.
+
+---
+
 ## Failure modes we've hit
 
 Hard-won operational facts. Each of these caused a real outage.
@@ -353,7 +383,7 @@ The structural fix is a `/health` endpoint reporting the deployed commit SHA, in
 
 `init_db()` connects eagerly inside `lifespan` with no retry and no backoff, so an unreachable database exits the process. `restart: unless-stopped` then produces a crash loop that reports nothing useful — the outage is only visible via `docker compose ps` or by noticing port 8000 is not listening.
 
-A pool with startup retry would log the failure, keep the process alive, and let `/health` return `503`. Tracked.
+The connection pool now exists, but `init_pool()`/`init_db()` still have no retry. Adding one would log the failure, keep the process alive, and let a `/health` endpoint return `503`. Open.
 
 ### The database survives container removal
 

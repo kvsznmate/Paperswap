@@ -9,12 +9,14 @@ where it is.
 |---|---|---|---|---|
 | `/api/v1/feed` | GET | 60/min | public | Deck query, and a cold-start news fetch |
 | `/api/v1/categories` | GET | 60/min | public | Small aggregate query |
+| `/api/v1/summaries`, `/api/v1/summaries/{topic}` | GET | 60/min | public | Indexed reads of `topic_summaries` |
 | `/api/v1/swipe` | POST | 120/min | public | Unbounded rows in `user_swipes` |
 | `/api/v1/telemetry/heartbeat` | POST | 30/min | public | Unbounded rows in `user_sessions` |
 | `/api/v1/telemetry/stats` | GET | 30/min | admin | ~10 queries + `du` per call |
 | `/api/v1/telemetry/logs` | GET | 30/min | admin | In-memory read |
 | `/api/v1/auth/session` | POST | 10/min | none | Brute-forcing the admin key |
-| `/api/v1/cards/refresh` | POST | 2/hour | admin | ~84 outbound calls to NewsAPI / Google News |
+| `/api/v1/cards/refresh` | POST | 2/hour | admin | ~84 outbound calls to NewsAPI / RSS feeds |
+| `/api/v1/summaries/generate` | POST | 4/hour | admin | Spends money under `SUMMARY_GENERATOR=anthropic` |
 
 Limits are keyed on client IP and enforced by
 [slowapi](https://github.com/laurentS/slowapi). Exceeding one returns **429** with
@@ -95,7 +97,7 @@ hard rate.
 Limits key on `request.client.host`. Today the app is exposed directly, so that
 is the real client IP.
 
-**Once Caddy is in front (planned — see `PROJECT_STATUS.md`), every request will
+**Once Caddy is in front (planned), every request will
 appear to come from the proxy.** All users collapse into one bucket and each
 limit becomes a global cap across the whole userbase rather than per-client.
 

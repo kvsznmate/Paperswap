@@ -1,78 +1,25 @@
-"""Test candidate RSS feeds before wiring them into news_fetcher.CATEGORIES.
+"""Health-check the RSS feeds in news_fetcher.TOPIC_FEEDS.
 
     docker compose run --rm enrichment python check_feeds.py
     docker compose run --rm enrichment python check_feeds.py --extract
     docker compose run --rm enrichment python check_feeds.py --category TECH
+    docker compose run --rm enrichment python check_feeds.py --url <candidate>
 
-Why this exists
----------------
-Every one of the seven feeds in news_fetcher.CATEGORIES is a Google News
-search feed, and Google News does not publish article links -- it publishes
-redirect wrappers (news.google.com/rss/articles/CBMi...). Those bounce through
-consent.google.com and loop, so trafilatura extracts nothing, so TextRank has
-no sentences to rank, so every card back is empty. Since 2024 the wrapper
-cannot be decoded offline either; resolving it requires calling Google's
-internal batchexecute endpoint, which is undocumented and breaks without
-notice.
+Feeds rot, and a feed is only useful if it links straight to the publisher.
+Google News search feeds publish redirect wrappers (news.google.com/rss/...)
+that server-side extraction cannot follow, which is why they were replaced.
 
-The fix is feeds that link straight to publishers. The candidates below are
-UNVERIFIED -- RSS URLs rot constantly, publishers move them, and several of
-these were probably already dead when this file was written. That is the
-entire point of the script: run it, keep what passes, delete what does not.
-
-`--extract` is the test that actually matters. A feed can return a perfectly
-valid link that trafilatura still cannot read, because the page is a JS shell,
-a hard paywall, or a consent interstitial. Only fetching a real article tells
-you whether a feed will produce bullets.
+`--extract` is the test that matters: a feed can return clean links that
+trafilatura still cannot read (JS shell, paywall, consent wall). Use `--url`
+to vet a candidate before adding it to TOPIC_FEEDS.
 """
 
 import sys
 import argparse
 
-# UNVERIFIED CANDIDATES. Do not trust this list -- run the script.
-# Several per category on purpose: you want two or three live feeds each so a
-# single publisher going down does not empty a whole topic.
-CANDIDATES = {
-    "TECH": [
-        "https://feeds.arstechnica.com/arstechnica/index",
-        "https://www.theverge.com/rss/index.xml",
-        "https://techcrunch.com/feed/",
-        "https://www.engadget.com/rss.xml",
-    ],
-    "FINANCE": [
-        "https://www.cnbc.com/id/100003114/device/rss/rss.html",
-        "http://feeds.marketwatch.com/marketwatch/topstories/",
-        "https://finance.yahoo.com/news/rssindex",
-        "https://feeds.bbci.co.uk/news/business/rss.xml",
-    ],
-    "SPORTS": [
-        "https://www.espn.com/espn/rss/news",
-        "https://feeds.bbci.co.uk/sport/rss.xml",
-        "https://www.skysports.com/rss/12040",
-    ],
-    "POLITICS": [
-        "https://feeds.bbci.co.uk/news/politics/rss.xml",
-        "https://feeds.npr.org/1014/rss.xml",
-        "https://rss.politico.com/politics-news.xml",
-    ],
-    "PROGRAMMING": [
-        "https://dev.to/feed",
-        "https://feed.infoq.com/",
-        "https://hnrss.org/frontpage",
-        "https://stackoverflow.blog/feed/",
-    ],
-    "SCIENCE": [
-        "https://phys.org/rss-feed/",
-        "https://www.sciencedaily.com/rss/all.xml",
-        "https://www.nature.com/nature.rss",
-        "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
-    ],
-    "BEAUTY": [
-        "https://www.allure.com/feed/rss",
-        "https://www.byrdie.com/rss",
-        "https://www.refinery29.com/en-us/beauty/rss.xml",
-    ],
-}
+from news_fetcher import TOPIC_FEEDS
+
+FEEDS = {slug: cfg["rss_urls"] for slug, cfg in TOPIC_FEEDS.items()}
 
 BAD_HOSTS = ("news.google.com", "consent.google.com")
 
@@ -149,7 +96,7 @@ def try_extract(url: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Test candidate RSS feeds for usable article links.")
+        description="Check the configured RSS feeds for usable article links.")
     parser.add_argument("--category", help="Check one category only.")
     parser.add_argument("--extract", action="store_true",
                         help="Also fetch one article per feed and try to "
@@ -162,12 +109,12 @@ def main():
         groups = {"AD-HOC": [args.url]}
     elif args.category:
         key = args.category.upper()
-        if key not in CANDIDATES:
-            print(f"Unknown category {key}. Known: {', '.join(CANDIDATES)}")
+        if key not in FEEDS:
+            print(f"Unknown category {key}. Known: {', '.join(FEEDS)}")
             sys.exit(1)
-        groups = {key: CANDIDATES[key]}
+        groups = {key: FEEDS[key]}
     else:
-        groups = CANDIDATES
+        groups = FEEDS
 
     if args.extract:
         print("Extraction enabled -- one article fetched per feed. Be patient.\n")
@@ -205,8 +152,8 @@ def main():
     empty = [c for c, u in passing.items() if not u]
     if empty:
         print(f"\n  No working feed for: {', '.join(empty)}")
-        print("  Find replacements before switching news_fetcher over, or "
-              "those topics go empty.")
+        print("  Find replacements in news_fetcher.TOPIC_FEEDS, or those topics "
+              "fall back to NewsAPI only.")
 
     if not args.extract:
         print("\n  These passed the link check only. Re-run with --extract "

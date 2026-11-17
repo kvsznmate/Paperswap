@@ -17,7 +17,9 @@ Claims under test:
      updated rather than duplicated.
   6. The floor. A topic below MIN_ARTICLES_FOR_SUMMARY gets no row at all.
   7. Failure writes nothing. A raising generator leaves no row -- never a
-     placeholder, which after the purge is indistinguishable from a real summary.
+     placeholder, which after the purge is indistinguishable from a real summary
+     -- and the failure is logged at WARNING with a traceback rather than
+     swallowed.
   8. Ordering and retention. The summariser runs BEFORE the purge, the retention
      window leaves margin over the summariser's first opportunity, and a summary
      outlives the articles it was built from.
@@ -46,15 +48,16 @@ retention window. require_empty_week() asserts each one really is empty rather
 than assuming it, so a future change to retention produces one clear message
 instead of six confusing ones.
 
-Section 7 prints a RuntimeError traceback. That is the deliberately simulated
-generator failure being logged with exc_info, which is what production does; it
-is not a test error.
+Section 7 simulates a generator outage. Its log output is captured and asserted
+on rather than printed, so a passing run stays quiet: output that needs a note
+explaining it is not a failure should not be on screen in the first place.
 
 Run:  python tests/test_topic_summaries.py
 """
 import os
 import sys
 import inspect
+import logging
 import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -162,6 +165,42 @@ def require_empty_week(week_start, label):
           f"found {n} non-fixture article(s) -- counts below would be meaningless"
           if n else "")
     return n == 0
+
+
+class LogCapture(logging.Handler):
+    """Collect records from one logger instead of letting them reach the console.
+
+    Used for the simulated outage in section 7. The alternative -- letting the
+    real handler print an eight-line traceback and captioning it "expected" --
+    trains the reader to skim tracebacks in test output, which is exactly the
+    habit that hides a real one.
+
+    Capturing also upgrades the noise into a check. summarizer logs the failure
+    with exc_info on purpose, and "the failure is visible in the logs" is a claim
+    worth asserting rather than eyeballing.
+    """
+
+    def __init__(self, name):
+        super().__init__()
+        self.logger = logging.getLogger(name)
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+    def __enter__(self):
+        self._propagate = self.logger.propagate
+        self.logger.addHandler(self)
+        self.logger.propagate = False      # keeps the traceback off the console
+        return self
+
+    def __exit__(self, *exc):
+        self.logger.removeHandler(self)
+        self.logger.propagate = self._propagate
+        return False
+
+    def warnings(self):
+        return [r for r in self.records if r.levelno >= logging.WARNING]
 
 
 def at(week_start, day, hh=0, mm=0, ss=0, us=0):
@@ -343,26 +382,37 @@ try:
     # -----------------------------------------------------------------------
     section("7. a failing generator writes no placeholder")
     require_empty_week(FAIL_WEEK, "failure")
-    print("      (the RuntimeError traceback below is the simulated failure, not a test error)")
 
     for i in range(5):
         seed(f"fail-{i}", at(FAIL_WEEK, 1, 9 + i),
              f"Genuine publisher description {i}, long enough to be kept by the filter.",
              nf.DESC_PUBLISHER, source=f"Outlet {i}")
 
+    def explode(topic, articles):
+        raise RuntimeError("simulated API outage")
+
     original = sm.summarise
-    sm.summarise = lambda topic, articles: (_ for _ in ()).throw(
-        RuntimeError("simulated API outage"))
+    sm.summarise = explode
     try:
-        rep = sm.generate_weekly_summaries(week_start=FAIL_WEEK)
+        with LogCapture("paperswap.summarizer") as caught:
+            rep = sm.generate_weekly_summaries(week_start=FAIL_WEEK)
     finally:
         sm.summarise = original
 
     check("no row written when the generator raises",
           not any(r["topic"] == TOPIC for r in db.get_topic_summaries(FAIL_WEEK)),
           "after the purge a placeholder is indistinguishable from a real summary")
-    check("the failure is reported, not swallowed",
+    check("the failure is reported in the return value",
           any(f["topic"] == TOPIC for f in rep.get("failed", [])), str(rep.get("failed")))
+    check("the failure is logged at WARNING or above",
+          bool(caught.warnings()),
+          f"{len(caught.records)} record(s) captured")
+    check("the log record carries the traceback",
+          any(r.exc_info for r in caught.warnings()),
+          "a bare warning without exc_info hides which call actually failed")
+    check("one topic failing does not abort the other six",
+          len(caught.warnings()) >= 1 and "failed" in rep,
+          f"{rep.get('written', 0)} written, {len(rep.get('failed', []))} failed")
 
     sm.generate_weekly_summaries(week_start=FAIL_WEEK)
     check("the gap is recoverable while the articles survive",

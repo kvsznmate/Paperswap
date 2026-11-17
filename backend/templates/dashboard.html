@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PaperSwap - Headlines Hub</title>
+    <title>Paperswap Headlines</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -153,6 +153,7 @@
 
         .nav-tabs {
             display: flex;
+            flex-wrap: wrap;
             gap: 8px;
             background: rgba(15, 23, 42, 0.6);
             padding: 5px;
@@ -161,6 +162,7 @@
         }
 
         .tab-btn {
+            white-space: nowrap;
             background: transparent;
             border: none;
             color: var(--text-secondary);
@@ -234,12 +236,8 @@
             box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
         }
 
-        .news-card[data-category="TECH"] {
-            border-top: 3px solid var(--tech-color);
-        }
-
-        .news-card[data-category="FINANCE"] {
-            border-top: 3px solid var(--finance-color);
+        .news-card {
+            border-top: 3px solid var(--accent, var(--border-card));
         }
 
         .card-thumb-wrap {
@@ -281,13 +279,7 @@
             box-shadow: 0 4px 10px rgba(0,0,0,0.3);
         }
 
-        .cat-badge.tech {
-            background: var(--tech-color);
-        }
-
-        .cat-badge.finance {
-            background: var(--finance-color);
-        }
+        /* Badge colours are set inline from each article's accent_color. */
 
         .index-badge {
             background: rgba(15, 23, 42, 0.85);
@@ -393,12 +385,12 @@
                     </svg>
                 </div>
                 <div class="logo-title">
-                    <h1>Tech & Finance News API</h1>
-                    <p>Latest 50 Headlines • PostgreSQL-backed feed</p>
+                    <h1>Paperswap Headlines</h1>
+                    <p>The current swipe deck, all topics • PostgreSQL-backed feed</p>
                 </div>
             </div>
             <div class="controls">
-                <a class="btn btn-secondary" href="/analytics">VM Analytics</a>
+                <a class="btn btn-secondary" href="/analytics">Analytics</a>
                 <button class="btn btn-secondary" onclick="refreshNews()">Refresh Feed</button>
                 <a class="btn btn-mobile" href="/mobile">Open Swipe App</a>
             </div>
@@ -407,11 +399,8 @@
 
     <main>
         <div class="tabs-bar">
-            <div class="nav-tabs">
-                <button class="tab-btn active" onclick="filterCategory('ALL', this)">All News (50)</button>
-                <button class="tab-btn" onclick="filterCategory('TECH', this)">Tech Industry (25)</button>
-                <button class="tab-btn" onclick="filterCategory('FINANCE', this)">Finance (25)</button>
-            </div>
+            <!-- Built from /api/v1/categories, so new topics appear automatically. -->
+            <div class="nav-tabs" id="topic-tabs"></div>
             <div class="status-pill">
                 <div class="pulse-dot"></div>
                 <span id="status-text">Loading articles…</span>
@@ -425,6 +414,8 @@
 
     <script>
         let allArticles = [];
+        let topics = [];          // from /api/v1/categories, in display order
+        let activeTopic = 'ALL';
 
         function escapeHtml(str) {
             const d = document.createElement('div');
@@ -432,19 +423,56 @@
             return d.innerHTML;
         }
 
+        // Only well-formed hex colours reach a style attribute.
+        function safeColor(value, fallback = '#6366f1') {
+            return /^#[0-9a-f]{6}$/i.test(value || '') ? value : fallback;
+        }
+
+        // Dark text on light accents (amber, pink), white on dark ones.
+        function contrastOn(hex) {
+            const n = parseInt(hex.slice(1), 16);
+            const lum = (((n >> 16) & 255) * 299 + ((n >> 8) & 255) * 587 + (n & 255) * 114) / 255000;
+            return lum > 0.588 ? '#0b0f18' : '#ffffff';
+        }
+
         async function fetchNews() {
             const statusText = document.getElementById('status-text');
             statusText.innerText = "Loading articles…";
             try {
-                const response = await fetch('/api/v1/feed');
-                const data = await response.json();
-                allArticles = data.articles || [];
-                renderCards(allArticles);
-                statusText.innerText = `${allArticles.length} latest articles loaded`;
+                const [feedRes, catRes] = await Promise.all([
+                    fetch('/api/v1/feed'),
+                    fetch('/api/v1/categories')
+                ]);
+                if (!feedRes.ok) throw new Error(`feed HTTP ${feedRes.status}`);
+                allArticles = (await feedRes.json()).articles || [];
+                if (catRes.ok) topics = (await catRes.json()).categories || [];
+                renderTabs();
+                filterCategory(activeTopic);
+                statusText.innerText = `${allArticles.length} articles in the current deck`;
             } catch (err) {
                 console.error("Error fetching news:", err);
                 statusText.innerText = "Failed to load news";
             }
+        }
+
+        // Counts are taken from the loaded deck, so they always match the grid.
+        function renderTabs() {
+            const counts = {};
+            allArticles.forEach(a => { counts[a.category] = (counts[a.category] || 0) + 1; });
+
+            const tabs = [{ slug: 'ALL', label: 'All', count: allArticles.length }].concat(
+                topics.map(t => ({ slug: t.slug, label: t.label, count: counts[t.slug] || 0 }))
+            );
+
+            const bar = document.getElementById('topic-tabs');
+            bar.innerHTML = '';
+            tabs.forEach(t => {
+                const btn = document.createElement('button');
+                btn.className = 'tab-btn' + (t.slug === activeTopic ? ' active' : '');
+                btn.textContent = `${t.label} (${t.count})`;
+                btn.addEventListener('click', () => filterCategory(t.slug));
+                bar.appendChild(btn);
+            });
         }
 
         // Admin key for state-changing calls. Held in sessionStorage so it lives
@@ -511,14 +539,14 @@
                 const card = document.createElement('div');
                 card.className = 'news-card';
                 card.setAttribute('data-category', art.category);
-
-                const catClass = (art.category || 'TECH').toLowerCase();
+                const accent = safeColor(art.accent_color);
+                card.style.setProperty('--accent', accent);
 
                 card.innerHTML = `
                     <div class="card-thumb-wrap">
                         <img src="${escapeHtml(art.image_url)}" class="card-thumb" alt="News Image" onerror="this.src='https://images.unsplash.com/photo-1518770660439-4636190af475?w=800'">
                         <div class="badge-bar">
-                            <span class="cat-badge ${catClass}">${escapeHtml(art.category)}</span>
+                            <span class="cat-badge" style="background:${accent};color:${contrastOn(accent)}">${escapeHtml(art.category_label || art.category)}</span>
                             <span class="index-badge">#${String(art.index).padStart(2, '0')}</span>
                         </div>
                     </div>
@@ -530,7 +558,7 @@
                         <h2 class="card-title">${escapeHtml(art.title)}</h2>
                         <p class="card-desc">${escapeHtml(art.description)}</p>
                         <div class="card-footer">
-                            <a href="${escapeHtml(art.url)}" target="_blank" class="btn-card btn-article">Read Article ↗</a>
+                            <a href="${escapeHtml(art.url)}" target="_blank" rel="noopener" class="btn-card btn-article">Read Article ↗</a>
                         </div>
                     </div>
                 `;
@@ -538,34 +566,14 @@
             });
         }
 
-        function filterCategory(cat, btn) {
-            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-
-            if (cat === 'ALL') {
-                renderCards(allArticles);
-            } else {
-                renderCards(allArticles.filter(a => a.category === cat));
-            }
+        function filterCategory(slug) {
+            activeTopic = slug;
+            renderTabs();
+            renderCards(slug === 'ALL' ? allArticles : allArticles.filter(a => a.category === slug));
         }
 
-        // Telemetry Active Session Heartbeat
-        (function initTelemetry() {
-            let sessionId = localStorage.getItem('paperswap_session_id');
-            if (!sessionId) {
-                sessionId = 'sess_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
-                localStorage.setItem('paperswap_session_id', sessionId);
-            }
-            function sendHeartbeat() {
-                fetch('/api/v1/telemetry/heartbeat', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ session_id: sessionId, user_agent: navigator.userAgent })
-                }).catch(() => {});
-            }
-            sendHeartbeat();
-            setInterval(sendHeartbeat, 15000);
-        })();
+        // No session heartbeat here on purpose: "connected users" on /analytics
+        // should count people using the swipe app, not people viewing this page.
 
         fetchNews();
     </script>
