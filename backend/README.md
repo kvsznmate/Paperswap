@@ -84,6 +84,9 @@ Set in `.env` (see `.env.example` for the annotated version). Compose refuses to
 | `FEED_DEFAULT_LIMIT` | `70` | Cards returned by `GET /api/v1/feed` |
 | `REFRESH_INTERVAL` | `12` | Hours between background refreshes |
 | `LOG_FLUSH_INTERVAL` | `10` | Seconds between request-log buffer flushes |
+| `GLOBAL_SWIPES_PER_HOUR` / `GLOBAL_NEW_SESSIONS_PER_HOUR` | `3000` / `500` | Limits across all clients; 503 + `Retry-After` when spent. See docs/RATE_LIMITS.md |
+| `PUBLIC_CACHE_SECONDS` / `SUMMARY_CACHE_SECONDS` | `60` / `600` | In-memory cache and `Cache-Control` max-age for the public GET endpoints |
+| `FEED_COLD_FETCH_COOLDOWN` | `600` | Seconds between synchronous fetches for an empty topic selection |
 | `SUMMARY_GENERATOR` | `extractive:v1` | `anthropic` uses `ANTHROPIC_API_KEY` + `SUMMARY_MODEL`; see `.env.example` for the rest of the summary settings |
 | `DB_POOL_MIN` / `DB_POOL_MAX` / `DB_POOL_TIMEOUT` | `3` / `20` / `5.0` | Connection pool sizing (not passed through by Compose; local runs only) |
 
@@ -120,7 +123,7 @@ Things that have caused real outages here:
 
 ## Tests
 
-Eight standalone suites under `tests/` — see [tests/README.md](tests/README.md). They need a live Postgres and write to whatever `DATABASE_URL` points at.
+Nine standalone suites under `tests/` — see [tests/README.md](tests/README.md). They need a live Postgres and write to whatever `DATABASE_URL` points at.
 
 ```bash
 docker compose exec news-cards-backend sh -c 'for t in tests/test_*.py; do echo "== $t"; python "$t" || exit 1; done'
@@ -133,5 +136,5 @@ docker compose exec news-cards-backend sh -c 'for t in tests/test_*.py; do echo 
 - No CI; the suites above are run by hand
 - Rate limits are keyed on the client IP with in-memory storage. Behind a reverse proxy every request appears to come from the proxy, collapsing all clients into one bucket — putting Caddy in front requires `X-Forwarded-For` handling first
 - `ADMIN_COOKIE_SECURE` is `false` by default and must be flipped once HTTPS terminates in front
-- The `/api/v1/feed` cold-start path fetches synchronously inside the request, so the first call against an empty database blocks for the duration of ~84 outbound HTTP calls
+- The `/api/v1/feed` cold-start path fetches synchronously inside the request (at most once per topic selection per `FEED_COLD_FETCH_COOLDOWN`), so the first call against an empty database blocks for the duration of the outbound calls
 - `duration_seconds` is recomputed from `created_at` on every heartbeat, so a client that reuses one `session_id` across days reports a session lasting days

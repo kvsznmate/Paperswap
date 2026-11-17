@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 sealed class NewsUiState {
     object Loading : NewsUiState()
@@ -42,6 +43,9 @@ class NewsViewModel : ViewModel() {
          */
         const val UNDO_WINDOW_MS = 5_000L
     }
+
+    /** Identifies this app run to the server; see SwipeRecordRequest.sessionId. */
+    private val sessionId = UUID.randomUUID().toString()
 
     private val _uiState = MutableStateFlow<NewsUiState>(NewsUiState.Loading)
     val uiState: StateFlow<NewsUiState> = _uiState.asStateFlow()
@@ -78,7 +82,8 @@ class NewsViewModel : ViewModel() {
             articleId = article.id,
             action = if (read) "read" else "pass",
             dwellMs = currentDwellMs(),
-            flipped = currentCardFlipped
+            flipped = currentCardFlipped,
+            sessionId = sessionId
         )
 
         // Only the latest swipe is undoable, so the previous one goes out now.

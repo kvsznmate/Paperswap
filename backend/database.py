@@ -362,6 +362,18 @@ def init_db():
             ALTER TABLE user_swipes ADD COLUMN IF NOT EXISTS flipped BOOLEAN
         ''')
 
+        # Client-generated id (per app process / per browser), optional. Lets
+        # one client record at most one swipe per article: a retried POST, a
+        # double tap or a replayed request is absorbed instead of becoming a
+        # second row in the never-purged swipe_events. Partial index, so the
+        # many rows without a session id are unaffected.
+        cursor.execute('ALTER TABLE user_swipes ADD COLUMN IF NOT EXISTS session_id TEXT')
+        cursor.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_user_swipes_session_article
+            ON user_swipes (session_id, article_id)
+            WHERE session_id IS NOT NULL
+        ''')
+
         # ------------------------------------------------------------------
         # swipe_events -- the training set. NEVER purged.
         #
@@ -416,6 +428,9 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_swipe_events_article_key
             ON swipe_events (article_key)
         ''')
+        # Groups a client's swipes for per-user modelling. Nullable: old rows
+        # and clients that send no id stay NULL, never a guessed value.
+        cursor.execute('ALTER TABLE swipe_events ADD COLUMN IF NOT EXISTS session_id TEXT')
 
         # Telemetry: User active sessions and heartbeats
         cursor.execute('''
@@ -762,7 +777,8 @@ def record_user_swipe(
     action: str,
     dwell_ms: int = None,
     flipped: bool = None,
-) -> None:
+    session_id: str = None,
+) -> bool:
     """Record user swipe action (read or pass), with optional interaction signals.
 
     dwell_ms is the time the card spent frontmost before the swipe; flipped is
@@ -777,13 +793,20 @@ def record_user_swipe(
 
     An unknown article_id raises ForeignKeyViolation here. That now rolls back
     and returns the connection instead of stranding it -- see db_cursor().
+
+    Returns False, writing nothing, when this session already swiped this
+    article (uq_user_swipes_session_article). The first swipe wins; the client
+    cancels undone swipes itself before they are sent.
     """
     with db_cursor(commit=True) as cursor:
         cursor.execute(
-            "INSERT INTO user_swipes (article_id, action, dwell_ms, flipped) "
-            "VALUES (%s, %s, %s, %s)",
-            (article_id, action, dwell_ms, flipped),
+            "INSERT INTO user_swipes (article_id, action, dwell_ms, flipped, session_id) "
+            "VALUES (%s, %s, %s, %s, %s) "
+            "ON CONFLICT DO NOTHING RETURNING id",
+            (article_id, action, dwell_ms, flipped, session_id),
         )
+        if cursor.fetchone() is None:
+            return False
 
         # Same transaction, and deliberately after the line above: that INSERT
         # is what raises ForeignKeyViolation on an unknown article_id, which
@@ -795,13 +818,14 @@ def record_user_swipe(
         # two statements.
         cursor.execute('''
             INSERT INTO swipe_events
-                (article_key, action, dwell_ms, flipped,
+                (article_key, action, dwell_ms, flipped, session_id,
                  title, description, category, source)
-            SELECT article_key, %s, %s, %s,
+            SELECT article_key, %s, %s, %s, %s,
                    title, description, category, source
             FROM articles
             WHERE id = %s
-        ''', (action, dwell_ms, flipped, article_id))
+        ''', (action, dwell_ms, flipped, session_id, article_id))
+    return True
 
 
 def purge_old_articles(days: int = 7) -> int:
@@ -896,6 +920,20 @@ def purge_old_data(articles_days: int, request_logs_days: int,
         "request_logs": purge_old_request_logs(days=request_logs_days),
         "user_sessions": purge_old_sessions(days=sessions_days),
     }
+
+
+def refresh_session(session_id: str) -> bool:
+    """Heartbeat for a session that already exists. Returns False if it does
+    not, so the caller can decide whether a NEW session is allowed (main.py
+    caps new sessions per hour) before calling record_session_heartbeat."""
+    with db_cursor(commit=True) as cursor:
+        cursor.execute('''
+            UPDATE user_sessions SET
+                last_heartbeat = NOW(),
+                duration_seconds = GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - created_at))))
+            WHERE session_id = %s
+        ''', (session_id,))
+        return cursor.rowcount > 0
 
 
 def record_session_heartbeat(session_id: str, user_agent: str = None, ip_address: str = None):

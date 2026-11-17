@@ -20,6 +20,7 @@ from fastapi import (
     Response,
     status,
 )
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
@@ -27,10 +28,12 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from starlette.routing import Match
 
 from news_fetcher import fetch_and_sync_news_to_db
 import summarizer
 import database as db
+from public_limits import ColdStartGate, GlobalBudget, TTLCache
 
 
 # Hours between automatic refreshes. Overridable via env (docker-compose sets REFRESH_INTERVAL).
@@ -90,6 +93,53 @@ if SESSION_METRIC_WINDOW_DAYS > SESSION_RETENTION_DAYS:
 FEED_DEFAULT_LIMIT = int(os.getenv("FEED_DEFAULT_LIMIT", "70"))
 # How often buffered request events are drained into Postgres.
 LOG_FLUSH_INTERVAL_SECONDS = int(os.getenv("LOG_FLUSH_INTERVAL", "10"))
+
+# --- Global limits (see public_limits.py and docs/RATE_LIMITS.md) ------------
+# Per-IP limits do not bound totals: many clients multiply them. These do.
+# Swipes are the writes that matter most -- swipe_events is never purged -- so
+# the swipe budget is what bounds that table's growth under abuse.
+GLOBAL_SWIPES_PER_HOUR = int(os.getenv("GLOBAL_SWIPES_PER_HOUR", "3000"))
+GLOBAL_NEW_SESSIONS_PER_HOUR = int(os.getenv("GLOBAL_NEW_SESSIONS_PER_HOUR", "500"))
+SWIPE_BUDGET = GlobalBudget("swipes", GLOBAL_SWIPES_PER_HOUR)
+SESSION_BUDGET = GlobalBudget("new_sessions", GLOBAL_NEW_SESSIONS_PER_HOUR)
+
+# Public GET payloads are identical for every client. Served from memory for
+# this long, and sent with a matching Cache-Control so an edge cache can too.
+PUBLIC_CACHE_SECONDS = int(os.getenv("PUBLIC_CACHE_SECONDS", "60"))
+SUMMARY_CACHE_SECONDS = int(os.getenv("SUMMARY_CACHE_SECONDS", "600"))
+_FEED_CACHE = TTLCache(PUBLIC_CACHE_SECONDS)
+_SUMMARY_CACHE = TTLCache(SUMMARY_CACHE_SECONDS)
+
+# At most one synchronous news fetch per topic selection per cooldown.
+FEED_COLD_FETCH_COOLDOWN = int(os.getenv("FEED_COLD_FETCH_COOLDOWN", "600"))
+_COLD_START = ColdStartGate(FEED_COLD_FETCH_COOLDOWN)
+
+
+def invalidate_public_caches() -> None:
+    """Call whenever articles, categories or summaries change."""
+    _FEED_CACHE.clear()
+    _SUMMARY_CACHE.clear()
+
+
+def _public_json(content: dict, max_age: int) -> JSONResponse:
+    """JSONResponse with a Cache-Control that lets browsers and an edge cache
+    (Cloudflare, #32) serve it without reaching this process."""
+    return JSONResponse(
+        content=content,
+        headers={"Cache-Control": f"public, max-age={max_age}"},
+    )
+
+
+def _busy(budget: GlobalBudget, what: str) -> HTTPException:
+    """503 for an exhausted global budget. Logged, because a budget tripping is
+    either real growth worth knowing about or someone hammering the API."""
+    logging.getLogger("paperswap.limits").warning(
+        "Global %s budget exhausted (%d/h); rejecting.", budget.name, budget.limit)
+    return HTTPException(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        f"The server is not accepting more {what} right now. Try again later.",
+        headers={"Retry-After": str(budget.retry_after())},
+    )
 
 scheduler = BackgroundScheduler()
 
@@ -259,6 +309,7 @@ def refresh_pipeline():
     # tables share a window because they are reported side by side, whereas this
     # table exists precisely to outlive it. Defaults to 0, meaning keep forever.
     db.purge_old_summaries(summarizer.SUMMARY_RETENTION_WEEKS)
+    invalidate_public_caches()
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +470,9 @@ app = FastAPI(
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# The deck is ~80 KB of JSON; gzip cuts it to roughly a third. Egress is the
+# one Oracle Always Free meter a client can drive (10 TB/month on a 50 Mbps link).
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
 # Paths excluded from the request_logs analytics table.
@@ -433,6 +487,30 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 #                           top-endpoint panels derive swipe counts from
 #                           user_swipes instead -- see database._hourly_usage_distribution.
 LOG_EXCLUDED_PREFIXES = ("/static", "/api/v1/telemetry", "/api/v1/swipe")
+
+# Requests that matched no route (scanners probing /wp-login.php, /.env, ...).
+# Counted here instead of stored: every distinct junk path would otherwise be a
+# request_logs row, and an internet-facing box sees thousands a day.
+_UNMATCHED_REQUESTS = 0
+
+
+def _route_template(scope) -> Optional[str]:
+    """The matched route's path template ('/api/v1/summaries/{topic}'), or None
+    when nothing matched.
+
+    A FULL match (path and method) wins over a PARTIAL one (path only), the
+    same precedence the router uses: POST /api/v1/summaries/generate must not
+    be attributed to the GET /api/v1/summaries/{topic} route declared before
+    it. A path-only match still names its route, so a 405 is logged under it.
+    """
+    partial = None
+    for route in app.router.routes:
+        match, _ = route.matches(scope)
+        if match == Match.FULL:
+            return getattr(route, "path", None)
+        if match == Match.PARTIAL and partial is None:
+            partial = getattr(route, "path", None)
+    return partial
 
 
 @app.middleware("http")
@@ -457,7 +535,7 @@ async def log_requests_middleware(request: Request, call_next):
     batching removes that concern, and a status_code column whose rows are all
     <400 by construction would be decorative.
     """
-    global _LOG_DROPPED
+    global _LOG_DROPPED, _UNMATCHED_REQUESTS
 
     response = await call_next(request)
 
@@ -471,10 +549,19 @@ async def log_requests_middleware(request: Request, call_next):
             add_log_entry(f"{request.method} {path} - {status_code}", "ERROR")
         return response
 
+    template = _route_template(request.scope)
+    if template is None:
+        _UNMATCHED_REQUESTS += 1
+        add_log_entry(f"{request.method} {path} - {status_code} (no route)", "ERROR")
+        return response
+
     if len(_LOG_BUFFER) == _LOG_BUFFER.maxlen:
         _LOG_DROPPED += 1
     _LOG_BUFFER.append((
-        path,
+        # The template, not the raw path: /api/v1/summaries/TECH and /SPORTS
+        # are one endpoint in the analytics panels, and a client cannot mint
+        # new rows' worth of distinct endpoints by varying the path.
+        template,
         request.method,
         status_code,
         datetime.datetime.now(datetime.timezone.utc),
@@ -519,11 +606,21 @@ class SwipeRequest(BaseModel):
         ),
         examples=[True],
     )
+    session_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description=(
+            "Client-generated id for this app run or browser. With it, a "
+            "repeated swipe on the same article is acknowledged but not stored "
+            "again. Optional for older clients."
+        ),
+    )
 
 
 class HeartbeatRequest(BaseModel):
-    session_id: str
-    user_agent: Optional[str] = None
+    session_id: str = Field(min_length=1, max_length=64)
+    user_agent: Optional[str] = Field(default=None, max_length=256)
 
 
 class AdminLogin(BaseModel):
@@ -614,12 +711,12 @@ def read_mobile_app():
 def get_categories(request: Request):
     """List every topic the feed can serve, with its brand colour and how many
     articles are currently stored. Drives the client topic filter bar."""
-    categories = db.get_enabled_categories()
-    return JSONResponse(content={
-        "status": "ok",
-        "count": len(categories),
-        "categories": categories
-    })
+    payload = _FEED_CACHE.get(("categories",))
+    if payload is None:
+        categories = db.get_enabled_categories()
+        payload = {"status": "ok", "count": len(categories), "categories": categories}
+        _FEED_CACHE.set(("categories",), payload)
+    return _public_json(payload, PUBLIC_CACHE_SECONDS)
 
 
 @app.get("/api/v1/feed", tags=["public"])
@@ -641,23 +738,39 @@ def get_news_feed(
     selected = db.clean_category_filter(categories)
     deck_limit = limit or FEED_DEFAULT_LIMIT
 
-    if balanced:
-        articles = db.get_balanced_feed(limit=deck_limit, categories=selected)
-    else:
-        articles = db.get_latest_articles(limit=deck_limit, categories=selected)
+    cache_key = ("feed", tuple(selected), deck_limit, balanced)
+    payload = _FEED_CACHE.get(cache_key)
+    if payload is not None:
+        return _public_json(payload, PUBLIC_CACHE_SECONDS)
 
-    # Cold start: nothing stored yet, so pull a batch synchronously.
+    def query():
+        if balanced:
+            return db.get_balanced_feed(limit=deck_limit, categories=selected)
+        return db.get_latest_articles(limit=deck_limit, categories=selected)
+
+    articles = query()
+
+    # Cold start: nothing stored for these topics, so pull a batch now -- but at
+    # most once per topic selection per FEED_COLD_FETCH_COOLDOWN, and never two
+    # at once. Everyone else gets the deck as it is (possibly empty).
     if not articles:
-        fetch_and_sync_news_to_db(categories=selected or None)
-        articles = db.get_balanced_feed(limit=deck_limit, categories=selected)
+        def fetch():
+            fetch_and_sync_news_to_db(categories=selected or None)
+            invalidate_public_caches()
+        if _COLD_START.run_once(tuple(selected), fetch):
+            articles = query()
 
-    return JSONResponse(content={
+    payload = {
         "status": "ok",
         "count": len(articles),
         "categories": selected or list(db.CATEGORIES.keys()),
         "balanced": balanced,
         "articles": articles
-    })
+    }
+    # An empty deck is not cached: the next request should see the fetch.
+    if articles:
+        _FEED_CACHE.set(cache_key, payload)
+    return _public_json(payload, PUBLIC_CACHE_SECONDS)
 
 
 @app.post(
@@ -699,20 +812,30 @@ def record_swipe(request: Request, req: SwipeRequest):
     is rejected with a 422 before reaching the database. An id that parses but
     does not exist trips the foreign key, which is translated to a 404 rather
     than surfacing as an unhandled 500.
+
+    Two bounds apply on top of the per-IP limit: a global swipes-per-hour
+    budget (503 when spent), and at most one stored swipe per session per
+    article -- a repeat returns 200 "duplicate" and writes nothing.
     """
+    if not SWIPE_BUDGET.take():
+        raise _busy(SWIPE_BUDGET, "swipes")
     try:
-        db.record_user_swipe(req.article_id, req.action, req.dwell_ms, req.flipped)
+        stored = db.record_user_swipe(
+            req.article_id, req.action, req.dwell_ms, req.flipped, req.session_id)
     except psycopg2.errors.ForeignKeyViolation:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
             f"Article {req.article_id} not found.",
         )
 
-    return {
-        "status": "recorded",
+    body = {
+        "status": "recorded" if stored else "duplicate",
         "article_id": req.article_id,
         "action": req.action,
     }
+    if not stored:
+        return JSONResponse(status_code=status.HTTP_200_OK, content=body)
+    return body
 
 
 @app.post("/api/v1/auth/session", tags=["admin"])
@@ -817,26 +940,32 @@ def get_weekly_summaries(
     say "not enough coverage" instead of rendering a blank card.
     """
     requested = _parse_week_start(week_start)
-    summaries = db.get_topic_summaries(requested)
+    cache_key = ("week", requested)
+    payload = _SUMMARY_CACHE.get(cache_key)
+    if payload is not None:
+        return _public_json(payload, SUMMARY_CACHE_SECONDS)
 
+    summaries = db.get_topic_summaries(requested)
     if not summaries:
-        return JSONResponse(content={
+        payload = {
             "status": "ok",
             "count": 0,
             "week_start": requested.isoformat() if requested else None,
             "summaries": [],
             "detail": "No summaries stored for this week yet.",
-        })
-
-    present = {s["topic"] for s in summaries}
-    return JSONResponse(content={
-        "status": "ok",
-        "count": len(summaries),
-        "week_start": summaries[0]["week_start"],
-        "week_end": summaries[0]["week_end"],
-        "topics_missing": [s for s in db.CATEGORIES if s not in present],
-        "summaries": summaries,
-    })
+        }
+    else:
+        present = {s["topic"] for s in summaries}
+        payload = {
+            "status": "ok",
+            "count": len(summaries),
+            "week_start": summaries[0]["week_start"],
+            "week_end": summaries[0]["week_end"],
+            "topics_missing": [s for s in db.CATEGORIES if s not in present],
+            "summaries": summaries,
+        }
+    _SUMMARY_CACHE.set(cache_key, payload)
+    return _public_json(payload, SUMMARY_CACHE_SECONDS)
 
 
 @app.get("/api/v1/summaries/{topic}", tags=["public"])
@@ -859,15 +988,20 @@ def get_topic_summary_history(
         )
 
     slug = cleaned[0]
-    history = db.get_summary_history(slug, weeks=weeks)
-    return JSONResponse(content={
-        "status": "ok",
-        "topic": slug,
-        "topic_label": db.CATEGORIES[slug]["label"],
-        "accent_color": db.CATEGORIES[slug]["accent"],
-        "count": len(history),
-        "summaries": history,
-    })
+    cache_key = ("history", slug, weeks)
+    payload = _SUMMARY_CACHE.get(cache_key)
+    if payload is None:
+        history = db.get_summary_history(slug, weeks=weeks)
+        payload = {
+            "status": "ok",
+            "topic": slug,
+            "topic_label": db.CATEGORIES[slug]["label"],
+            "accent_color": db.CATEGORIES[slug]["accent"],
+            "count": len(history),
+            "summaries": history,
+        }
+        _SUMMARY_CACHE.set(cache_key, payload)
+    return _public_json(payload, SUMMARY_CACHE_SECONDS)
 
 
 @app.post(
@@ -893,8 +1027,12 @@ def trigger_summary_generation(
     empty it writes nothing rather than summarising the void.
     """
     requested = _parse_week_start(week_start)
-    background.add_task(
-        summarizer.generate_weekly_summaries, week_start=requested, force=force)
+
+    def generate():
+        summarizer.generate_weekly_summaries(week_start=requested, force=force)
+        invalidate_public_caches()
+
+    background.add_task(generate)
     return {
         "status": "accepted",
         "week_start": requested.isoformat() if requested else "last completed week",
@@ -906,10 +1044,18 @@ def trigger_summary_generation(
 @app.post("/api/v1/telemetry/heartbeat", tags=["public"])
 @limiter.limit("30/minute")
 def user_heartbeat(request: Request, req: HeartbeatRequest):
-    """Client ping endpoint to keep active session alive and track duration."""
-    client_ip = request.client.host if request.client else "unknown"
-    user_agent = req.user_agent or request.headers.get("user-agent", "")
-    db.record_session_heartbeat(req.session_id, user_agent=user_agent, ip_address=client_ip)
+    """Client ping endpoint to keep active session alive and track duration.
+
+    Existing sessions are always refreshed. A NEW session_id costs one unit of
+    the global new-sessions budget (503 when spent), because each one is a row
+    and the id is client-chosen.
+    """
+    if not db.refresh_session(req.session_id):
+        if not SESSION_BUDGET.take():
+            raise _busy(SESSION_BUDGET, "new sessions")
+        client_ip = request.client.host if request.client else "unknown"
+        user_agent = (req.user_agent or request.headers.get("user-agent", ""))[:256]
+        db.record_session_heartbeat(req.session_id, user_agent=user_agent, ip_address=client_ip)
     return JSONResponse(content={"status": "ok", "session_id": req.session_id})
 
 
@@ -926,6 +1072,15 @@ def get_telemetry_stats(request: Request):
     aggregate user behaviour.
     """
     stats = db.get_telemetry_summary(session_window_days=SESSION_METRIC_WINDOW_DAYS)
+    stats["global_limits"] = {
+        "swipes": SWIPE_BUDGET.snapshot(),
+        "new_sessions": SESSION_BUDGET.snapshot(),
+        "unmatched_requests_not_stored": {
+            "count": _UNMATCHED_REQUESTS,
+            "measured": True,
+            "source": "in-process counter since start",
+        },
+    }
     return JSONResponse(content=stats)
 
 

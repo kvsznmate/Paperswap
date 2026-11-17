@@ -52,5 +52,9 @@ data class SwipeRecordRequest(
     // 0/false: the backend stores NULL as "not measured", and a fabricated zero
     // would poison the training set.
     @SerializedName("dwell_ms") val dwellMs: Int? = null,
-    @SerializedName("flipped") val flipped: Boolean? = null
+    @SerializedName("flipped") val flipped: Boolean? = null,
+
+    // Random per app run. The server stores at most one swipe per session per
+    // article, so a retried or replayed POST cannot add a second row.
+    @SerializedName("session_id") val sessionId: String? = null
 )

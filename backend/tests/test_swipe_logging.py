@@ -5,7 +5,8 @@ Claims under test:
   2. The hourly chart and endpoint panel still see swipes, derived from user_swipes.
   3. The live console records real status codes, not a hardcoded 200 OK.
   4. Rejected requests are persisted with their REAL status -- not skipped, not
-     faked as 200.
+     faked as 200 -- under their route template. Paths that match no route
+     (scanners) are counted in memory, never stored.
   5. The swipe limit clears realistic human swipe speed.
   6. The middleware performs NO database I/O; flush_request_logs() does it in
      batches off the request path.
@@ -104,9 +105,18 @@ m.RECENT_LOGS.clear()
 m.flush_request_logs()
 rl4, _ = counts()
 
-c.get("/api/v1/telemetry/stats")                                   # 401, excluded path
+def junk_count():
+    with db.db_cursor() as cur:
+        cur.execute("SELECT COUNT(*) n FROM request_logs WHERE endpoint = '/api/cards/generate'")
+        return cur.fetchone()["n"]
+
+
+junk0 = junk_count()          # older runs of this suite stored such rows
+unmatched0 = m._UNMATCHED_REQUESTS
+c.get("/api/v1/telemetry/stats")                                  # 401, excluded path
 c.post("/api/v1/swipe", json={"article_id": AID, "action": "x"})    # 422, excluded path
-c.get("/api/cards/generate")                                        # 404, logged
+c.get("/api/v1/summaries/NOT_A_TOPIC")                              # 404 from a real route, logged
+c.get("/api/cards/generate")                                        # 404, no route: counted, not stored
 
 # The acceptance criterion: the middleware itself INSERTs nothing.
 rl_mid, _ = counts()
@@ -115,16 +125,20 @@ check("middleware wrote 0 rows itself (buffered, not INSERTed)",
 
 flushed = m.flush_request_logs()
 rl5, _ = counts()
-check("flush persisted exactly the one non-excluded request",
+check("flush persisted exactly the one routed, non-excluded request",
       rl5 - rl4 == 1, f"(+{rl5-rl4}, flush returned {flushed})")
 
 with db.db_cursor() as cur:
     cur.execute("SELECT status_code FROM request_logs "
-                "WHERE endpoint = '/api/cards/generate' ORDER BY id DESC LIMIT 1")
+                "WHERE endpoint = '/api/v1/summaries/{topic}' ORDER BY id DESC LIMIT 1")
     row = cur.fetchone()
-check("404 stored with its REAL status_code, not 200",
+junk_added = junk_count() - junk0
+check("404 stored with its REAL status_code, under the route template",
       row is not None and row["status_code"] == 404,
       f"({row['status_code'] if row else 'no row'})")
+check("a path that matches no route is not stored", junk_added == 0, f"(+{junk_added})")
+check("...but it is counted", m._UNMATCHED_REQUESTS == unmatched0 + 1,
+      f"({m._UNMATCHED_REQUESTS - unmatched0})")
 
 joined = " | ".join(list(m.RECENT_LOGS))
 check("401 recorded with its real status", "401" in joined, joined[:70])
@@ -201,7 +215,12 @@ for name, actual, expected, env in [
           os.getenv(env) is not None or actual == expected,
           f"({actual} vs {expected})")
 
-refresh_src = MAIN_SRC.split("def refresh_pipeline")[1][:900]
+# The whole function body via the AST, not a fixed-size slice of text: a slice
+# silently stops covering the call once the docstring or earlier steps grow
+# (it did, when the summariser step was added before the purge).
+refresh_fn = next(n for n in ast.walk(ast.parse(MAIN_SRC))
+                  if isinstance(n, ast.FunctionDef) and n.name == "refresh_pipeline")
+refresh_src = ast.get_source_segment(MAIN_SRC, refresh_fn)
 check("the refresh job runs the combined purge", "purge_old_data" in refresh_src)
 
 DB_SRC = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

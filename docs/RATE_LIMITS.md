@@ -22,6 +22,45 @@ Limits are keyed on client IP and enforced by
 [slowapi](https://github.com/laurentS/slowapi). Exceeding one returns **429** with
 `{"error": "Rate limit exceeded: N per M"}`.
 
+## Global limits (all clients together)
+
+Per-IP limits stop one client, not many: a botnet, or simply a lot of users,
+multiplies every number in the table above. These bound the **total**, and are
+what keeps the never-purged tables and the 50 Mbps / 10 TB Always Free link
+inside their budget no matter how many IPs are involved. They live in
+`backend/public_limits.py` and are configured in `backend/.env`.
+
+| Limit | Default | When spent | Bounds |
+|---|---|---|---|
+| `GLOBAL_SWIPES_PER_HOUR` | 3000 | `POST /api/v1/swipe` → 503 + `Retry-After` | Growth of `swipe_events` (never purged) |
+| `GLOBAL_NEW_SESSIONS_PER_HOUR` | 500 | a heartbeat with a *new* `session_id` → 503; known sessions are always refreshed | Rows in `user_sessions` |
+| One swipe per `(session_id, article)` | — | repeat → 200 `"duplicate"`, nothing written | Retries and replays from one client |
+| Unmatched paths | — | counted in memory, not stored in `request_logs` | Scanner traffic (`/wp-login.php`, `/.env`, …) |
+| `FEED_COLD_FETCH_COOLDOWN` | 600 s | further requests get the deck as it is | Outbound fetches from an empty topic |
+
+Sizing `GLOBAL_SWIPES_PER_HOUR`: a reader produces ~60 swipes a session, so 3000/h
+is ~50 full sessions an hour, far above current use. At the limit, each swipe
+adds ~0.5 KB to `swipe_events`, about 1.5 MB/h or 36 MB/day of sustained abuse.
+That rate is bounded, and visible: every rejection is logged, and
+`/api/v1/telemetry/stats` reports `global_limits` (used, rejected) alongside
+the count of unmatched requests.
+
+Fixed windows, like the per-IP limits: up to 2× the limit can pass across a
+window boundary. That is still a hard bound, which is the point.
+
+## Caching
+
+The deck, the topic catalogue and the summaries are identical for every client.
+
+- **In memory:** served from a short-lived cache (`PUBLIC_CACHE_SECONDS`, 60 s;
+  `SUMMARY_CACHE_SECONDS`, 600 s), cleared whenever the refresh pipeline,
+  a cold-start fetch or summary generation changes the data. An empty deck is
+  never cached.
+- **Cache-Control:** the same endpoints send `public, max-age=…`, so a browser
+  or an edge cache (Cloudflare, #32) can answer without reaching the VM.
+- **gzip:** responses over 1 KB are compressed; the ~80 KB deck shrinks to
+  roughly a third. Egress is the one Always Free meter a client can drive.
+
 ## How the numbers were chosen
 
 **Swipe — 120/min.** Swiping is client-side; the deck advances an in-memory index
@@ -37,10 +76,10 @@ rate limit. The client now shows a notice on 429.
 The limit is not protecting compute — a swipe insert measures ~0.6 ms. It bounds
 how fast a script can write rows to a 47 GB volume.
 
-**Feed — 60/min.** The client calls this once per session, so 60 is generous. It
-matters more than the query cost suggests: on a cold start the endpoint fetches
-news synchronously, ~84 outbound requests against a NewsAPI free tier of
-1,000/day. See "Known gap" below.
+**Feed — 60/min.** The client calls this once per session, so 60 is generous.
+On a cold start the endpoint fetches news synchronously, but at most once per
+topic selection per `FEED_COLD_FETCH_COOLDOWN` (see Global limits), so request
+volume can no longer multiply outbound calls.
 
 **Refresh — 2/hour.** The most expensive endpoint in the system. Also admin-only,
 so the limit is a second line behind authentication rather than the primary
@@ -106,16 +145,6 @@ trusted and overwrites the header — otherwise any client can spoof its way pas
 the limiter by sending its own. Wire it behind an explicit `TRUST_PROXY` flag,
 defaulting off, at the same time HTTPS lands. Tracked as a follow-up; the limits
 above are correct only until that day.
-
-## Known gap: cold-start fetch on the feed
-
-`GET /api/v1/feed` still triggers a synchronous news fetch when the query returns
-nothing, so 60/min against an empty topic permits up to 60 × 84 = 5,040 outbound
-requests per minute — enough to exhaust the NewsAPI daily quota in seconds.
-
-Rate limiting alone does not close this; the endpoint needs a cooldown so at most
-one synchronous fetch happens per interval regardless of request volume. Tracked
-as a follow-up (F1).
 
 ## Verifying
 
