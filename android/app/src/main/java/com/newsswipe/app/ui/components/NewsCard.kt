@@ -1,15 +1,18 @@
 package com.newsswipe.app.ui.components
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -17,110 +20,84 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.newsswipe.app.data.model.NewsArticle
-import com.newsswipe.app.ui.theme.TextMuted
-import com.newsswipe.app.ui.theme.TextPrimary
-import com.newsswipe.app.ui.theme.TextSecondary
+import com.newsswipe.app.ui.theme.Paper
+import com.newsswipe.app.ui.theme.PaperSans
+import com.newsswipe.app.ui.theme.PaperSerif
 
-/** Front face of a news card: image, headline, publisher blurb. */
+/**
+ * Front of a card: the headline leads, a photo follows only if it is real, the
+ * publisher's blurb only if it is the publisher's (ADR-013).
+ *
+ * Without a photo the headline grows and the blurb gets more lines, so a
+ * type-only card is a designed state, not a broken one.
+ */
 @Composable
 fun NewsCard(
     article: NewsArticle,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** "12 / 69", or null to leave the position out (the card behind). */
+    position: String? = null
 ) {
-    val accent = article.accent
+    val c = Paper.colors
+    val photo = article.showsPhoto
 
     NewsCardFrame(modifier = modifier) {
-        NewsCardHeader(article)
-
-        Spacer(modifier = Modifier.height(14.dp))
-
-        // Hero image. weight(1f) so the image, not the text, gives up space when
-        // the card is short -- with a fixed image height the description below
-        // was squeezed to nothing.
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .clip(RoundedCornerShape(20.dp))
-                .border(1.dp, Color(0xFF2C364A), RoundedCornerShape(20.dp))
+        // Everything but the footer. Measured first, so the photo -- the only
+        // flexible child -- gives up height on a short screen, never the words.
+        Column(
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            AsyncImage(
-                model = article.imageUrl,
-                contentDescription = article.title,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
+            Kicker(article)
+
+            Text(
+                text = article.title,
+                fontFamily = PaperSerif,
+                fontWeight = FontWeight.Bold,
+                fontSize = if (photo) 25.sp else 30.sp,
+                lineHeight = if (photo) 30.sp else 36.sp,
+                letterSpacing = (-0.2).sp,
+                color = c.ink,
+                maxLines = if (photo) 4 else 7,
+                overflow = TextOverflow.Ellipsis
             )
 
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(10.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0xCC090C15))
-                    .padding(horizontal = 10.dp, vertical = 4.dp)
-            ) {
+            if (photo) {
+                AsyncImage(
+                    model = article.imageUrl,
+                    contentDescription = null,   // decorative: the headline says it
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .aspectRatio(3f / 2f, matchHeightConstraintsFirst = true)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(c.photo)
+                )
+            }
+
+            if (article.showsBlurb) {
                 Text(
-                    text = article.publishedAt,
-                    color = TextSecondary,
-                    fontSize = 11.sp
+                    text = article.description,
+                    fontFamily = PaperSerif,
+                    fontSize = 15.sp,
+                    lineHeight = 22.sp,
+                    color = c.ink2,
+                    maxLines = if (photo) 3 else 8,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
-
-        Text(
-            text = article.title,
-            color = TextPrimary,
-            fontSize = 20.sp,
-            fontWeight = FontWeight.Bold,
-            lineHeight = 26.sp,
-            maxLines = 3,
-            overflow = TextOverflow.Ellipsis
-        )
-
-        Spacer(modifier = Modifier.height(10.dp))
-
-        // Fixed line budget and no weight, so the blurb always gets its space.
-        // The enrichment bullets live on the back of the card.
-        Text(
-            text = article.description,
-            color = TextSecondary,
-            fontSize = 14.sp,
-            lineHeight = 20.sp,
-            maxLines = 4,
-            overflow = TextOverflow.Ellipsis
-        )
-
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(Modifier.height(12.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(width = 40.dp, height = 3.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(accent)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                // Without a hint, tap-to-flip is invisible.
-                Text(
-                    text = "TAP FOR SUMMARY",
-                    color = TextMuted,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold
-                )
+            // Without a hint, tap-to-flip is invisible.
+            Text("Tap for key points", fontFamily = PaperSans, fontSize = 12.sp, color = c.muted)
+            if (position != null) {
+                Text(position, fontFamily = PaperSans, fontSize = 12.sp, color = c.muted)
             }
-
-            Text(
-                text = "READ FULL STORY →",
-                color = accent,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold
-            )
         }
     }
 }

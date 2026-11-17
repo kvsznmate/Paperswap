@@ -104,7 +104,7 @@ python main.py --cli      # sync once, print a per-topic summary, exit
 
 | URL | What you get |
 | --- | --- |
-| `/mobile` | Touch swipe UI with the deck and weekly-summary tabs. Open it on a phone. `/summaries` deep-links to the second tab |
+| `/mobile` | Touch swipe UI in the Paper design: the deck, the week and Saved. Open it on a phone. `/summaries` deep-links to the week |
 | `/` | Card gallery dashboard |
 | `/analytics` | Telemetry dashboard. It is gated: sign in with `ADMIN_API_KEY` |
 | `/docs` | OpenAPI. Protected routes show a padlock. Off when `API_DOCS_ENABLED=false` |

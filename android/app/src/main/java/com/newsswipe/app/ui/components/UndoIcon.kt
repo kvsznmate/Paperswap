@@ -8,9 +8,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
  * Material "Undo" (filled), copied from androidx material-icons-extended 1.6.1
  * (Apache-2.0).
  *
- * It is the only icon the app needs that is not in material-icons-core, and
- * depending on the extended artifact for it pulled several thousand icon
- * classes into the APK. Close and Favorite still come from the core set.
+ * Not in material-icons-core, and depending on the extended artifact for it pulled several thousand icon
+ * classes into the APK. The other line icons are in PaperIcons.kt.
  */
 val UndoIcon: ImageVector by lazy {
     materialIcon(name = "Filled.Undo") {

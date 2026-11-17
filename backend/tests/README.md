@@ -17,6 +17,7 @@ docker compose exec news-cards-backend python tests/test_topic_summaries.py
 docker compose exec news-cards-backend python tests/test_stories.py
 docker compose exec news-cards-backend python tests/test_public_limits.py
 docker compose exec news-cards-backend python tests/test_load_shedding.py
+docker compose exec news-cards-backend python tests/test_paper_feed.py
 ```
 
 Or all of them:
@@ -38,6 +39,7 @@ docker compose exec news-cards-backend sh -c 'for t in tests/test_*.py; do echo 
 | `test_load_shedding.py` | yes | The global request ceiling returns 503 + Retry-After past its limit, sheds before routing and logging, and lets admin requests through without spending it; `API_DOCS_ENABLED=false` removes the docs; every `UVICORN_*` variable in the Dockerfile and compose file is a real uvicorn option |
 | `test_topic_summaries.py` | yes | Week arithmetic and the half-open UTC window; boilerplate descriptions never reach the generator; `number_of_articles` describes what was read and `articles_in_window` what was seen; no placeholder row on failure; the summariser runs before the purge and its output outlives the articles |
 | `test_stories.py` | yes (section 7 only) | `stories:v2`: paraphrases with no shared words group by embedding, near-miss stories stay apart, average linkage does not chain, distinct outlets outrank size, each line is the first bullet of the most central enriched article (headline otherwise), every article lands in exactly one story, a failed or truncated Anthropic call falls back to `stories:v2`, and the week query (which carries BYTEA) never reaches a route |
+| `test_paper_feed.py` | yes | The feed fields behind the Paper cards (ADR-013): BBC 240 px thumbnails served at 976 px, stock filler flagged `image_is_stock`, `description_source` passed through as stored and a NULL never backfilled, and no embedding in the payload |
 
 ## Notes
 

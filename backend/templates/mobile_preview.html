@@ -2,1114 +2,903 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>PaperSwap - MVP</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <title>PaperSwap</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- Noto Serif is what Android's FontFamily.Serif renders, so the web preview
+         and the app set headlines in the same face. -->
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif:wght@400;700&family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
     <style>
+        /* The Paper palette (#13, ADR-013). Same roles and values as the Android
+           theme (ui/theme/Color.kt); night follows the device's dark mode. */
         :root {
-            --bg-dark: #090c15;
-            --card-bg: #121824;
-            --accent-green: #10b981;
-            --accent-red: #ef4444;
-            --accent-blue: #6366f1;
-            --accent-amber: #f59e0b;
-            --text-main: #f8fafc;
-            --text-sub: #94a3b8;
+            --ground: #F4EFE4; --card: #FFFDF8; --rule: #D9D1C0;
+            --ink: #1C1A16; --ink2: #47433B; --muted: #6B655A;
+            --photo: #E6DDCC; --on-ink: #FFFDF8;
+            --scrim: rgba(28, 26, 22, 0.45);
+            --serif: 'Noto Serif', Georgia, serif;
+            --sans: Roboto, system-ui, sans-serif;
         }
-
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-            user-select: none;
-            -webkit-user-select: none;
-            -webkit-touch-callout: none;
-        }
-
-        body {
-            font-family: 'Plus Jakarta Sans', sans-serif;
-            background-color: var(--bg-dark);
-            color: var(--text-main);
-            height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            overflow: hidden;
-            background-image: radial-gradient(circle at 50% 10%, rgba(99, 102, 241, 0.15), transparent 60%);
-        }
-
-        .app-shell {
-            width: 100%;
-            max-width: 440px;
-            height: 100vh;
-            max-height: 900px;
-            display: flex;
-            flex-direction: column;
-            position: relative;
-            background: #0d121d;
-            box-shadow: 0 25px 60px rgba(0, 0, 0, 0.8);
-            overflow: hidden;
-        }
-
-        @media (min-width: 480px) {
-            .app-shell {
-                height: 92vh;
-                border-radius: 40px;
-                border: 4px solid #1e2638;
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --ground: #14120E; --card: #1E1B16; --rule: #3A352C;
+                --ink: #EDE6D6; --ink2: #C9C1AF; --muted: #A39B89;
+                --photo: #2E2A22; --on-ink: #14120E;
+                --scrim: rgba(0, 0, 0, 0.6);
             }
         }
 
-        .app-header {
-            padding: 18px 24px 10px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            z-index: 20;
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body { height: 100%; }
+        body {
+            background: var(--ground);
+            color: var(--ink);
+            font-family: var(--sans);
+            -webkit-font-smoothing: antialiased;
         }
-
-        .brand-logo {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 20px;
-            font-weight: 800;
-            letter-spacing: -0.5px;
-            background: linear-gradient(135deg, #ffffff, #818cf8);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+        button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+        button:focus-visible, [tabindex]:focus-visible {
+            outline: 2px solid var(--ink); outline-offset: 2px;
         }
+        .topic-row:has(input:focus-visible) { outline: 2px solid var(--ink); outline-offset: -2px; }
 
-        .queue-counter {
-            font-size: 13px;
-            font-weight: 600;
-            color: var(--text-sub);
-            background: rgba(30, 41, 59, 0.6);
-            padding: 6px 14px;
-            border-radius: 20px;
-            border: 1px solid rgba(255, 255, 255, 0.08);
-        }
-
-        .deck-container {
-            flex: 1;
+        /* One phone-width column. On a wide screen it sits centred between rules. */
+        .app {
             position: relative;
-            margin: 10px 16px 15px;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-        }
-
-        .swipe-card {
-            position: absolute;
-            width: 100%;
-            height: 100%;
-            border-radius: 28px;
-            overflow: hidden;
-            background: var(--card-bg);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.5);
-            cursor: grab;
-            touch-action: none;
-            will-change: transform;
-            transition: transform 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-            display: flex;
-            flex-direction: column;
-        }
-
-        .swipe-card:active { cursor: grabbing; }
-
-        /* ---- Card rendered from article fields (no server PNG) ---- */
-        .card-media {
-            position: relative;
-            flex: 0 0 56%;
-            background: linear-gradient(150deg, #1b2333, #2a3450);
+            max-width: 440px;
+            height: 100vh; height: 100dvh;
+            margin: 0 auto;
+            display: flex; flex-direction: column;
+            background: var(--ground);
             overflow: hidden;
         }
-        .card-media img {
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-            pointer-events: none;
-            display: block;
+        @media (min-width: 520px) {
+            .app { border-left: 1px solid var(--rule); border-right: 1px solid var(--rule); }
         }
-        .card-media::after {
-            content: "";
-            position: absolute;
-            inset: 0;
-            background: linear-gradient(180deg, rgba(9,12,21,0) 45%, rgba(9,12,21,0.55) 100%);
-        }
-        .cat-chip {
-            position: absolute;
-            top: 16px;
-            left: 16px;
-            z-index: 2;
-            font-size: 11px;
-            font-weight: 800;
-            letter-spacing: 1.5px;
-            text-transform: uppercase;
-            padding: 6px 12px;
-            border-radius: 999px;
-            color: #0b0f18;
-        }
-        /* Chip colour comes from the API (accent_color per topic) so the palette
-           lives in one place on the backend instead of drifting per client. */
-
-        /* ---- Topic filter bar ---- */
-        .topic-bar {
-            display: flex;
-            gap: 8px;
-            padding: 4px 16px 8px;
-            overflow-x: auto;
-            scrollbar-width: none;
-            -ms-overflow-style: none;
-            flex: 0 0 auto;
-            z-index: 20;
-        }
-        .topic-bar::-webkit-scrollbar { display: none; }
-
-        .topic-pill {
-            flex: 0 0 auto;
-            font-size: 12px;
-            font-weight: 700;
-            letter-spacing: 0.3px;
-            padding: 7px 14px;
-            border-radius: 999px;
-            cursor: pointer;
-            white-space: nowrap;
-            color: var(--text-sub);
-            background: rgba(30, 41, 59, 0.55);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            transition: all 0.18s ease;
-        }
-        .topic-pill:active { transform: scale(0.94); }
-        .topic-pill.active {
-            color: #0b0f18;
-            border-color: transparent;
-            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
-        }
-        .topic-pill .pill-count {
-            opacity: 0.65;
-            font-weight: 600;
-            margin-left: 4px;
-        }
-
-        .card-content {
-            flex: 1;
-            padding: 20px 22px 18px;
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-            background: linear-gradient(180deg, #141b29 0%, var(--card-bg) 60%);
-        }
-        .card-title {
-            font-size: 22px;
-            line-height: 1.22;
-            font-weight: 800;
-            letter-spacing: -0.4px;
-            color: var(--text-main);
-            display: -webkit-box;
-            -webkit-line-clamp: 3;
-            -webkit-box-orient: vertical;
-            overflow: hidden;
-        }
-        .card-desc {
-            font-size: 14.5px;
-            line-height: 1.5;
-            color: var(--text-sub);
-            display: -webkit-box;
-            -webkit-line-clamp: 4;
-            -webkit-box-orient: vertical;
-            overflow: hidden;
-        }
-        .card-meta {
-            margin-top: auto;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 10px;
-            font-size: 12px;
-            color: #6b7688;
-            border-top: 1px solid rgba(255,255,255,0.07);
-            padding-top: 12px;
-        }
-        .card-meta .src {
-            font-weight: 700;
-            color: #aeb7c7;
-            max-width: 55%;
-            overflow: hidden;
-            white-space: nowrap;
-            text-overflow: ellipsis;
-        }
-
-        .swipe-badge {
-            position: absolute;
-            top: 40px;
-            font-size: 28px;
-            font-weight: 800;
-            padding: 8px 24px;
-            border-radius: 12px;
-            text-transform: uppercase;
-            letter-spacing: 2px;
-            opacity: 0;
-            transition: opacity 0.15s ease;
-            z-index: 30;
-            pointer-events: none;
-        }
-        .badge-read {
-            right: 30px;
-            color: var(--accent-green);
-            border: 4px solid var(--accent-green);
-            transform: rotate(15deg);
-        }
-        .badge-pass {
-            left: 30px;
-            color: var(--accent-red);
-            border: 4px solid var(--accent-red);
-            transform: rotate(-15deg);
-        }
-
-        .app-actions {
-            padding: 10px 30px 25px;
-            display: flex;
-            justify-content: space-around;
-            align-items: center;
-            z-index: 20;
-        }
-        .action-btn {
-            width: 62px;
-            height: 62px;
-            border-radius: 50%;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            background: rgba(22, 30, 46, 0.8);
-            backdrop-filter: blur(10px);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 26px;
-            cursor: pointer;
-            transition: all 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3);
-        }
-        .action-btn:active { transform: scale(0.88); }
-        .btn-pass { color: var(--accent-red); border-color: rgba(239, 68, 68, 0.3); }
-        .btn-pass:hover { background: rgba(239, 68, 68, 0.15); box-shadow: 0 0 20px rgba(239, 68, 68, 0.4); }
-        .btn-read {
-            width: 72px;
-            height: 72px;
-            font-size: 30px;
-            color: var(--accent-green);
-            border-color: rgba(16, 185, 129, 0.4);
-            background: rgba(16, 185, 129, 0.15);
-        }
-        .btn-read:hover { background: rgba(16, 185, 129, 0.3); box-shadow: 0 0 25px rgba(16, 185, 129, 0.5); }
-        .btn-undo { color: var(--accent-amber); border-color: rgba(245, 158, 11, 0.3); font-size: 22px; }
-
-        .empty-state {
-            display: none;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            text-align: center;
-            padding: 40px 20px;
-            height: 100%;
-        }
-        .empty-state h3 { font-size: 22px; margin: 15px 0 10px; }
-        .empty-state p { font-size: 14px; color: var(--text-sub); margin-bottom: 25px; }
-        .btn-reload {
-            background: linear-gradient(135deg, var(--accent-blue), #4f46e5);
-            color: #fff;
-            padding: 12px 28px;
-            border-radius: 14px;
-            font-weight: 700;
-            border: none;
-            cursor: pointer;
-            font-size: 15px;
-            box-shadow: 0 8px 20px rgba(99, 102, 241, 0.4);
-        }
-        /* ---- Top navigation ---- */
-        .main-nav {
-            display: flex;
-            gap: 5px;
-            padding: 4px;
-            margin: 0 20px 10px;
-            background: rgba(30, 41, 59, 0.5);
-            border: 1px solid rgba(255, 255, 255, 0.07);
-            border-radius: 14px;
-            flex: 0 0 auto;
-            z-index: 20;
-        }
-        .nav-tab {
-            flex: 1;
-            font-family: inherit;
-            font-size: 13px;
-            font-weight: 700;
-            letter-spacing: 0.2px;
-            padding: 9px 0;
-            border: none;
-            border-radius: 10px;
-            background: transparent;
-            color: var(--text-sub);
-            cursor: pointer;
-            transition: background 0.18s ease, color 0.18s ease;
-        }
-        .nav-tab:active { transform: scale(0.97); }
-        .nav-tab.active {
-            background: linear-gradient(135deg, var(--accent-blue), #4f46e5);
-            color: #fff;
-            box-shadow: 0 4px 14px rgba(99, 102, 241, 0.35);
-        }
-
-        /* Each view owns the remaining height and scrolls internally, so the
-           header and nav never move. [hidden] needs an explicit rule because
-           display:flex below would otherwise beat the attribute's default. */
-        .view {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            min-height: 0;
-        }
+        .view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
         .view[hidden] { display: none; }
 
-        /* ---- Summaries: topic chooser ---- */
-        .topic-circles {
-            display: flex;
-            flex-wrap: wrap;
-            justify-content: center;
-            gap: 14px 10px;
-            padding: 4px 16px 14px;
-            flex: 0 0 auto;
+        /* ---- Masthead: serif title, small caps line, double rule ---- */
+        .mast { padding: 16px 20px 0; }
+        .mast-row { display: flex; align-items: flex-end; gap: 12px; padding-bottom: 10px; }
+        .mast-titles { flex: 1; min-width: 0; }
+        .mast h1 { font-family: var(--serif); font-size: 26px; line-height: 1.15; font-weight: 700; letter-spacing: -0.01em; }
+        .mast .sub { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+        .rule2 { border-top: 2px solid var(--ink); border-bottom: 1px solid var(--ink); height: 5px; }
+        .ctl {
+            display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+            min-height: 44px; min-width: 44px; padding: 0 14px;
+            border: 1px solid var(--rule); border-radius: 6px; background: var(--card);
+            font-size: 13px; font-weight: 500;
         }
-        .topic-circle {
-            width: 66px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 6px;
-            padding: 0;
-            border: none;
-            background: none;
-            font-family: inherit;
-            cursor: pointer;
-        }
-        .circle-dot {
-            width: 52px;
-            height: 52px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 15px;
-            font-weight: 800;
-            letter-spacing: 0.5px;
-            transition: transform 0.18s cubic-bezier(0.175, 0.885, 0.32, 1.275),
-                        opacity 0.18s ease, box-shadow 0.18s ease;
-        }
-        .topic-circle:active .circle-dot { transform: scale(0.9); }
-        .circle-label {
-            font-size: 10.5px;
-            font-weight: 600;
-            line-height: 1.25;
-            text-align: center;
-            color: var(--text-sub);
-            transition: color 0.18s ease;
-        }
-        .topic-circle.selected .circle-dot { transform: scale(1.07); }
-        .topic-circle.selected .circle-label { color: var(--text-main); }
-        /* Dim the unpicked ones only once something IS picked, so the default
-           state reads as an even choice rather than as six disabled buttons. */
-        .topic-circles.has-selection .topic-circle:not(.selected) .circle-dot { opacity: 0.34; }
+        .ctl:disabled { color: var(--rule); cursor: default; }
+        .ctl svg { width: 16px; height: 16px; }
 
-        /* ---- Summaries: detail panel ---- */
-        .summary-panel {
-            flex: 1;
-            min-height: 0;
-            overflow-y: auto;
-            -webkit-overflow-scrolling: touch;
-            padding: 0 22px 30px;
+        /* ---- Deck ---- */
+        .deck { position: relative; flex: 1; min-height: 0; margin: 18px 16px 10px; }
+        .card {
+            position: absolute; inset: 0;
+            touch-action: none;
+            /* A mouse drag on a photo would otherwise start the browser's own image
+               drag and cancel the swipe after a few pixels. */
+            user-select: none; -webkit-user-select: none;
+            transition: transform 0.25s ease;
         }
-        .summary-topic {
-            font-size: 25px;
-            font-weight: 800;
-            letter-spacing: -0.6px;
-            line-height: 1.15;
+        .card.behind { transform: translateY(10px) scale(0.96); pointer-events: none; }
+        .card.dragging { transition: none; }
+        .inner { position: absolute; inset: 0; z-index: 1; transform: perspective(1400px) rotateY(0deg); transition: transform 0.42s cubic-bezier(.2,.7,.2,1); transform-style: preserve-3d; }
+        /* Perspective lives on the flipping layer, not the card: on the card it made the
+           browser sort the stamps by depth and draw the text over them. */
+        .card.flipped .inner { transform: perspective(1400px) rotateY(180deg); }
+        .face {
+            position: absolute; inset: 0;
+            display: flex; flex-direction: column;
+            padding: 20px;
+            background: var(--card); border: 1px solid var(--rule); border-radius: 6px;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+            backface-visibility: hidden; -webkit-backface-visibility: hidden;
+            overflow: hidden;
         }
-        .summary-dates {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-top: 5px;
-            font-size: 12px;
-            font-weight: 600;
-            color: var(--text-sub);
+        .face.back { transform: rotateY(180deg); }
+        .body { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; }
+        .kicker { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .kicker b { font-weight: 700; }
+        .headline {
+            font-family: var(--serif); font-weight: 700; font-size: 25px; line-height: 1.2; letter-spacing: -0.01em;
+            display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden;
         }
-        .week-step {
-            width: 22px;
-            height: 22px;
-            flex: 0 0 auto;
-            border-radius: 50%;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            background: rgba(30, 41, 59, 0.65);
-            color: var(--text-sub);
-            font-size: 12px;
-            line-height: 1;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
+        .headline.big { font-size: 30px; -webkit-line-clamp: 7; }
+        .photo { flex: 0 1 auto; min-height: 0; aspect-ratio: 3 / 2; border-radius: 3px; overflow: hidden; background: var(--photo); }
+        .photo img { width: 100%; height: 100%; object-fit: cover; display: block; pointer-events: none; -webkit-user-drag: none; }
+        .blurb {
+            font-family: var(--serif); font-size: 15px; line-height: 1.5; color: var(--ink2);
+            display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
         }
-        .week-step:disabled { opacity: 0.22; cursor: default; }
-        .summary-text {
-            margin-top: 17px;
-            font-size: 15px;
-            line-height: 1.62;
-            color: #dbe2ec;
-            /* stories:v2 writes one story per line. */
-            white-space: pre-line;
-            user-select: text;
-            -webkit-user-select: text;
+        .blurb.long { -webkit-line-clamp: 8; }
+        .foot { display: flex; justify-content: space-between; gap: 12px; padding-top: 12px; font-size: 12px; color: var(--muted); }
+        .back h3 { font-family: var(--serif); font-weight: 700; font-size: 20px; line-height: 1.3; margin: 12px 0 14px;
+            display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+        .label { border-top: 1px solid var(--rule); padding-top: 12px; margin-bottom: 12px; font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+        .points { list-style: none; display: flex; flex-direction: column; gap: 12px; }
+        .points li { display: flex; gap: 12px; font-family: var(--serif); font-size: 16px; line-height: 1.5; }
+        .points li::before { content: ""; flex: none; width: 6px; height: 6px; margin-top: 9px; background: var(--k); }
+        .note { font-size: 13px; line-height: 1.5; color: var(--muted); margin-top: 8px; }
+        /* On the side the card moves AWAY from, so a stamp never leaves the screen with it. */
+        .stamp {
+            position: absolute; top: 40px; z-index: 2; opacity: 0; pointer-events: none;
+            padding: 4px 16px; border: 2.5px solid; border-radius: 4px; background: var(--card);
+            font-size: 22px; font-weight: 800; letter-spacing: 0.08em;
         }
-        .stat {
-            margin-top: 18px;
-            padding-top: 15px;
-            border-top: 1px solid rgba(255, 255, 255, 0.07);
+        .stamp.read { left: 28px; color: var(--ink); transform: rotate(-12deg); }
+        .stamp.pass { right: 28px; color: var(--muted); transform: rotate(12deg); }
+        .deck-msg { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; gap: 12px; padding: 0 12px; }
+        .deck-msg h2 { font-family: var(--serif); font-size: 26px; line-height: 1.25; }
+        .deck-msg p { font-size: 14px; line-height: 1.5; color: var(--muted); }
+        .deck-msg[hidden] { display: none; }
+
+        .notice { padding: 0 20px 4px; font-size: 12px; color: var(--muted); }
+        .notice:empty { display: none; }
+        .actions { display: flex; align-items: center; gap: 10px; padding: 4px 16px 12px; }
+        .btn { height: 52px; border-radius: 6px; font-size: 16px; font-weight: 700; }
+        .btn.icon { flex: none; width: 48px; display: grid; place-items: center; border: 1px solid var(--rule); color: var(--muted); }
+        .btn.icon svg { width: 20px; height: 20px; }
+        .btn.icon.save { color: var(--ink); }
+        .btn.icon.save[aria-pressed="true"] svg path { fill: currentColor; }
+        .btn.pass { flex: 1; border: 1.5px solid var(--ink); }
+        .btn.read { flex: 1; background: var(--ink); color: var(--on-ink); }
+        .btn:disabled { opacity: 0.45; cursor: default; }
+        .btn.outline { padding: 0 20px; border: 1.5px solid var(--ink); align-self: flex-start; height: 48px; font-size: 15px; }
+        .btn.solid { padding: 0 20px; background: var(--ink); color: var(--on-ink); align-self: flex-start; height: 48px; font-size: 15px; }
+
+        /* ---- Bottom navigation ---- */
+        .nav { display: flex; border-top: 1px solid var(--rule); background: var(--ground); padding-bottom: env(safe-area-inset-bottom); }
+        .nav button { flex: 1; min-height: 60px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; font-size: 12px; color: var(--muted); }
+        .nav button svg { width: 22px; height: 22px; }
+        .nav button[aria-selected="true"] { color: var(--ink); font-weight: 700; }
+        .nav button[aria-selected="true"] span { text-decoration: underline; text-underline-offset: 3px; }
+
+        /* ---- The week ---- */
+        .scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 20px 20px; }
+        .stepper { display: flex; align-items: center; gap: 2px; }
+        .stepper .range { min-width: 78px; text-align: center; font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }
+        .stepper .ctl { padding: 0; width: 44px; font-size: 20px; }
+        .sec { padding: 16px 0 14px; border-bottom: 1px solid var(--rule); }
+        .sec-h { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+        .sec-h h2 { font-size: 12px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--k); }
+        .sec-h span { font-size: 12px; color: var(--muted); }
+        .story { display: flex; gap: 10px; margin-bottom: 10px; }
+        .story::before { content: ""; flex: none; width: 5px; height: 5px; margin-top: 10px; background: var(--k); }
+        .story p { font-family: var(--serif); font-size: 16px; line-height: 1.45; }
+        .story small { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
+        .prose { font-family: var(--serif); font-size: 16px; line-height: 1.5; margin-bottom: 8px; white-space: pre-line; }
+        .prov { font-size: 11px; line-height: 1.5; color: var(--muted); }
+        .missing { font-size: 13px; line-height: 1.5; color: var(--muted); }
+        .center { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 10px; padding: 24px; }
+        .center h2 { font-family: var(--serif); font-size: 22px; line-height: 1.3; }
+        .center p { font-size: 14px; line-height: 1.5; color: var(--muted); }
+        .fine { font-size: 12px; line-height: 1.5; color: var(--muted); padding-top: 14px; }
+
+        /* ---- Saved ---- */
+        .saved-row { display: flex; gap: 12px; align-items: flex-start; padding: 16px 0; border-bottom: 1px solid var(--rule); }
+        .saved-row a { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; color: inherit; text-decoration: none; }
+        .saved-row a strong { font-family: var(--serif); font-size: 18px; line-height: 1.3; }
+        .saved-row .when { font-size: 12px; color: var(--muted); }
+        .saved-row .ctl { padding: 0; color: var(--muted); }
+
+        /* ---- Topic sheet ---- */
+        .backdrop { position: absolute; inset: 0; z-index: 20; background: var(--scrim); display: flex; flex-direction: column; justify-content: flex-end; }
+        .backdrop[hidden] { display: none; }
+        .sheet { background: var(--card); border-radius: 12px 12px 0 0; padding: 20px 20px calc(16px + env(safe-area-inset-bottom)); max-height: 85%; overflow-y: auto; }
+        .sheet h2 { font-family: var(--serif); font-size: 22px; }
+        .sheet .sub { font-size: 13px; color: var(--muted); margin: 4px 0 10px; }
+        .topic-row { display: flex; align-items: center; gap: 12px; min-height: 48px; border-bottom: 1px solid var(--rule); font-size: 15px; cursor: pointer; }
+        .topic-row .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--k); flex: none; }
+        .topic-row span:nth-child(2) { flex: 1; }
+        .topic-row input { width: 20px; height: 20px; accent-color: var(--ink); }
+        .sheet .solid { width: 100%; margin-top: 14px; height: 50px; }
+
+        .toast {
+            position: absolute; left: 16px; right: 16px; bottom: 140px; z-index: 30;
+            padding: 10px 12px; border-radius: 6px; background: var(--ink); color: var(--ground);
+            font-size: 13px; opacity: 0; transform: translateY(6px); transition: opacity 0.2s, transform 0.2s; pointer-events: none;
         }
-        .stat-label {
-            font-size: 10px;
-            font-weight: 800;
-            letter-spacing: 1.5px;
-            text-transform: uppercase;
-            color: #6b7688;
+        .toast.on { opacity: 1; transform: none; }
+
+        @media (prefers-reduced-motion: reduce) {
+            .card, .inner, .toast { transition: none !important; }
         }
-        .stat-value { font-size: 16px; font-weight: 700; margin-top: 6px; }
-        .stat-sub { font-size: 12px; color: var(--text-sub); margin-top: 4px; line-height: 1.45; }
-        .chips { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
-        .chip {
-            font-size: 11.5px;
-            font-weight: 600;
-            padding: 5px 11px;
-            border-radius: 999px;
-            background: rgba(30, 41, 59, 0.7);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            color: #aeb7c7;
-        }
-        .summary-foot {
-            margin-top: 22px;
-            font-size: 10.5px;
-            line-height: 1.55;
-            color: #5a6474;
-        }
-        .summary-prompt,
-        .summary-empty {
-            text-align: center;
-            padding: 34px 14px;
-            font-size: 13.5px;
-            line-height: 1.6;
-            color: var(--text-sub);
-        }
-        .summary-empty strong { color: var(--text-main); font-weight: 700; display: block; margin-bottom: 8px; }
     </style>
 </head>
 <body>
+<div class="app" id="app">
 
-    <div class="app-shell">
-        <header class="app-header">
-            <div class="brand-logo">
-                <svg width="24" height="24" viewBox="0 0 108 108" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <rect width="108" height="108" rx="28" fill="url(#mob-logo-grad)"/>
-                    <path d="M54 20L24 65h24l-6 23 36-45h-24z" fill="#FFFFFF"/>
-                    <defs>
-                        <linearGradient id="mob-logo-grad" x1="0" y1="0" x2="108" y2="108" gradientUnits="userSpaceOnUse">
-                            <stop stop-color="#818CF8"/>
-                            <stop offset="1" stop-color="#6366F1"/>
-                        </linearGradient>
-                    </defs>
-                </svg> PaperSwap
+    <!-- ================= DECK ================= -->
+    <section class="view" id="view-deck" aria-label="Deck">
+        <header class="mast">
+            <div class="mast-row">
+                <div class="mast-titles">
+                    <h1>PaperSwap</h1>
+                    <div class="sub" id="today"></div>
+                </div>
+                <button class="ctl" id="topics-btn" onclick="openSheet()" aria-haspopup="dialog">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>
+                    <span id="topics-label">All topics</span>
+                </button>
             </div>
-            <div class="queue-counter" id="queue-counter">Card 1 / 50</div>
+            <div class="rule2"></div>
         </header>
 
-        <nav class="main-nav">
-            <button class="nav-tab active" id="tab-cards" onclick="switchView('cards')">Cards</button>
-            <button class="nav-tab" id="tab-summaries" onclick="switchView('summaries')">Weekly Summaries</button>
-        </nav>
+        <div class="deck" id="deck">
+            <div class="deck-msg" id="deck-msg" hidden></div>
+        </div>
+        <div class="notice" id="notice" role="status"></div>
+        <div class="actions">
+            <button class="btn icon" id="undo-btn" onclick="undoSwipe()" aria-label="Undo the last card" disabled>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg>
+            </button>
+            <button class="btn pass" onclick="triggerSwipe('left')">Pass</button>
+            <button class="btn read" onclick="triggerSwipe('right')">Read &rarr;</button>
+            <button class="btn icon save" id="save-btn" onclick="toggleSave()" aria-label="Save for later" aria-pressed="false">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h12v18l-6-4-6 4z"/></svg>
+            </button>
+        </div>
+    </section>
 
-        <div class="view" id="view-cards">
-            <div class="topic-bar" id="topic-bar"></div>
-
-            <div class="deck-container" id="deck-container">
-                <div class="empty-state" id="empty-state">
-                    <h3>All caught up!</h3>
-                    <p id="empty-message">You've swiped every headline in this mix. Pull a fresh batch or switch topics to keep going.</p>
-                    <button class="btn-reload" onclick="reloadFeed()">Reload Feed</button>
+    <!-- ================= THE WEEK ================= -->
+    <section class="view" id="view-week" aria-label="The week" hidden>
+        <header class="mast">
+            <div class="mast-row">
+                <div class="mast-titles">
+                    <h1>The week</h1>
+                    <div class="sub">Most covered first</div>
+                </div>
+                <div class="stepper">
+                    <button class="ctl" id="week-prev" onclick="stepWeek(-1)" aria-label="Previous week" disabled>&lsaquo;</button>
+                    <span class="range" id="week-range"></span>
+                    <button class="ctl" id="week-next" onclick="stepWeek(1)" aria-label="Next week" disabled>&rsaquo;</button>
                 </div>
             </div>
+            <div class="rule2"></div>
+        </header>
+        <div class="scroll" id="week-body"></div>
+    </section>
 
-            <footer class="app-actions">
-                <button class="action-btn btn-undo" title="Undo last swipe" onclick="undoSwipe()">↩</button>
-                <button class="action-btn btn-pass" title="Pass / Skip" onclick="triggerSwipe('left')">✖</button>
-                <button class="action-btn btn-read" title="Read Article" onclick="triggerSwipe('right')">💚</button>
-            </footer>
-        </div>
-
-        <div class="view" id="view-summaries" hidden>
-            <div class="topic-circles" id="topic-circles"></div>
-            <div class="summary-panel" id="summary-panel">
-                <div class="summary-prompt">Pick a topic above to read its week.</div>
+    <!-- ================= SAVED ================= -->
+    <section class="view" id="view-saved" aria-label="Saved" hidden>
+        <header class="mast">
+            <div class="mast-row">
+                <div class="mast-titles">
+                    <h1>Saved</h1>
+                    <div class="sub" id="saved-sub"></div>
+                </div>
             </div>
+            <div class="rule2"></div>
+        </header>
+        <div class="scroll" id="saved-body"></div>
+    </section>
+
+    <nav class="nav" role="tablist" aria-label="Sections">
+        <button role="tab" id="tab-deck" aria-selected="true" onclick="switchView('deck')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6"/></svg>
+            <span>Deck</span>
+        </button>
+        <button role="tab" id="tab-week" aria-selected="false" onclick="switchView('week')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h13v16H6a2 2 0 0 1-2-2z"/><path d="M17 8h3v10a2 2 0 0 1-2 2"/><path d="M8 8h5M8 12h5M8 16h3"/></svg>
+            <span>This week</span>
+        </button>
+        <button role="tab" id="tab-saved" aria-selected="false" onclick="switchView('saved')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h12v18l-6-4-6 4z"/></svg>
+            <span id="tab-saved-label">Saved</span>
+        </button>
+    </nav>
+
+    <div class="backdrop" id="sheet" hidden onclick="if (event.target === this) closeSheet()">
+        <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+            <h2 id="sheet-title">Show these topics</h2>
+            <p class="sub">Kept in this browser. The deck reloads with your choice.</p>
+            <div id="sheet-rows"></div>
+            <button class="btn solid" id="sheet-apply" onclick="applySheet()">Show all topics</button>
         </div>
     </div>
 
-    <script>
-        let articlesQueue = [];
-        let currentIndex = 0;
-        let historyStack = [];
-        let activeCardEl = null;
-        // Guards completeSwipe against re-entry, so one gesture can never advance
-        // the deck twice or open two tabs.
-        let isSwiping = false;
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</div>
 
-        // Topic filtering state. Empty selectedTopics = show every topic.
-        let availableTopics = [];
-        let selectedTopics = [];
+<script>
+    /* Everything from the server goes through escapeHtml before innerHTML
+       (CLAUDE.md invariant 11): titles, sources and paths are attacker-
+       influenced. Colours are validated as #rrggbb before reaching a style. */
+    function escapeHtml(str) {
+        const d = document.createElement('div');
+        d.textContent = str == null ? '' : String(str);
+        return d.innerHTML;
+    }
 
-        let startX = 0, startY = 0;
-        let currentX = 0, currentY = 0;
-        let isDragging = false;
+    function store(key, fallback) {
+        try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
+        catch (e) { return fallback; }
+    }
+    function persist(key, value) {
+        try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
+    }
 
-        function escapeHtml(str) {
-            const d = document.createElement('div');
-            d.textContent = str == null ? '' : str;
-            return d.innerHTML;
+    /* ---------- Colour: server accents made readable (ADR-006, ADR-013) ---------- */
+    const DARK = window.matchMedia('(prefers-color-scheme: dark)');
+    function hexToRgb(hex) {
+        const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '').trim());
+        if (!m) return [99, 102, 241];
+        const n = parseInt(m[1], 16);
+        return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    }
+    function luminance([r, g, b]) {
+        const f = c => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+        return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+    }
+    function ratio(a, b) {
+        const la = luminance(a), lb = luminance(b);
+        return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+    }
+    /* The same rule as readableOn() in the app: move toward black on paper, or
+       white at night, in 5% steps until the accent reaches 4.5:1 on the card. */
+    function readable(hex) {
+        const bg = DARK.matches ? [30, 27, 22] : [255, 253, 248];
+        const target = DARK.matches ? [255, 255, 255] : [0, 0, 0];
+        const base = hexToRgb(hex);
+        let c = base;
+        for (let i = 1; i <= 20 && ratio(c, bg) < 4.5; i++) {
+            c = base.map((v, k) => Math.round(v + (target[k] - v) * 0.05 * i));
         }
+        return 'rgb(' + c.join(',') + ')';
+    }
 
-        // Pick readable text for a topic accent colour (BT.601 perceived luminance),
-        // so amber and indigo chips are both legible without a hand-tuned map.
-        function contrastText(hex) {
-            const h = String(hex || '').replace('#', '');
-            if (h.length !== 6) return '#0b0f18';
-            const r = parseInt(h.slice(0, 2), 16);
-            const g = parseInt(h.slice(2, 4), 16);
-            const b = parseInt(h.slice(4, 6), 16);
-            return ((r * 299 + g * 587 + b * 114) / 1000) > 150 ? '#0b0f18' : '#ffffff';
-        }
+    const CANNED = ['keyword_template', 'topic_fallback'];
+    const showsPhoto = a => !!a.image_url && a.image_is_stock !== true;
+    const showsBlurb = a => !!a.description && !CANNED.includes(a.description_source);
+    const shortTime = s => String(s || '').replace(/,\s*\d{4}/, '');
 
-        async function loadTopics() {
-            try {
-                const response = await fetch('/api/v1/categories');
-                const data = await response.json();
-                availableTopics = data.categories || [];
-                renderTopicBar();
-            } catch (err) {
-                console.error("Failed to load topics:", err);
-            }
-        }
+    /* ================= DECK ================= */
+    let catalogue = [];
+    let selectedTopics = store('paperswap_topics', []);
+    let articlesQueue = [];
+    let currentIndex = 0;
+    let historyStack = [];
+    let isSwiping = false;
+    let flippedCurrent = false;
 
-        function renderTopicBar() {
-            const bar = document.getElementById('topic-bar');
-            const showingAll = selectedTopics.length === 0;
+    async function loadCatalogue() {
+        if (catalogue.length) return catalogue;
+        try {
+            const res = await fetch('/api/v1/categories');
+            catalogue = (await res.json()).categories || [];
+        } catch (e) { console.error('Failed to load topics:', e); }
+        return catalogue;
+    }
 
-            let html = `<div class="topic-pill ${showingAll ? 'active' : ''}"
-                             style="${showingAll ? 'background:#e2e8f0' : ''}"
-                             onclick="clearTopics()">All</div>`;
-
-            availableTopics.forEach(topic => {
-                const isOn = selectedTopics.includes(topic.slug);
-                const style = isOn
-                    ? `background:${topic.accent_color};color:${contrastText(topic.accent_color)}`
-                    : '';
-                html += `<div class="topic-pill ${isOn ? 'active' : ''}" style="${style}"
-                              onclick="toggleTopic('${topic.slug}')">
-                            ${escapeHtml(topic.label)}
-                            <span class="pill-count">${topic.article_count}</span>
-                         </div>`;
-            });
-
-            bar.innerHTML = html;
-        }
-
-        function toggleTopic(slug) {
-            const pos = selectedTopics.indexOf(slug);
-            if (pos === -1) {
-                selectedTopics.push(slug);
-            } else {
-                selectedTopics.splice(pos, 1);
-            }
-            renderTopicBar();
-            loadFeed();
-        }
-
-        function clearTopics() {
-            selectedTopics = [];
-            renderTopicBar();
-            loadFeed();
-        }
-
-        async function loadFeed() {
-            try {
-                const params = new URLSearchParams();
-                if (selectedTopics.length > 0) {
-                    params.set('categories', selectedTopics.join(','));
-                }
-                const qs = params.toString();
-                const response = await fetch('/api/v1/feed' + (qs ? '?' + qs : ''));
-                const data = await response.json();
-                articlesQueue = data.articles || [];
-                currentIndex = 0;
-                historyStack = [];
-                renderDeck();
-            } catch (err) {
-                console.error("Failed to load feed:", err);
-            }
-        }
-
-        function buildCardInner(article) {
-            const accent = article.accent_color || '#6366f1';
-            const label = article.category_label || article.category || 'TECH';
-            const media = article.image_url
-                ? `<img src="${escapeHtml(article.image_url)}" alt="" onerror="this.style.display='none'">`
-                : '';
-            return `
-                <div class="swipe-badge badge-read">READ →</div>
-                <div class="swipe-badge badge-pass">SKIP</div>
-                <div class="card-media">
-                    ${media}
-                    <span class="cat-chip" style="background:${accent};color:${contrastText(accent)}">${escapeHtml(label)}</span>
-                </div>
-                <div class="card-content">
-                    <div class="card-title">${escapeHtml(article.title)}</div>
-                    <div class="card-desc">${escapeHtml(article.description || '')}</div>
-                    <div class="card-meta">
-                        <span class="src">${escapeHtml(article.source || '')}</span>
-                        <span>${escapeHtml(article.published_at || '')}</span>
-                    </div>
-                </div>
-            `;
-        }
-
-        function renderDeck() {
-            const container = document.getElementById('deck-container');
-            const counter = document.getElementById('queue-counter');
-
-            document.querySelectorAll('.swipe-card').forEach(c => c.remove());
-
-            if (currentIndex >= articlesQueue.length) {
-                document.getElementById('empty-state').style.display = 'flex';
-                counter.innerText = "Done!";
-                return;
-            } else {
-                document.getElementById('empty-state').style.display = 'none';
-                counter.innerText = `Card ${currentIndex + 1} / ${articlesQueue.length}`;
-            }
-
-            const maxVisible = Math.min(3, articlesQueue.length - currentIndex);
-            for (let i = maxVisible - 1; i >= 0; i--) {
-                const idx = currentIndex + i;
-                const article = articlesQueue[idx];
-
-                const card = document.createElement('div');
-                card.className = 'swipe-card';
-                card.id = `card-${idx}`;
-
-                const scale = 1 - (i * 0.04);
-                const translateY = i * 12;
-                card.style.transform = `translateY(${translateY}px) scale(${scale})`;
-                card.style.zIndex = 10 - i;
-
-                card.innerHTML = buildCardInner(article);
-
-                if (i === 0) {
-                    activeCardEl = card;
-                    attachDragListeners(card, article);
-                }
-
-                container.appendChild(card);
-            }
-        }
-
-        function attachDragListeners(card, article) {
-            // pointermove/pointerup are bound to window ONLY for the duration of a
-            // drag. They used to be bound here at render time and torn down only
-            // inside handleDragEnd, so any render that didn't end in a completed
-            // drag (button swipe, undo, feed reload) leaked a handler pair closed
-            // over a stale card + article. Because the drag state below is shared,
-            // every leaked handler also fired on the next pointerup and opened the
-            // PREVIOUS article's URL.
-            function detach() {
-                window.removeEventListener('pointermove', handleDragMove);
-                window.removeEventListener('pointerup', handleDragEnd);
-                window.removeEventListener('pointercancel', handleDragEnd);
-            }
-
-            card.addEventListener('pointerdown', handleDragStart);
-
-            function handleDragStart(e) {
-                if (card !== activeCardEl) return;   // only the front card drags
-                isDragging = true;
-                startX = e.clientX;
-                startY = e.clientY;
-                card.style.transition = 'none';
-
-                detach();                            // belt and braces
-                window.addEventListener('pointermove', handleDragMove);
-                window.addEventListener('pointerup', handleDragEnd);
-                window.addEventListener('pointercancel', handleDragEnd);
-            }
-
-            function handleDragMove(e) {
-                if (!isDragging) return;
-                currentX = e.clientX - startX;
-                currentY = e.clientY - startY;
-
-                const rotate = currentX * 0.08;
-                card.style.transform = `translate(${currentX}px, ${currentY}px) rotate(${rotate}deg)`;
-
-                const badgeRead = card.querySelector('.badge-read');
-                const badgePass = card.querySelector('.badge-pass');
-
-                if (currentX > 30) {
-                    badgeRead.style.opacity = Math.min(1, currentX / 120);
-                    badgePass.style.opacity = 0;
-                } else if (currentX < -30) {
-                    badgePass.style.opacity = Math.min(1, Math.abs(currentX) / 120);
-                    badgeRead.style.opacity = 0;
-                } else {
-                    badgeRead.style.opacity = 0;
-                    badgePass.style.opacity = 0;
-                }
-            }
-
-            function handleDragEnd(e) {
-                if (!isDragging) return;
-                isDragging = false;
-                detach();
-                card.style.transition = 'transform 0.35s cubic-bezier(0.175, 0.885, 0.32, 1.275)';
-
-                const threshold = 110;
-                const dx = currentX;
-                currentX = 0;
-                currentY = 0;
-
-                if (dx > threshold) {
-                    completeSwipe('right');
-                } else if (dx < -threshold) {
-                    completeSwipe('left');
-                } else {
-                    card.style.transform = 'translate(0px, 0px) rotate(0deg)';
-                    card.querySelector('.badge-read').style.opacity = 0;
-                    card.querySelector('.badge-pass').style.opacity = 0;
-                }
-            }
-        }
-
-        function triggerSwipe(direction) {
-            if (!activeCardEl || currentIndex >= articlesQueue.length) return;
-            completeSwipe(direction);
-        }
-
-        function logSwipe(article, direction) {
-            // right = interested/read, left = pass
-            const action = direction === 'right' ? 'read' : 'pass';
-            // Same id as the heartbeat. Lets the server store at most one swipe
-            // per article for this browser; storage may be unavailable, in which
-            // case the field is simply omitted.
-            let sessionId = null;
-            try { sessionId = localStorage.getItem('paperswap_session_id'); } catch (e) {}
-            const body = { article_id: article.id, action };
-            if (sessionId) body.session_id = sessionId.slice(0, 64);
-            fetch('/api/v1/swipe', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body)
-            }).then(res => {
-                if (res.ok) return;
-                // A swallowed failure here is invisible: the deck keeps working
-                // because swiping is client-side, so the only symptom would be
-                // silently missing engagement data. Surface it instead.
-                if (res.status === 503) {
-                    console.warn('swipe rejected (503): server-wide swipe budget is spent');
-                    showSwipeWarning('The server is busy - swipes are not being recorded right now.');
-                } else if (res.status === 429) {
-                    console.warn('swipe rate limited (429) - this swipe was NOT recorded');
-                    showSwipeWarning('Swiping faster than the server accepts - some swipes are not being recorded.');
-                } else {
-                    console.error(`swipe log failed: HTTP ${res.status}`);
-                }
-            }).catch(err => console.error('swipe log failed:', err));
-        }
-
-        // Non-blocking notice; the deck stays usable either way.
-        let swipeWarningTimer = null;
-        function showSwipeWarning(msg) {
-            let el = document.getElementById('swipe-warning');
-            if (!el) {
-                el = document.createElement('div');
-                el.id = 'swipe-warning';
-                el.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:24px;'
-                    + 'max-width:88%;background:#2a1414;border:1px solid #5a2626;color:#ffb4b4;'
-                    + 'padding:10px 14px;border-radius:10px;font-size:12px;line-height:1.45;'
-                    + 'z-index:9999;text-align:center;';
-                document.body.appendChild(el);
-            }
-            el.textContent = msg;
-            el.style.display = 'block';
-            clearTimeout(swipeWarningTimer);
-            swipeWarningTimer = setTimeout(() => { el.style.display = 'none'; }, 5000);
-        }
-
-        function completeSwipe(direction) {
-            if (!activeCardEl || isSwiping) return;
-            // Resolve the article from the queue at swipe time rather than from a
-            // captured variable, so the URL always belongs to the visible card.
-            const article = articlesQueue[currentIndex];
-            if (!article) return;
-
-            isSwiping = true;
-            logSwipe(article, direction);
-
-            const flyX = direction === 'right' ? window.innerWidth : -window.innerWidth;
-            const flyRotate = direction === 'right' ? 30 : -30;
-
-            activeCardEl.style.transition = 'transform 0.45s ease-in, opacity 0.4s';
-            activeCardEl.style.transform = `translate(${flyX}px, ${currentY || 0}px) rotate(${flyRotate}deg)`;
-            activeCardEl.style.opacity = '0';
-
-            historyStack.push({ index: currentIndex, direction: direction });
-
-            // Open the tab immediately: browsers block window.open from a timeout
-            // because it is no longer tied to the user's gesture.
-            if (direction === 'right') {
-                window.open(article.url, '_blank', 'noopener');
-            }
-
-            setTimeout(() => {
-                currentIndex++;
-                isSwiping = false;
-                renderDeck();
-            }, 300);
-        }
-
-        function undoSwipe() {
-            if (historyStack.length === 0 || isSwiping) return;
-            const last = historyStack.pop();
-            currentIndex = last.index;
+    async function loadFeed() {
+        const msg = document.getElementById('deck-msg');
+        setDeckMessage('<p>Loading your deck…</p>');
+        document.querySelectorAll('#deck .card').forEach(c => c.remove());
+        try {
+            const params = new URLSearchParams();
+            if (selectedTopics.length) params.set('categories', [...selectedTopics].sort().join(','));
+            const qs = params.toString();
+            const res = await fetch('/api/v1/feed' + (qs ? '?' + qs : ''));
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            articlesQueue = (await res.json()).articles || [];
+            currentIndex = 0;
+            historyStack = [];
             renderDeck();
+        } catch (err) {
+            setDeckMessage('<h2>Could not reach the server</h2><p>' + escapeHtml(err.message) +
+                '</p><button class="btn solid" onclick="loadFeed()">Retry</button>');
+        }
+        msg.dataset.loaded = '1';
+    }
+
+    function setDeckMessage(html) {
+        const msg = document.getElementById('deck-msg');
+        msg.innerHTML = html;
+        msg.hidden = false;
+    }
+
+    function kicker(a, withTime) {
+        const k = readable(a.accent_color);
+        let html = '<b style="color:' + k + '">' + escapeHtml(a.category_label || a.category) + '</b> · ' + escapeHtml(a.source);
+        if (withTime && a.published_at) html += ' · ' + escapeHtml(shortTime(a.published_at));
+        return '<div class="kicker">' + html + '</div>';
+    }
+
+    function buildCard(a, position) {
+        const photo = showsPhoto(a);
+        const blurb = showsBlurb(a);
+        const k = readable(a.accent_color);
+        const points = (a.summary_bullets || []).filter(p => p && String(p).trim());
+        const back = points.length
+            ? '<ul class="points">' + points.map(p => '<li>' + escapeHtml(p) + '</li>').join('') + '</ul>' +
+              '<p class="note">Sentences taken from the article itself.</p>'
+            : '<p style="font-family:var(--serif);font-size:16px">No key points yet.</p>' +
+              '<p class="note">PaperSwap reads the article every 6 hours and picks its key sentences. ' +
+              'New stories and paywalled pages stay empty.</p>';
+        return '' +
+            '<div class="stamp read" aria-hidden="true">READ →</div>' +
+            '<div class="stamp pass" aria-hidden="true">PASS</div>' +
+            '<div class="inner">' +
+              '<div class="face front">' +
+                '<div class="body">' +
+                  kicker(a, true) +
+                  '<h2 class="headline' + (photo ? '' : ' big') + '">' + escapeHtml(a.title) + '</h2>' +
+                  (photo ? '<div class="photo"><img src="' + escapeHtml(a.image_url) + '" alt="" loading="lazy" draggable="false" onerror="this.parentNode.remove()"></div>' : '') +
+                  (blurb ? '<p class="blurb' + (photo ? '' : ' long') + '">' + escapeHtml(a.description) + '</p>' : '') +
+                '</div>' +
+                '<div class="foot"><span>Tap for key points</span><span>' + escapeHtml(position || '') + '</span></div>' +
+              '</div>' +
+              '<div class="face back" style="--k:' + k + '">' +
+                kicker(a, false) +
+                '<h3>' + escapeHtml(a.title) + '</h3>' +
+                '<div class="label">Key points</div>' + back +
+                '<div class="foot" style="margin-top:auto"><span>Tap to turn back</span></div>' +
+              '</div>' +
+            '</div>';
+    }
+
+    let activeCard = null;
+
+    function renderDeck() {
+        const deck = document.getElementById('deck');
+        deck.querySelectorAll('.card').forEach(c => c.remove());
+        activeCard = null;
+        flippedCurrent = false;
+        document.getElementById('undo-btn').disabled = historyStack.length === 0;
+
+        if (currentIndex >= articlesQueue.length) {
+            setDeckMessage(articlesQueue.length
+                ? '<h2>That’s the whole deck.</h2><p>New stories arrive with the next refresh, every 12 hours.</p>' +
+                  '<button class="btn outline" onclick="loadFeed()">Start again</button>'
+                : '<h2>No stories for these topics yet.</h2><p>Try more topics, or come back after the next refresh.</p>' +
+                  '<button class="btn outline" onclick="openSheet()">Choose topics</button>');
+            updateSaveButton();
+            return;
+        }
+        document.getElementById('deck-msg').hidden = true;
+
+        const next = articlesQueue[currentIndex + 1];
+        if (next) {
+            const behind = document.createElement('div');
+            behind.className = 'card behind';
+            behind.setAttribute('aria-hidden', 'true');
+            behind.innerHTML = buildCard(next, '');
+            deck.appendChild(behind);
         }
 
-        function reloadFeed() {
-            loadFeed();
+        const a = articlesQueue[currentIndex];
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.tabIndex = 0;
+        card.setAttribute('role', 'button');
+        card.setAttribute('aria-label', a.title + '. Tap for key points.');
+        card.innerHTML = buildCard(a, (currentIndex + 1) + ' / ' + articlesQueue.length);
+        deck.appendChild(card);
+        activeCard = card;
+        attachGestures(card);
+        updateSaveButton();
+    }
+
+    function flip(card) {
+        card.classList.toggle('flipped');
+        if (card.classList.contains('flipped')) flippedCurrent = true;
+    }
+
+    function attachGestures(card) {
+        let startX = 0, startY = 0, dx = 0, dy = 0, down = false, moved = false;
+
+        // pointermove/up live on window only for the length of one gesture, and
+        // are removed on every exit. Binding them at render time leaked handler
+        // pairs that later fired on a stale card and opened the previous URL.
+        function detach() {
+            window.removeEventListener('pointermove', onMove);
+            window.removeEventListener('pointerup', onUp);
+            window.removeEventListener('pointercancel', onUp);
         }
-
-        /* ================= VIEW SWITCHING ================= */
-
-        let activeView = 'cards';
-
-        function switchView(view) {
-            activeView = view;
-            document.getElementById('view-cards').hidden = (view !== 'cards');
-            document.getElementById('view-summaries').hidden = (view !== 'summaries');
-            document.getElementById('tab-cards').classList.toggle('active', view === 'cards');
-            document.getElementById('tab-summaries').classList.toggle('active', view === 'summaries');
-            // The card counter describes the deck, so it has nothing to say here.
-            document.getElementById('queue-counter').style.visibility =
-                (view === 'cards') ? 'visible' : 'hidden';
-
-            // Views are shown and hidden rather than reloaded, so the deck keeps
-            // its position and the user does not lose their place by glancing at
-            // a summary.
-            if (view === 'summaries' && summaryTopics.length === 0) {
-                loadSummaryTopics();
+        function onDown(e) {
+            if (card !== activeCard || isSwiping) return;
+            down = true; moved = false; dx = dy = 0;
+            startX = e.clientX; startY = e.clientY;
+            detach();
+            window.addEventListener('pointermove', onMove);
+            window.addEventListener('pointerup', onUp);
+            window.addEventListener('pointercancel', onUp);
+        }
+        function onMove(e) {
+            if (!down) return;
+            dx = e.clientX - startX; dy = e.clientY - startY;
+            if (!moved && Math.hypot(dx, dy) < 8) return;   // still a tap
+            moved = true;
+            card.classList.add('dragging');
+            card.style.transform = 'translate(' + dx + 'px,' + dy + 'px) rotate(' + Math.max(-16, Math.min(16, dx * 0.08)) + 'deg)';
+            card.querySelector('.stamp.read').style.opacity = dx > 30 ? Math.min(1, dx / 120) : 0;
+            card.querySelector('.stamp.pass').style.opacity = dx < -30 ? Math.min(1, -dx / 120) : 0;
+        }
+        function onUp() {
+            if (!down) return;
+            down = false;
+            detach();
+            card.classList.remove('dragging');
+            if (!moved) { flip(card); return; }
+            const threshold = Math.min(110, card.offsetWidth * 0.3);
+            if (dx > threshold) completeSwipe('right');
+            else if (dx < -threshold) completeSwipe('left');
+            else {
+                card.style.transform = '';
+                card.querySelectorAll('.stamp').forEach(s => s.style.opacity = 0);
             }
         }
+        card.addEventListener('pointerdown', onDown);
+        card.addEventListener('keydown', e => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); flip(card); }
+        });
+    }
 
-        /* ================= WEEKLY SUMMARIES ================= */
+    function triggerSwipe(direction) {
+        if (!activeCard || currentIndex >= articlesQueue.length) return;
+        completeSwipe(direction);
+    }
 
-        let summaryTopics = [];        // catalogue, for the circles
-        let selectedTopic = null;      // slug currently being read
-        let summaryHistory = [];       // that topic's weeks, newest first
-        let weekIndex = 0;             // which week of summaryHistory is shown
+    function completeSwipe(direction) {
+        if (!activeCard || isSwiping) return;
+        // Read from the queue at swipe time, so the URL always belongs to the
+        // visible card.
+        const article = articlesQueue[currentIndex];
+        if (!article) return;
+        isSwiping = true;
+        logSwipe(article, direction, flippedCurrent);
 
-        // Two letters from the slug rather than one. TECH/FINANCE/SPORTS are all
-        // distinct on their initial, but POLITICS and PROGRAMMING are not, and a
-        // hardcoded icon map would drift from the server-side catalogue the
-        // moment a topic is added (see ADR-006).
-        function topicInitials(slug) {
-            return String(slug || '?').slice(0, 2).toUpperCase();
+        const flyX = (direction === 'right' ? 1 : -1) * (window.innerWidth + 200);
+        activeCard.style.transition = 'transform 0.35s ease-in';
+        activeCard.style.transform = 'translate(' + flyX + 'px, 0) rotate(' + (direction === 'right' ? 18 : -18) + 'deg)';
+        historyStack.push(currentIndex);
+
+        // Opened now: browsers block window.open from a timeout, because it is
+        // no longer tied to the user's gesture.
+        if (direction === 'right') window.open(article.url, '_blank', 'noopener');
+
+        setTimeout(() => { currentIndex++; isSwiping = false; renderDeck(); }, 260);
+    }
+
+    function undoSwipe() {
+        if (!historyStack.length || isSwiping) return;
+        currentIndex = historyStack.pop();
+        renderDeck();
+    }
+
+    function logSwipe(article, direction, flipped) {
+        // Same id as the heartbeat. The server stores at most one swipe per
+        // article per session; without storage the field is simply omitted.
+        let sessionId = null;
+        try { sessionId = localStorage.getItem('paperswap_session_id'); } catch (e) {}
+        // flipped is measured here (the card can be turned over), so it is sent
+        // as true or false. dwell_ms is not measured on the web and is omitted.
+        const body = { article_id: article.id, action: direction === 'right' ? 'read' : 'pass', flipped: !!flipped };
+        if (sessionId) body.session_id = sessionId.slice(0, 64);
+        fetch('/api/v1/swipe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        }).then(res => {
+            if (res.ok) return;
+            // A swallowed failure would be invisible: the deck keeps working
+            // because swiping is client-side. Surface it instead.
+            if (res.status === 503) notice('The server is busy – swipes are not being recorded right now.');
+            else if (res.status === 429) notice('Swiping faster than the server accepts – some swipes are not being recorded.');
+            else console.error('swipe log failed: HTTP ' + res.status);
+        }).catch(err => console.error('swipe log failed:', err));
+    }
+
+    let noticeTimer = null;
+    function notice(msg) {
+        const el = document.getElementById('notice');
+        el.textContent = msg;
+        clearTimeout(noticeTimer);
+        noticeTimer = setTimeout(() => { el.textContent = ''; }, 5000);
+    }
+
+    let toastTimer = null;
+    function toast(msg) {
+        const el = document.getElementById('toast');
+        el.textContent = msg;
+        el.classList.add('on');
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => el.classList.remove('on'), 1800);
+    }
+
+    /* ================= SAVED (this browser only) ================= */
+    // The same fields the app keeps. A copy, not a reference: the server deletes
+    // articles after 9 days and a saved story must outlive that. Never sent to
+    // the server; saving is not a swipe.
+    let saved = store('paperswap_saved', []).filter(s => s && s.url);
+
+    function isSaved(id) { return saved.some(s => s.id === id); }
+
+    function toggleSave() {
+        const a = articlesQueue[currentIndex];
+        if (!a) return;
+        if (isSaved(a.id)) {
+            saved = saved.filter(s => s.id !== a.id);
+            toast('Removed from Saved');
+        } else {
+            saved = [{
+                id: a.id, title: a.title, url: a.url, source: a.source, category: a.category,
+                category_label: a.category_label, accent_color: a.accent_color, saved_at_ms: Date.now()
+            }].concat(saved).slice(0, 200);
+            toast('Saved in this browser');
         }
+        persist('paperswap_saved', saved);
+        updateSaveButton();
+    }
 
-        // Both dates are formatted by the locale rather than assembled by hand.
-        // Appending the year manually produced "Aug 30 2026" in en-US, which is
-        // missing the comma the locale would have added; letting Intl place the
-        // year also keeps day/month order right for en-GB and friends.
-        function fmtDay(iso, withYear) {
-            const opts = { day: 'numeric', month: 'short', timeZone: 'UTC' };
-            if (withYear) opts.year = 'numeric';
-            return new Date(iso + 'T00:00:00Z').toLocaleDateString(undefined, opts);
+    function updateSaveButton() {
+        const a = articlesQueue[currentIndex];
+        const btn = document.getElementById('save-btn');
+        const on = !!a && isSaved(a.id);
+        btn.disabled = !a;
+        btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+        btn.setAttribute('aria-label', on ? 'Remove from Saved' : 'Save for later');
+        document.getElementById('tab-saved-label').textContent = saved.length ? 'Saved · ' + saved.length : 'Saved';
+    }
+
+    function removeSaved(id) {
+        saved = saved.filter(s => s.id !== id);
+        persist('paperswap_saved', saved);
+        renderSaved();
+        updateSaveButton();
+    }
+
+    function renderSaved() {
+        const n = saved.length;
+        document.getElementById('saved-sub').textContent = (n === 1 ? '1 article' : n + ' articles') + ' · kept in this browser';
+        const body = document.getElementById('saved-body');
+        if (!n) {
+            body.innerHTML = '<div class="center"><h2>Nothing saved yet</h2><p>Tap the bookmark under a card ' +
+                'to keep it here. Saved stories stay in this browser, even after the server deletes them.</p></div>';
+            return;
         }
+        body.innerHTML = saved.map(s => {
+            const k = readable(s.accent_color);
+            const when = new Date(s.saved_at_ms).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+            return '<div class="saved-row">' +
+                '<a href="' + escapeHtml(s.url) + '" target="_blank" rel="noopener">' +
+                  '<span class="kicker"><b style="color:' + k + '">' + escapeHtml(s.category_label || s.category) + '</b> · ' + escapeHtml(s.source) + '</span>' +
+                  '<strong>' + escapeHtml(s.title) + '</strong>' +
+                  '<span class="when">Saved ' + escapeHtml(when) + '</span>' +
+                '</a>' +
+                '<button class="ctl" onclick="removeSaved(' + Number(s.id) + ')" aria-label="Remove from Saved">' +
+                  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>' +
+                '</button></div>';
+        }).join('') +
+        '<p class="fine">The server deletes articles after 9 days. Saved keeps its own copy of each ' +
+        'headline and link, so nothing here disappears with them.</p>';
+    }
 
-        function fmtRange(startIso, endIso) {
-            return fmtDay(startIso, false) + ' \u2013 ' + fmtDay(endIso, true);
+    /* ================= TOPIC SHEET ================= */
+    let draft = [];
+
+    async function openSheet() {
+        document.getElementById('sheet').hidden = false;
+        document.getElementById('sheet-rows').innerHTML = '<p class="sub">Loading topics…</p>';
+        await loadCatalogue();
+        draft = selectedTopics.length ? [...selectedTopics] : catalogue.map(t => t.slug);
+        renderSheet();
+        const first = document.querySelector('#sheet-rows input');
+        if (first) first.focus();
+    }
+
+    function renderSheet() {
+        document.getElementById('sheet-rows').innerHTML = catalogue.map(t => {
+            const on = draft.includes(t.slug);
+            return '<label class="topic-row" style="--k:' + readable(t.accent_color) + '">' +
+                '<span class="dot"></span><span>' + escapeHtml(t.label) + '</span>' +
+                '<input type="checkbox" data-slug="' + escapeHtml(t.slug) + '"' + (on ? ' checked' : '') +
+                ' onchange="toggleDraft(this)"></label>';
+        }).join('');
+        const btn = document.getElementById('sheet-apply');
+        btn.disabled = draft.length === 0;
+        btn.textContent = draft.length === 0 ? 'Pick at least one topic'
+            : draft.length === catalogue.length ? 'Show all topics' : 'Show ' + draft.length + ' topics';
+    }
+
+    function toggleDraft(input) {
+        const slug = input.dataset.slug;
+        draft = input.checked ? draft.concat(slug) : draft.filter(s => s !== slug);
+        renderSheet();
+    }
+
+    function closeSheet() {
+        document.getElementById('sheet').hidden = true;
+        document.getElementById('topics-btn').focus();
+    }
+
+    function applySheet() {
+        // Every topic is stored as "no filter", so a topic added on the server
+        // later is included rather than silently filtered out.
+        const all = draft.length === catalogue.length;
+        const next = all ? [] : draft;
+        const changed = JSON.stringify([...next].sort()) !== JSON.stringify([...selectedTopics].sort());
+        selectedTopics = next;
+        persist('paperswap_topics', selectedTopics);
+        updateTopicsLabel();
+        closeSheet();
+        if (changed) loadFeed();
+    }
+
+    function updateTopicsLabel() {
+        document.getElementById('topics-label').textContent =
+            selectedTopics.length ? selectedTopics.length + ' topics' : 'All topics';
+    }
+
+    /* ================= THE WEEK ================= */
+    let week = null;            // last response shown
+    let newestWeek = null;      // week_start of the newest week the server has
+    const weekCache = {};
+
+    function shiftWeek(iso, weeks) {
+        const d = new Date(iso + 'T00:00:00Z');
+        d.setUTCDate(d.getUTCDate() + 7 * weeks);
+        return d.toISOString().slice(0, 10);
+    }
+
+    function fmtRange(startIso, endIso) {
+        if (!startIso) return '';
+        const s = new Date(startIso + 'T00:00:00Z');
+        const e = new Date((endIso || shiftWeek(startIso, 1)) + 'T00:00:00Z');
+        const dm = { day: 'numeric', month: 'short', timeZone: 'UTC' };
+        if (s.getUTCMonth() === e.getUTCMonth()) {
+            return s.getUTCDate() + '–' + e.toLocaleDateString(undefined, dm);
         }
+        return s.toLocaleDateString(undefined, dm) + ' – ' + e.toLocaleDateString(undefined, dm);
+    }
 
-        async function loadSummaryTopics() {
-            try {
-                const res = await fetch('/api/v1/categories');
-                const data = await res.json();
-                summaryTopics = data.categories || [];
-                renderTopicCircles();
-            } catch (err) {
-                document.getElementById('topic-circles').innerHTML = '';
-                document.getElementById('summary-panel').innerHTML =
-                    '<div class="summary-empty"><strong>Could not load topics.</strong>' +
-                    'Check that the backend is reachable and try again.</div>';
+    async function loadWeek(weekStart) {
+        const body = document.getElementById('week-body');
+        if (weekStart && weekCache[weekStart]) { showWeek(weekCache[weekStart], weekStart); return; }
+        if (!week) body.innerHTML = '<div class="center"><p>Loading the week…</p></div>';
+        try {
+            const res = await fetch('/api/v1/summaries' + (weekStart ? '?week_start=' + encodeURIComponent(weekStart) : ''));
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const data = await res.json();
+            const key = data.week_start || weekStart;
+            if (key) weekCache[key] = data;
+            showWeek(data, weekStart);
+        } catch (err) {
+            body.innerHTML = '<div class="center"><h2>Could not load the week</h2><p>' + escapeHtml(err.message) +
+                '</p><button class="btn solid" onclick="loadWeek(' + (weekStart ? '\'' + escapeHtml(weekStart) + '\'' : 'null') + ')">Retry</button></div>';
+        }
+    }
+
+    function showWeek(data, requested) {
+        week = data;
+        week.shown = data.week_start || requested || null;
+        if (!requested) newestWeek = week.shown;
+        const summaries = data.summaries || [];
+        document.getElementById('week-range').textContent = fmtRange(week.shown, data.week_end);
+        document.getElementById('week-prev').disabled = !week.shown || !summaries.length;
+        document.getElementById('week-next').disabled = !week.shown || !newestWeek || week.shown >= newestWeek;
+        renderWeek();
+    }
+
+    function stepWeek(delta) {
+        if (!week || !week.shown) return;
+        loadWeek(shiftWeek(week.shown, delta));
+    }
+
+    function parseDigest(text) {
+        const lines = String(text || '').split('\n').map(l => l.trim()).filter(Boolean);
+        const stories = lines.filter(l => l.startsWith('• ')).map(l => {
+            const body = l.slice(2).trim();
+            const open = body.lastIndexOf(' (');
+            return (body.endsWith(')') && open > 0)
+                ? { text: body.slice(0, open), cov: body.slice(open + 2, -1) }
+                : { text: body, cov: null };
+        });
+        return stories;
+    }
+
+    function renderWeek() {
+        const body = document.getElementById('week-body');
+        const summaries = (week && week.summaries) || [];
+        if (!summaries.length) {
+            body.innerHTML = '<div class="center"><h2>' + (week && week.shown ? 'Nothing for this week' : 'No summaries yet') +
+                '</h2><p>Summaries are written once a week, on Monday, for the week before. Each topic needs ' +
+                'at least a few articles with a real publisher description.</p></div>';
+            return;
+        }
+        const bySlug = {};
+        summaries.forEach(s => { bySlug[s.topic] = s; });
+        const order = catalogue.length ? catalogue : summaries.map(s => ({ slug: s.topic, label: s.topic_label, accent_color: s.accent_color }));
+        const known = new Set(order.map(t => t.slug));
+        const sections = order.map(t => ({ label: t.label, accent: t.accent_color, s: bySlug[t.slug] }))
+            .concat(summaries.filter(s => !known.has(s.topic)).map(s => ({ label: s.topic_label, accent: s.accent_color, s })));
+
+        body.innerHTML = sections.map(sec => {
+            const k = readable(sec.accent);
+            const head = '<div class="sec-h"><h2>' + escapeHtml(sec.label) + '</h2>' +
+                (sec.s ? '<span>' + Number(sec.s.number_of_articles) + ' articles</span>' : '') + '</div>';
+            if (!sec.s) {
+                return '<div class="sec" style="--k:' + k + '">' + head +
+                    '<p class="missing">No digest this week: too few articles with a real publisher description.</p></div>';
             }
+            const s = sec.s;
+            const stories = parseDigest(s.summary);
+            const content = stories.length
+                ? stories.map(st => '<div class="story"><div><p>' + escapeHtml(st.text) + '</p>' +
+                    (st.cov ? '<small>' + escapeHtml(st.cov) + '</small>' : '') + '</div></div>').join('')
+                : '<p class="prose">' + escapeHtml(s.summary) + '</p>';
+            // Both counts, always: what the generator read and what was collected.
+            const counts = s.number_of_articles !== s.articles_in_window
+                ? 'Read ' + Number(s.number_of_articles) + ' of ' + Number(s.articles_in_window) + ' collected articles; the rest had no real description'
+                : 'Read all ' + Number(s.number_of_articles) + ' collected articles';
+            return '<div class="sec" style="--k:' + k + '">' + head + content +
+                '<p class="prov">' + counts + ' · written by ' + escapeHtml(s.generator) + '</p></div>';
+        }).join('') +
+        '<p class="fine">Grouped into stories from the week’s articles. Each line is a sentence from the ' +
+        'most central article of its story. Past weeks stay here after the articles themselves are deleted.</p>';
+    }
+
+    /* ================= VIEWS ================= */
+    let weekLoaded = false;
+
+    function switchView(view) {
+        ['deck', 'week', 'saved'].forEach(v => {
+            document.getElementById('view-' + v).hidden = v !== view;
+            document.getElementById('tab-' + v).setAttribute('aria-selected', v === view ? 'true' : 'false');
+        });
+        // Views are shown and hidden, not reloaded, so the deck keeps its place.
+        if (view === 'week' && !weekLoaded) {
+            weekLoaded = true;
+            loadCatalogue().then(() => { if (week) renderWeek(); });
+            loadWeek(null);
         }
+        if (view === 'saved') renderSaved();
+    }
 
-        function renderTopicCircles() {
-            const wrap = document.getElementById('topic-circles');
-            wrap.classList.toggle('has-selection', selectedTopic !== null);
+    // A theme change recolours the accents, which are computed per theme.
+    DARK.addEventListener('change', () => {
+        renderDeck();
+        if (week) renderWeek();
+        if (!document.getElementById('view-saved').hidden) renderSaved();
+    });
 
-            wrap.innerHTML = summaryTopics.map(t => {
-                const on = t.slug === selectedTopic;
-                // Colour comes from the API, so the palette stays in one place on
-                // the backend. contrastText keeps the initials legible on amber
-                // and on indigo without a per-topic override.
-                const ring = on
-                    ? 'box-shadow:0 0 0 3px ' + t.accent_color + '55, 0 6px 18px ' + t.accent_color + '66;'
-                    : '';
-                return '<button class="topic-circle ' + (on ? 'selected' : '') + '"' +
-                       ' onclick="selectTopic(\'' + t.slug + '\')"' +
-                       ' aria-pressed="' + on + '"' +
-                       ' title="' + escapeHtml(t.label) + '">' +
-                       '<span class="circle-dot" style="background:' + t.accent_color +
-                       ';color:' + contrastText(t.accent_color) + ';' + ring + '">' +
-                       topicInitials(t.slug) + '</span>' +
-                       '<span class="circle-label">' + escapeHtml(t.label) + '</span>' +
-                       '</button>';
-            }).join('');
-        }
-
-        async function selectTopic(slug) {
-            selectedTopic = slug;
-            weekIndex = 0;
-            summaryHistory = [];
-            renderTopicCircles();
-
-            const panel = document.getElementById('summary-panel');
-            panel.innerHTML = '<div class="summary-prompt">Loading\u2026</div>';
-            panel.scrollTop = 0;
-
-            try {
-                const res = await fetch('/api/v1/summaries/' + encodeURIComponent(slug) + '?weeks=8');
-                if (!res.ok) throw new Error('HTTP ' + res.status);
-                const data = await res.json();
-                summaryHistory = data.summaries || [];
-                renderSummary();
-            } catch (err) {
-                panel.innerHTML =
-                    '<div class="summary-empty"><strong>Could not load this summary.</strong>' +
-                    escapeHtml(err.message) + '</div>';
-            }
-        }
-
-        function stepWeek(delta) {
-            const next = weekIndex + delta;
-            if (next < 0 || next >= summaryHistory.length) return;
-            weekIndex = next;
-            renderSummary();
-        }
-
-        function renderSummary() {
-            const panel = document.getElementById('summary-panel');
-            const topic = summaryTopics.find(t => t.slug === selectedTopic);
-
-            if (!summaryHistory.length) {
-                // Not an error. A topic gets no row for a week when too few of its
-                // articles carried a real publisher description, and saying so is
-                // more useful than an empty card.
-                panel.innerHTML =
-                    '<div class="summary-empty"><strong>No summary yet for ' +
-                    escapeHtml(topic ? topic.label : selectedTopic) + '.</strong>' +
-                    'Summaries are written once a week, for the last completed ' +
-                    'Monday\u2013Sunday. A topic is skipped when too few of its articles ' +
-                    'that week came with a real publisher description.</div>';
-                return;
-            }
-
-            const s = summaryHistory[weekIndex];
-            const filtered = s.number_of_articles !== s.articles_in_window;
-
-            const sources = (s.top_sources || []).length
-                ? '<div class="chips">' + s.top_sources.map(x =>
-                      '<span class="chip">' + escapeHtml(x) + '</span>').join('') + '</div>'
-                : '<div class="stat-sub">No source breakdown stored for this week.</div>';
-
-            const articleNote = filtered
-                ? 'Summarised from ' + s.number_of_articles + ' of the ' +
-                  s.articles_in_window + ' collected this week. The rest carried a generic ' +
-                  'description rather than the publisher\u2019s own.'
-                : 'Every article collected this week was used.';
-
-            panel.innerHTML =
-                '<div class="summary-topic" style="color:' + s.accent_color + '">' +
-                    escapeHtml(s.topic_label) +
-                '</div>' +
-
-                '<div class="summary-dates">' +
-                    '<button class="week-step" onclick="stepWeek(1)" title="Earlier week"' +
-                        (weekIndex >= summaryHistory.length - 1 ? ' disabled' : '') +
-                        '>\u2039</button>' +
-                    '<span>' + fmtRange(s.week_start, s.week_end) + '</span>' +
-                    '<button class="week-step" onclick="stepWeek(-1)" title="Later week"' +
-                        (weekIndex <= 0 ? ' disabled' : '') +
-                        '>\u203a</button>' +
-                '</div>' +
-
-                '<p class="summary-text">' + escapeHtml(s.summary) + '</p>' +
-
-                '<div class="stat">' +
-                    '<div class="stat-label">Articles</div>' +
-                    '<div class="stat-value">' + s.number_of_articles + '</div>' +
-                    '<div class="stat-sub">' + articleNote + '</div>' +
-                '</div>' +
-
-                '<div class="stat">' +
-                    '<div class="stat-label">Top sources</div>' +
-                    sources +
-                '</div>' +
-
-                '<div class="summary-foot">' + escapeHtml(s.basis || '') +
-                    ' Written by <b>' + escapeHtml(s.generator) + '</b>.</div>';
-
-            panel.scrollTop = 0;
-        }
-
-        // Telemetry Active Session Heartbeat
-        (function initTelemetry() {
-            let sessionId = localStorage.getItem('paperswap_session_id');
+    /* ================= TELEMETRY HEARTBEAT ================= */
+    (function initTelemetry() {
+        let sessionId = null;
+        try {
+            sessionId = localStorage.getItem('paperswap_session_id');
             if (!sessionId) {
                 sessionId = 'sess_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
                 localStorage.setItem('paperswap_session_id', sessionId);
             }
-            function sendHeartbeat() {
-                fetch('/api/v1/telemetry/heartbeat', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ session_id: sessionId, user_agent: navigator.userAgent })
-                }).catch(() => {});
-            }
-            sendHeartbeat();
-            setInterval(sendHeartbeat, 15000);
-        })();
-
-        loadTopics();
-        loadFeed();
-
-        // Deep link: /summaries opens straight on that tab, so the route still
-        // works and can be bookmarked. Everything else lands on the deck.
-        if (window.location.pathname.replace(/\/+$/, '') === '/summaries') {
-            switchView('summaries');
+        } catch (e) {
+            sessionId = 'sess_' + Math.random().toString(36).substring(2);
         }
-    </script>
+        function sendHeartbeat() {
+            fetch('/api/v1/telemetry/heartbeat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session_id: sessionId, user_agent: navigator.userAgent.slice(0, 256) })
+            }).catch(() => {});
+        }
+        sendHeartbeat();
+        setInterval(sendHeartbeat, 15000);
+    })();
+
+    document.getElementById('today').textContent =
+        new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' });
+    updateTopicsLabel();
+    updateSaveButton();
+    loadFeed();
+
+    // Deep link: /summaries opens on the week, so the old route still works.
+    if (window.location.pathname.replace(/\/+$/, '') === '/summaries') switchView('week');
+</script>
 </body>
 </html>

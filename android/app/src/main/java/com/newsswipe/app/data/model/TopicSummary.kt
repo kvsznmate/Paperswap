@@ -3,16 +3,33 @@ package com.newsswipe.app.data.model
 import com.google.gson.annotations.SerializedName
 
 /**
- * Weekly per-topic digests from GET /api/v1/summaries/{topic}.
+ * Every topic's digest for one week, from GET /api/v1/summaries. Drives the
+ * "This week" edition screen.
  *
- * One row per topic per completed Monday-Sunday week. The table outlives the
- * articles it was built from -- those are purged after nine days -- so these
- * objects are the only record of a week that exists anywhere.
+ * `weekStart` is null only when the newest week was asked for and none exists
+ * yet. `topicsMissing` names topics with no row that week -- too few articles
+ * with a real publisher description -- so the screen can say so rather than
+ * silently leaving them out.
  */
+data class WeeklySummariesResponse(
+    @SerializedName("week_start") val weekStart: String? = null,
+    @SerializedName("week_end") val weekEnd: String? = null,
+    @SerializedName("topics_missing") val topicsMissing: List<String>? = null,
+    @SerializedName("summaries") val summaries: List<TopicSummary>? = null
+)
+
+/** One topic's history from GET /api/v1/summaries/{topic}. The app no longer calls it. */
 data class TopicSummaryResponse(
     @SerializedName("summaries") val summaries: List<TopicSummary>
 )
 
+/**
+ * One topic's digest for one completed Monday-Sunday week.
+ *
+ * The table outlives the articles it was built from -- those are purged after
+ * nine days -- so these objects are the only record of a week that exists
+ * anywhere.
+ */
 data class TopicSummary(
     @SerializedName("topic") val topic: String,
     @SerializedName("topic_label") val topicLabel: String,

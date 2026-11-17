@@ -1,17 +1,19 @@
 # Paperswap — Android client
 
-A native Android app in **Kotlin** with **Jetpack Compose**. It talks to the FastAPI backend in `../backend` and shows topic-balanced news cards across seven categories in a swipe interface, plus a weekly-summaries tab. The package name is still `com.newsswipe.app`, a leftover from the project's original name.
+A native Android app in **Kotlin** with **Jetpack Compose**. It talks to the FastAPI backend in `../backend` and shows topic-balanced news cards across seven categories in a swipe interface, a weekly edition, and a Saved list. The look is the Paper design (ADR-013): ink on paper by day, following the phone's dark mode at night. The package name is still `com.newsswipe.app`, a leftover from the project's original name.
 
 ---
 
 ## Features
 
-- **Swipe deck.** Swipe right 👉 to read (the article opens in Android Custom Tabs). Swipe left 👈 to skip.
-- **Card flip.** Tap a card to see the summary bullets produced by the backend enrichment job. The back is empty until the article has been enriched.
-- **Swipe logging.** Each swipe sends `POST /api/v1/swipe` with `dwell_ms` and `flipped`. `dwell_ms` counts only the time the deck was actually on screen: the timer pauses on the Summaries tab, in the Custom Tab and in the background. If a swipe can't be saved, a notice appears under the deck.
+- **Swipe deck.** Swipe right, or tap **Read →**, to open the article in Android Custom Tabs. Swipe left, or tap **Pass**, to skip. Cards lead with the headline; a photo shows only when the publisher sent one, and a canned blurb is hidden (`image_is_stock`, `description_source`).
+- **Card flip.** Tap a card to see its key points, the sentences the backend enrichment job picked. The back says so when the article has not been enriched yet.
+- **Swipe logging.** Each swipe sends `POST /api/v1/swipe` with `dwell_ms` and `flipped`. `dwell_ms` counts only the time the deck was actually on screen: the timer pauses on the other tabs, in the Custom Tab and in the background. If a swipe can't be saved, a notice appears under the deck.
 - **Undo.** Each swipe is held for 5 seconds before it is sent, so an undo within that window cancels it entirely. Older swipes have already been recorded, and undo only brings their card back.
-- **Weekly summaries.** Pick a topic and see its digest history from `GET /api/v1/summaries/{topic}`.
-- **Server-driven topics.** Badge labels and colours come from each article's `category_label` / `accent_color`.
+- **This week.** Every topic's digest for one week on one scroll, from `GET /api/v1/summaries`, with ‹ › to step through past weeks.
+- **Save for later.** The bookmark keeps a copy of the card on the phone (`LocalStore`). It is not a swipe and sends nothing to the server.
+- **Topic filter.** "All topics" opens a checklist; the choice is kept on the phone and sent as `?categories=`.
+- **Server-driven topics.** Topic labels and colours come from the server (`category_label` / `accent_color`); `readableOn()` adjusts each colour to 4.5:1 on the card.
 
 ---
 
@@ -19,28 +21,36 @@ A native Android app in **Kotlin** with **Jetpack Compose**. It talks to the Fas
 
 ```text
 android/app/src/main/java/com/newsswipe/app/
-├── MainActivity.kt                 # Compose host, tab switch, Custom Tabs launcher
+├── MainActivity.kt                 # Compose host, bottom-nav shell, deck screen, Custom Tabs launcher
 ├── data/
+│   ├── local/LocalStore.kt         # Saved articles + topic filter, on the phone
 │   ├── model/
 │   │   ├── NewsArticle.kt          # Feed / swipe / category models (match backend JSON)
+│   │   ├── SavedArticle.kt         # A saved card (Gson, so it lives in model/)
 │   │   └── TopicSummary.kt         # Weekly summary models
 │   └── remote/
 │       ├── NewsApiService.kt       # Retrofit interface: feed, swipe, categories, summaries
 │       ├── ApiCall.kt              # apiCall {}: one place that turns HTTP/network errors into Result
 │       └── RetrofitInstance.kt     # OkHttp client; base URL from BuildConfig
 ├── ui/
-│   ├── theme/                      # Color.kt, AccentColor.kt (hex → Color, contrast), Theme.kt
-│   ├── screens/SummariesScreen.kt  # Topic chooser + week history
+│   ├── theme/                      # Paper palettes (day/night), readableOn(), PaperTheme
+│   ├── screens/
+│   │   ├── WeekScreen.kt           # The week as one edition
+│   │   └── SavedScreen.kt          # Saved for later
 │   └── components/
-│       ├── CardChrome.kt           # Frame + topic badge/source header shared by both card faces
-│       ├── NewsCard.kt             # Card front
-│       ├── NewsCardBack.kt         # Card back (summary bullets)
-│       ├── SwipeableCardStack.kt   # Drag/fling gestures, flip, swipe badges
-│       ├── TopNavBar.kt            # Cards / Weekly Summaries switch
-│       └── ActionButtons.kt        # Pass, Read, Undo
+│       ├── CardChrome.kt           # Paper frame + kicker shared by both faces; photo/blurb rules
+│       ├── NewsCard.kt             # Card front: headline first
+│       ├── NewsCardBack.kt         # Card back (key points)
+│       ├── SwipeableCardStack.kt   # Drag/fling gestures, flip, swipe stamps
+│       ├── Masthead.kt             # Serif title + double rule
+│       ├── BottomNavBar.kt         # Deck / This week / Saved
+│       ├── TopicSheet.kt           # Topic filter checklist
+│       ├── PaperIcons.kt, UndoIcon.kt
+│       └── ActionButtons.kt        # Undo, Pass, Read →, Save
 └── viewmodel/
-    ├── NewsViewModel.kt            # Deck state, undo, dwell timing, swipe POSTs
-    └── SummaryViewModel.kt         # Topic list + per-topic history cache
+    ├── NewsViewModel.kt            # Deck state, topic filter, undo, dwell timing, swipe POSTs
+    ├── SummaryViewModel.kt         # The week shown, week stepping, per-week cache
+    └── SavedViewModel.kt           # Saved list
 ```
 
 ---

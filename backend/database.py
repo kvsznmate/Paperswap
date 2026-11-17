@@ -707,7 +707,7 @@ def get_latest_articles(limit: int = 50, categories=None) -> list:
 
     sql = '''
         SELECT id, title, description, source, published_at, category, image_url, url, created_at,
-               summary_bullets
+               summary_bullets, description_source
         FROM articles
     '''
     params = []
@@ -748,13 +748,14 @@ def get_balanced_feed(limit: int = 70, categories=None, per_category: int = None
     sql = f'''
         WITH ranked AS (
             SELECT id, title, description, source, published_at, category,
-                   image_url, url, created_at, summary_bullets,
+                   image_url, url, created_at, summary_bullets, description_source,
                    ROW_NUMBER() OVER (PARTITION BY category ORDER BY id DESC) AS rank_in_category
             FROM articles
             {where_sql}
         )
         SELECT id, title, description, source, published_at, category,
-               image_url, url, created_at, summary_bullets, rank_in_category
+               image_url, url, created_at, summary_bullets, description_source,
+               rank_in_category
         FROM ranked
         WHERE rank_in_category <= %s
         -- rank first (one card per topic, then the next round), then hash the

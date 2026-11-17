@@ -30,7 +30,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from starlette.routing import Match
 
-from news_fetcher import fetch_and_sync_news_to_db
+from news_fetcher import fetch_and_sync_news_to_db, present_for_client
 import summarizer
 import database as db
 from public_limits import ColdStartGate, GlobalBudget, TTLCache
@@ -823,8 +823,11 @@ def get_news_feed(
 
     def query():
         if balanced:
-            return db.get_balanced_feed(limit=deck_limit, categories=selected)
-        return db.get_latest_articles(limit=deck_limit, categories=selected)
+            rows = db.get_balanced_feed(limit=deck_limit, categories=selected)
+        else:
+            rows = db.get_latest_articles(limit=deck_limit, categories=selected)
+        # image_is_stock + the BBC thumbnail upgrade (ADR-013).
+        return present_for_client(rows)
 
     articles = query()
 
