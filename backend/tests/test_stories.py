@@ -346,7 +346,24 @@ try:
     prompt = sent["body"]["messages"][0]["content"]
     check("the model is fed story lines with coverage, not raw article rows",
           "[2 articles · O0, O1]" in prompt, prompt[-300:])
-    check("max_tokens leaves room for thinking", sent["body"]["max_tokens"] >= 2000)
+    check("thinking is disabled (it is billed as output)",
+          sent["body"].get("thinking") == {"type": "disabled"}, str(sent["body"].get("thinking")))
+    check("max_tokens is the cost ceiling, not thinking headroom",
+          sent["body"]["max_tokens"] <= 1000, str(sent["body"]["max_tokens"]))
+
+    # A week of huge headlines and ledes must not grow the prompt without bound.
+    # 20 unrelated stories, so the 15-story cap and the char cap both bind.
+    big_vecs = vectors_from_gram(block_gram([1] * 20, within=1.0, between=0.0))
+    big = [article(f"{i} " + "H" * 5000, big_vecs[i], source=f"{i} " + "S" * 500,
+                   bullets=["L" * 5000]) for i in range(20)]
+    sm.summarise(TOPIC, big)
+    prompt = sent["body"]["messages"][0]["content"]
+    n_lines = prompt.count("\n- [")
+    check("the prompt has a hard length ceiling",
+          len(prompt) <= len(sm._PROMPT) + sm._ANTHROPIC_MAX_LINES_CHARS + 50, f"{len(prompt)} chars")
+    check("...reached by dropping the least-covered stories, not by cutting a line",
+          0 < n_lines < sm._ANTHROPIC_MAX_STORIES and prompt.rstrip().endswith("…"),
+          f"{n_lines} story lines")
 finally:
     sm.SUMMARY_GENERATOR, sm.ANTHROPIC_API_KEY, sm.SUMMARY_MODEL, sm.requests.post = saved
     logging.getLogger("paperswap.summarizer").disabled = False

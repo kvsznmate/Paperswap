@@ -327,7 +327,16 @@ What this feature does **not** fix: topic assignment is still the unmeasured key
 
 It is pure Python (`struct` + `operator.mul`), not numpy. The API process otherwise never imports numpy, and this runs in its scheduler, so numpy would stay resident on a 956 MB box for a computation that takes tens of milliseconds once a week.
 
-`SUMMARY_GENERATOR=anthropic` now feeds the model the story lines (coverage, headline, extracted sentence) instead of raw rows. `max_tokens` rose from 600 to 4000 because current models think by default and thinking counts against the cap, and any `stop_reason` other than `end_turn` is treated as a failure. A failed call falls back to `stories:v2`. That is not a placeholder: it is a complete digest whose `generator` column says `stories:v2`. The API's per-row `basis` sentence is now chosen per generator, so v1 rows in the history still describe how v1 worked.
+`SUMMARY_GENERATOR=anthropic` now feeds the model the story lines (coverage, headline, extracted sentence) instead of raw rows. Thinking is disabled: current models think by default, thinking is billed as output and counts against `max_tokens`, and rewording a ranked list needs none. Any `stop_reason` other than `end_turn` is treated as a failure. A failed call falls back to `stories:v2`. That is not a placeholder: it is a complete digest whose `generator` column says `stories:v2`. The API's per-row `basis` sentence is now chosen per generator, so v1 rows in the history still describe how v1 worked.
+
+**Cost.** The LLM path has a fixed worst case of under $1 a year, set by caps in code, not by how much news arrives. With Haiku 5.5 at $0.10 / $0.50 per million input / output tokens (verified 2026-11):
+
+| per call | cap | worst-case cost |
+|---|---|---|
+| input | story list clipped to 8,000 chars (headline 200, lede 300); ~9.5k chars of prompt. Even at 1 char per token: | $0.00095 |
+| output | `max_tokens` 800, thinking disabled | $0.00040 |
+
+That is 7 topics × 52 weeks = 364 calls, about **$0.49 a year** in the worst case. A typical prompt is about 3k tokens, which puts the expected cost nearer $0.15. A topic-week is generated at most once, because `topics_missing_summary()` skips rows that exist and a failed call falls back to a stored `stories:v2` row instead of retrying. The only extra calls are manual `python summarizer.py` regenerations, at about $0.001 each. Each call logs its measured `usage` token counts. The bound assumes Haiku: a larger `SUMMARY_MODEL` multiplies it by that model's price. A monthly spend limit on the Anthropic key is the backstop if code or prices change.
 
 **Threshold.** The ticket guessed 0.6. Measured with the production model (Xenova `all-MiniLM-L6-v2` int8, the same `title. description` input enrichment embeds) on 21 hand-written articles: 6 multi-article stories written as deliberate paraphrases, 5 same-subject-different-event near misses (e.g. *Fed holds rates* vs *Fed governor resigns*; *Nvidia beats earnings* vs *Nvidia faces export curbs*), and unrelated singletons:
 

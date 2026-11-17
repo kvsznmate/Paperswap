@@ -454,6 +454,42 @@ Stories:
 # that the digest would not mention anyway.
 _ANTHROPIC_MAX_STORIES = 15
 
+# Cost ceiling. These three caps bound every call, so the yearly bill has a
+# worst case that does not depend on what the feeds send. Haiku 5.5 is
+# $0.10 / $0.50 per million input / output tokens (verified 2026-11):
+#   input  <= ~9.5k chars of prompt; even at 1 char per token  -> $0.00095
+#   output <= 800 tokens (thinking disabled, so all of it is text) -> $0.00040
+#   7 topics x 52 weeks = 364 calls x $0.00135                     -> ~$0.49/year
+# Realistic prompts are ~3k tokens, so the expected bill is nearer $0.15/year.
+# The bound holds for Haiku only: SUMMARY_MODEL set to a larger model multiplies
+# it by that model's price. See ADR-011, "Cost".
+_ANTHROPIC_MAX_TOKENS = 800
+_ANTHROPIC_MAX_LINES_CHARS = 8000
+_ANTHROPIC_HEADLINE_CHARS = 200
+_ANTHROPIC_LEDE_CHARS = 300
+
+
+def _clip(text: str, limit: int) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _story_lines(stories: list) -> str:
+    """The prompt's story list, clipped so its length has a hard ceiling.
+
+    Stories arrive ranked, so the ones dropped for length are the least covered.
+    """
+    lines, used = [], 0
+    for s in stories:
+        line = f"- [{_clip(s['coverage'], 120)}] {_clip(s['headline'], _ANTHROPIC_HEADLINE_CHARS)}"
+        if s["lede"]:
+            line += f" :: {_clip(s['lede'], _ANTHROPIC_LEDE_CHARS)}"
+        if lines and used + len(line) + 1 > _ANTHROPIC_MAX_LINES_CHARS:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return "\n".join(lines)
+
 
 def _anthropic(topic: str, articles: list) -> tuple:
     """One API call per topic per week. Roughly 2-5k input tokens per topic.
@@ -474,11 +510,7 @@ def _anthropic(topic: str, articles: list) -> tuple:
     label = db.CATEGORIES[db.normalize_category(topic)]["label"]
     # Coverage, headline and extracted sentence. Never the URL: handing a model
     # a link is an invitation to cite it as though it had been read.
-    stories = build_stories(articles)[:_ANTHROPIC_MAX_STORIES]
-    lines = "\n".join(
-        f"- [{s['coverage']}] {s['headline']}" + (f" :: {s['lede']}" if s["lede"] else "")
-        for s in stories
-    )
+    lines = _story_lines(build_stories(articles)[:_ANTHROPIC_MAX_STORIES])
     prompt = _PROMPT.format(label=label, n=len(articles), lines=lines)
 
     resp = requests.post(
@@ -490,10 +522,12 @@ def _anthropic(topic: str, articles: list) -> tuple:
         },
         json={
             "model": SUMMARY_MODEL,
-            # Headroom for thinking, not for a longer digest: current models
-            # (Haiku 5.5 included) think by default, and thinking tokens count
-            # against this cap. At 600 a digest could be cut off mid-sentence.
-            "max_tokens": 4000,
+            # Thinking off: rewording a ranked list needs none, and thinking
+            # tokens are billed as output -- with it on (the Haiku 5.5 default)
+            # the cap above would have to be ~4000 to avoid cut-off digests.
+            # A 3-5 sentence digest is ~150-250 tokens; 800 is headroom.
+            "max_tokens": _ANTHROPIC_MAX_TOKENS,
+            "thinking": {"type": "disabled"},
             "messages": [{"role": "user", "content": prompt}],
         },
         timeout=SUMMARY_TIMEOUT,
@@ -518,6 +552,10 @@ def _anthropic(topic: str, articles: list) -> tuple:
     if not text:
         raise RuntimeError("Anthropic API returned no text content.")
 
+    # Measured, so the bill can be checked against the ceiling from the logs.
+    usage = body.get("usage") or {}
+    logger.info("Anthropic summary for %s: %s input / %s output tokens.",
+                topic, usage.get("input_tokens"), usage.get("output_tokens"))
     return text, f"anthropic:{SUMMARY_MODEL}"
 
 
