@@ -149,7 +149,7 @@ jobs:
       # assembleRelease, not just compileReleaseKotlin: it runs R8 and resource
       # shrinking, which is where a missing keep rule breaks the build. No
       # signing secrets are set here, so it builds an unsigned APK (signing is
-      # release.yml's job, #65).
+      # done locally by android/release.sh, #65).
       # (Offline it also needs the lintVital* tasks skipped; CI has network.)
       - run: ./gradlew --no-daemon :app:assembleDebug :app:assembleRelease
       - uses: actions/upload-artifact@v7
