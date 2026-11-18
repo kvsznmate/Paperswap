@@ -21,4 +21,3 @@ slowapi>=0.1.9
 numpy>=1.26.0
 onnxruntime>=1.17.0
 tokenizers>=0.15.0
-trafilatura>=1.6.0

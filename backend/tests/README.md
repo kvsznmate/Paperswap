@@ -52,8 +52,9 @@ docker compose exec news-cards-backend sh -c 'for t in tests/test_*.py; do echo 
 | `test_public_limits.py` | yes | Global swipe/new-session budgets return 503 + Retry-After; one stored swipe per session per article; heartbeat field limits; gzip and Cache-Control; feed served from memory; one cold-start fetch per topic selection per cooldown |
 | `test_load_shedding.py` | yes | The global request ceiling returns 503 + Retry-After past its limit, sheds before routing and logging, and lets admin requests through without spending it; `API_DOCS_ENABLED=false` removes the docs; every `UVICORN_*` variable in the Dockerfile and compose file is a real uvicorn option |
 | `test_topic_summaries.py` | yes | Week arithmetic and the half-open UTC window; boilerplate descriptions never reach the generator; `number_of_articles` describes what was read and `articles_in_window` what was seen; no placeholder row on failure; the summariser runs before the purge and its output outlives the articles |
-| `test_stories.py` | yes (section 7 only) | `stories:v2`: paraphrases with no shared words group by embedding, near-miss stories stay apart, average linkage does not chain, distinct outlets outrank size, each line is the first bullet of the most central enriched article (headline otherwise), every article lands in exactly one story, a failed or truncated Anthropic call falls back to `stories:v2`, and the week query (which carries BYTEA) never reaches a route |
-| `test_paper_feed.py` | yes | The feed fields behind the Paper cards (ADR-013): BBC 240 px thumbnails served at 976 px, stock filler flagged `image_is_stock`, `description_source` passed through as stored and a NULL never backfilled, and no embedding in the payload |
+| `test_stories.py` | yes (section 7 only) | `stories:v3`: paraphrases with no shared words group by embedding, near-miss stories stay apart, average linkage does not chain, distinct outlets outrank size, each line is the first sentence of the most central article's publisher-written description (headline otherwise; a canned or NULL-sourced blurb never), every article lands in exactly one story, a failed or truncated Anthropic call falls back to `stories:v3`, and the week query (which carries BYTEA) never reaches a route |
+| `test_related.py` | yes (sections 2-4) | Related coverage (ADR-015): other publishers only, most similar first, capped, thresholded, within the time window; NULL vs `[]`; writes only changes; the feed serves headline + publisher + link and drops purged ids; no `full_text`/`summary_bullets` column and no page fetching; robots.txt obeyed with RFC 9309 status rules |
+| `test_paper_feed.py` | yes (sections 4-5) | Images and credits behind the Paper cards (ADR-013, ADR-016): BBC thumbnails served at 976 px; the publisher registry (credit wording, longest match, subdomains, "<site> via Hacker News", idempotent); no image from publishers that forbid hot-linking, at fetch and at serve time; rows stored under the old rules served correctly; stored stock filler cleared by `init_db`; `description_source` as stored, NULL never backfilled; no embedding in the payload |
 
 ## Notes
 
@@ -76,7 +77,7 @@ not create.
 `.env`.
 
 **They bypass `lifespan()`** and open the pool directly. That is deliberate:
-running `lifespan()` would trigger a real news fetch and spend NewsAPI quota on
+running `lifespan()` would trigger a real fetch of every publisher RSS feed on
 every test run.
 
 **Rate limits are per-process and in-memory**, so `test_api_security.py` and

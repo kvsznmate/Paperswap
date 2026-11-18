@@ -13,7 +13,7 @@ cp .env.example .env      # fill in the required values first
 docker compose up --build
 ```
 
-Compose fails to start if `NEWS_API_KEY`, `ADMIN_API_KEY`, `POSTGRES_USER`, or `POSTGRES_PASSWORD` are missing. That is deliberate — a missing secret should fail loudly rather than boot on a default.
+Compose fails to start if `ADMIN_API_KEY`, `POSTGRES_USER`, or `POSTGRES_PASSWORD` are missing. That is deliberate — a missing secret should fail loudly rather than boot on a default.
 
 Without Docker, you need a PostgreSQL instance to point at:
 
@@ -32,10 +32,10 @@ python main.py --cli      # sync news once, print a per-topic summary, exit
 | --- | --- |
 | `main.py` | FastAPI app, routes, admin auth, request-log buffer, APScheduler lifespan, CLI runner |
 | `database.py` | Connection pool, schema + migrations (`init_db`), topic catalogue (`CATEGORIES`), queries, dedup, purges, telemetry |
-| `news_fetcher.py` | NewsAPI + publisher RSS ingestion (`TOPIC_FEEDS`), keyword classification, card blurbs with provenance |
+| `news_fetcher.py` | Publisher RSS ingestion (`TOPIC_FEEDS`), keyword classification, card blurbs with provenance |
 | `summarizer.py` | Weekly per-topic digests, run inside `refresh_pipeline` before the purge (ADR-011) |
-| `enrichment.py` | **One-shot job**, run every 6 h by `run_enrichment.sh`. Article body extraction, TextRank bullets, ONNX embeddings. Not imported by `main.py` (ADR-012) |
-| `check_feeds.py` | Health check for the RSS feeds in `TOPIC_FEEDS`; `--extract` proves a feed yields readable text |
+| `enrichment.py` | **One-shot job**, run every 6 h by `run_enrichment.sh`. ONNX embeddings of title + description, then related coverage (nearest articles from other publishers). Never downloads article pages (ADR-015). Not imported by `main.py` (ADR-012) |
+| `check_feeds.py` | Health check for the RSS feeds in `TOPIC_FEEDS`: robots.txt allows our agent, entries arrive, links go straight to the publisher |
 
 `database.CATEGORIES` is the single source of truth for topics. Add an entry there plus a feed in `news_fetcher.TOPIC_FEEDS`, and `init_db()` syncs it into the `categories` table on the next boot. The Android client reads labels and colours from the API, so new topics need no client release.
 
@@ -73,7 +73,6 @@ Set in `.env` (see `.env.example` for the annotated version). Compose refuses to
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `NEWS_API_KEY` | — | **Required.** NewsAPI key for ingestion |
 | `ADMIN_API_KEY` | — | **Required.** Guards `POST /cards/refresh` and both telemetry routes. Unset means those endpoints return `503`, never open |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` | — | **Required.** Applied at initdb time only — see the rotation note below |
 | `POSTGRES_DB` | `newsdb` | Database name |
@@ -90,8 +89,10 @@ Set in `.env` (see `.env.example` for the annotated version). Compose refuses to
 | `API_DOCS_ENABLED` | `true` | Serves `/docs`, `/redoc`, `/openapi.json`. Set `false` once public |
 | `PUBLIC_CACHE_SECONDS` / `SUMMARY_CACHE_SECONDS` | `60` / `600` | In-memory cache and `Cache-Control` max-age for the public GET endpoints |
 | `FEED_COLD_FETCH_COOLDOWN` | `600` | Seconds between synchronous fetches for an empty topic selection |
-| `SUMMARY_GENERATOR` | `stories:v2` | `extractive:v1` is the old offline generator; `anthropic` uses `ANTHROPIC_API_KEY` + `SUMMARY_MODEL`; see `.env.example` for the rest of the summary settings |
-| `SUMMARY_STORY_SIMILARITY` | `0.45` | `stories:v2` grouping threshold; tune with `python summarizer.py --explain` |
+| `SUMMARY_GENERATOR` | `stories:v3` | `extractive:v1` is the old offline generator; `anthropic` uses `ANTHROPIC_API_KEY` + `SUMMARY_MODEL`; see `.env.example` for the rest of the summary settings |
+| `SUMMARY_STORY_SIMILARITY` | `0.45` | `stories:v3` grouping threshold; tune with `python summarizer.py --explain` |
+| `FETCH_USER_AGENT` | `Paperswap/1.0 (non-commercial demo news reader)` | How the feed fetcher names itself; robots.txt rules are matched against it |
+| `RELATED_SIMILARITY` / `RELATED_MAX` / `RELATED_WINDOW_HOURS` | `0.55` / `3` / `72` | Related coverage (enrichment job): cosine cut-off, links per card, largest fetch-time gap. ADR-015 |
 | `DB_POOL_MIN` / `DB_POOL_MAX` / `DB_POOL_TIMEOUT` | `3` / `20` / `5.0` | Connection pool sizing (not passed through by Compose; local runs only) |
 
 ### Retention windows

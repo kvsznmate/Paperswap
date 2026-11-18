@@ -1,13 +1,13 @@
 # Paperswap — notes for coding agents
 
-Swipe-based news reader. FastAPI + PostgreSQL 16 backend (`backend/`), Kotlin/Compose Android client (`android/`), and a web preview served by the backend (`backend/templates/mobile_preview.html`). Start with `README.md`, then `docs/ARCHITECTURE.md` (ADR-001..012). Each ADR explains *why*, and most of the non-obvious code below traces back to one.
+Swipe-based news reader. FastAPI + PostgreSQL 16 backend (`backend/`), Kotlin/Compose Android client (`android/`), and a web preview served by the backend (`backend/templates/mobile_preview.html`). Start with `README.md`, then `docs/ARCHITECTURE.md` (ADR-001..016). Each ADR explains *why*, and most of the non-obvious code below traces back to one.
 
 ## Layout that matters
 
 - `backend/main.py`: routes, admin auth (header for POSTs, header-or-cookie for read-only admin GETs), the request-log buffer, `refresh_pipeline()`, lifespan, and the `--cli` runner.
 - `backend/database.py`: connection pool, the whole schema and its migrations (`init_db()`: `CREATE ... IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`, no Alembic), queries, purges and telemetry. Loads `backend/.env`.
 - `backend/news_fetcher.py`: `TOPIC_FEEDS`, the keyword classifier and card blurbs (`generate_short_summary_tiered` returns `(text, description_source)`).
-- `backend/summarizer.py`: weekly digests. `backend/enrichment.py`: a one-shot ML job run from cron, never imported by the API.
+- `backend/summarizer.py`: weekly digests. `backend/enrichment.py`: a one-shot job run from cron (embeddings + related coverage), never imported by the API.
 - Topics: `database.CATEGORIES` is the single source of truth. A new topic needs an entry there plus one in `news_fetcher.TOPIC_FEEDS`, and no client change.
 
 ## Invariants — do not break
@@ -24,6 +24,7 @@ Swipe-based news reader. FastAPI + PostgreSQL 16 backend (`backend/`), Kotlin/Co
 10. **No database I/O on the request path for logging.** The middleware appends to an in-memory deque, and the scheduler flushes it.
 11. **Escape server data before it reaches `innerHTML`** in the templates. Request paths and RSS titles are attacker-influenced.
 12. **Every public write path is bounded globally, not just per IP** (`public_limits.py`: swipe and new-session budgets, per-session swipe dedupe, cold-start gate). A new public endpoint that writes rows or calls out needs the same.
+13. **No article text.** Never fetch, store or display publishers' article pages (ADR-015). Cards and summaries use only feed fields (headline, the feed's description, link, publisher) and what the database computes from them. Feeds are fetched as `FETCH_USER_AGENT` and robots.txt is obeyed.
 
 ## Working conventions
 
@@ -59,4 +60,4 @@ cd android
 
 Android conventions: every backend call goes through `apiCall {}` (`data/remote/ApiCall.kt`); topic colours come from the server via `parseAccent`, are made readable with `readableOn`, and are never hardcoded per topic; screens read the Paper palette through `Paper.colors` (ADR-013), never literal colours; the base URL is `BuildConfig.BASE_URL` (Gradle property `paperswap.baseUrl`).
 
-Release builds run R8 (`isMinifyEnabled` + `isShrinkResources`). **Gson models must live in `data/model/`**, the package `proguard-rules.pro` keeps; anywhere else they are stripped and deserialise to nulls in release only. Do not re-add `material-icons-extended`; copy single icons as in `ui/components/UndoIcon.kt`. Offline, `assembleRelease` needs `-x lintVitalAnalyzeRelease -x lintVitalReportRelease -x lintVitalRelease`, because the lint artifacts are not in the Gradle cache.
+Release builds run R8 (`isMinifyEnabled` + `isShrinkResources`). **Gson models must live in `data/model/`**, the package `proguard-rules.pro` keeps; anywhere else they are stripped and deserialise to nulls in release only. Do not re-add `material-icons-extended`; copy single icons as in `ui/components/UndoIcon.kt`. Release signing (#65) reads `paperswap.signing.*` Gradle properties or `PAPERSWAP_SIGNING_*` env vars; none set builds unsigned (CI), some set fails the build. Never commit a keystore or password. The key stays on the signing machine by choice (no CI secret): signed releases are cut from `main` with `android/release.sh`, which tags `v<versionName>` and uploads the APK to GitHub Releases. Offline, `assembleRelease` needs `-x lintVitalAnalyzeRelease -x lintVitalReportRelease -x lintVitalRelease`, because the lint artifacts are not in the Gradle cache.

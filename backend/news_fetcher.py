@@ -1,16 +1,29 @@
 import os
 import re
-import requests
-import feedparser
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime
+from urllib.parse import urlsplit
+from urllib.robotparser import RobotFileParser
+
+import feedparser
 
 import database as db  # also loads backend/.env
-
-NEWS_API_KEY = os.getenv("NEWS_API_KEY", "").strip()
 
 # How many articles to pull per topic on each refresh cycle.
 # 7 topics x 12 = 84 candidate articles per batch (before dedup).
 ARTICLES_PER_CATEGORY = int(os.getenv("ARTICLES_PER_CATEGORY", "12"))
+
+# How the fetcher introduces itself to publishers. A named agent instead of
+# feedparser's default lets a publisher see who is reading their feed and
+# address robots.txt rules to it (ADR-015). Override to add a contact URL.
+FETCH_USER_AGENT = os.getenv(
+    "FETCH_USER_AGENT", "Paperswap/1.0 (non-commercial demo news reader)").strip()
+
+# robots.txt answers are cached per host for this long, so a refresh of ~20
+# feeds costs a handful of robots requests a day, not one per feed per refresh.
+ROBOTS_CACHE_SECONDS = 24 * 3600
 
 
 # ---------------------------------------------------------------------------
@@ -18,26 +31,20 @@ ARTICLES_PER_CATEGORY = int(os.getenv("ARTICLES_PER_CATEGORY", "12"))
 # One entry per slug in database.CATEGORIES. To add a topic: add it to
 # database.CATEGORIES, then add a matching block here. Nothing else changes.
 #
-#   newsapi_query   -> passed to NewsAPI /v2/everything (primary source)
 #   rss_urls        -> publisher feeds, round-robin. Verified with check_feeds.py
 #   summary_fallback-> used when the feed gives no usable description
-#   images          -> hero image used only when the article has none of its own
 #
 # These were Google News search feeds until every one of them was replaced.
 # Google News does not publish article links, it publishes redirect wrappers
 # (news.google.com/rss/articles/CBMi...) that bounce through consent.google.com
-# and loop. A phone browser follows them fine, so swipe-to-read always worked --
-# but server-side extraction gets nothing, so full_text was NULL on all 532
-# rows and every card back was empty. Since 2024 the wrapper cannot be decoded
-# offline either; resolving it needs Google's undocumented batchexecute endpoint.
+# and loop, and they credit Google rather than the publisher. Publisher feeds
+# link straight to the story, which is what the feeds' terms ask for.
 #
-# Feeds rot. Re-run `python check_feeds.py --extract` before trusting a change
-# here -- and note that --extract is the test that matters: MarketWatch,
-# Politico and Nature all return perfectly clean links that yield zero text.
+# Feeds rot. Re-run `python check_feeds.py` before trusting a change here, and
+# read a new feed's terms of use first (#66): some forbid use in an app.
 # ---------------------------------------------------------------------------
 TOPIC_FEEDS = {
     "TECH": {
-        "newsapi_query": "technology OR tech OR AI",
         "rss_urls": [
             "https://feeds.arstechnica.com/arstechnica/index",
             "https://www.theverge.com/rss/index.xml",
@@ -45,58 +52,29 @@ TOPIC_FEEDS = {
             "https://www.engadget.com/rss.xml",
         ],
         "summary_fallback": "Breakthrough technology updates and strategic market shifts impacting digital infrastructure and software.",
-        "images": [
-            "https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=800&q=80",
-            "https://images.unsplash.com/photo-1451187580459-43490279c0fa?auto=format&fit=crop&w=800&q=80",
-            "https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?auto=format&fit=crop&w=800&q=80",
-            "https://images.unsplash.com/photo-1485827404703-89b55fcc595e?auto=format&fit=crop&w=800&q=80",
-        ],
     },
     "FINANCE": {
-        "newsapi_query": "finance OR stocks OR markets OR earnings",
         "rss_urls": [
             "https://www.cnbc.com/id/100003114/device/rss/rss.html",
-            "https://finance.yahoo.com/news/rssindex",
             "https://feeds.bbci.co.uk/news/business/rss.xml",
         ],
         "summary_fallback": "Financial sector analysis covering corporate earnings, market trends, and strategic investment movements.",
-        "images": [
-            "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?auto=format&fit=crop&w=800&q=80",
-            "https://images.unsplash.com/photo-1590283603385-17ffb3a7f29f?auto=format&fit=crop&w=800&q=80",
-            "https://images.unsplash.com/photo-1559526324-4b87b5e36e44?auto=format&fit=crop&w=800&q=80",
-            "https://images.unsplash.com/photo-1460925895917-afdab827c52f?auto=format&fit=crop&w=800&q=80",
-        ],
     },
     "SPORTS": {
-        "newsapi_query": "sports OR football OR basketball OR soccer OR tennis",
         "rss_urls": [
             "https://feeds.bbci.co.uk/sport/rss.xml",
             "https://www.skysports.com/rss/12040",
         ],
         "summary_fallback": "Match results, transfer moves, and championship standings from across the world of professional sport.",
-        "images": [
-            "https://loremflickr.com/800/1200/stadium,sport?lock=11",
-            "https://loremflickr.com/800/1200/football?lock=12",
-            "https://loremflickr.com/800/1200/basketball?lock=13",
-            "https://loremflickr.com/800/1200/athlete,running?lock=14",
-        ],
     },
     "POLITICS": {
-        "newsapi_query": "politics OR election OR parliament OR government policy",
         "rss_urls": [
             "https://feeds.bbci.co.uk/news/politics/rss.xml",
             "https://feeds.npr.org/1014/rss.xml",
         ],
         "summary_fallback": "Legislative developments, election coverage, and policy debates shaping domestic and international governance.",
-        "images": [
-            "https://loremflickr.com/800/1200/parliament,building?lock=21",
-            "https://loremflickr.com/800/1200/capitol?lock=22",
-            "https://loremflickr.com/800/1200/voting,election?lock=23",
-            "https://loremflickr.com/800/1200/flag,government?lock=24",
-        ],
     },
     "PROGRAMMING": {
-        "newsapi_query": "programming OR \"software development\" OR \"open source\" OR developer tools",
         "rss_urls": [
             "https://dev.to/feed",
             "https://feed.infoq.com/",
@@ -105,41 +83,21 @@ TOPIC_FEEDS = {
             "https://hnrss.org/frontpage",
         ],
         "summary_fallback": "Language releases, framework updates, and open-source project news relevant to working software engineers.",
-        "images": [
-            "https://loremflickr.com/800/1200/code,screen?lock=31",
-            "https://loremflickr.com/800/1200/keyboard,programming?lock=32",
-            "https://loremflickr.com/800/1200/terminal,computer?lock=33",
-            "https://loremflickr.com/800/1200/developer,laptop?lock=34",
-        ],
     },
     "SCIENCE": {
-        "newsapi_query": "science OR research OR space OR physics OR biology",
         "rss_urls": [
             "https://phys.org/rss-feed/",
             "https://www.sciencedaily.com/rss/all.xml",
             "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
         ],
         "summary_fallback": "Peer-reviewed findings, space missions, and laboratory breakthroughs reported from the global research community.",
-        "images": [
-            "https://loremflickr.com/800/1200/laboratory,science?lock=41",
-            "https://loremflickr.com/800/1200/space,galaxy?lock=42",
-            "https://loremflickr.com/800/1200/microscope?lock=43",
-            "https://loremflickr.com/800/1200/telescope,observatory?lock=44",
-        ],
     },
     "BEAUTY": {
-        "newsapi_query": "beauty OR skincare OR cosmetics OR makeup",
         "rss_urls": [
             "https://www.allure.com/feed/rss",
             "https://www.refinery29.com/en-us/beauty/rss.xml",
         ],
         "summary_fallback": "Product launches, skincare research, and brand movements across the global beauty and cosmetics industry.",
-        "images": [
-            "https://loremflickr.com/800/1200/cosmetics?lock=51",
-            "https://loremflickr.com/800/1200/skincare?lock=52",
-            "https://loremflickr.com/800/1200/makeup?lock=53",
-            "https://loremflickr.com/800/1200/perfume,beauty?lock=54",
-        ],
     },
 }
 
@@ -149,10 +107,6 @@ def get_topic_config(category: str) -> dict:
     return TOPIC_FEEDS.get(slug, TOPIC_FEEDS[db.DEFAULT_CATEGORY])
 
 
-def fallback_image(category: str, idx: int) -> str:
-    """Deterministic hero image for a topic when the article ships without one."""
-    images = get_topic_config(category)["images"]
-    return images[idx % len(images)]
 
 
 def clean_html(text: str) -> str:
@@ -294,11 +248,101 @@ def classify_category(title: str, description: str, fallback: str) -> str:
     return fallback
 
 
-# Lets us tell "generic topic filler" apart from a real article photo, so that
-# relabelling an article swaps its filler image but never clobbers a real one.
-# The feed also exposes it per article (image_is_stock), so the clients can drop
-# a filler photo instead of showing a laptop over an aviation story (ADR-013).
-_STOCK_IMAGES = {url for cfg in TOPIC_FEEDS.values() for url in cfg["images"]}
+# ---------------------------------------------------------------------------
+# PUBLISHERS (#71, #72, ADR-016)
+#
+# Who an article belongs to, keyed by its link: the host without "www.",
+# optionally with a path prefix. The longest match wins, so "bbc.co.uk/sport"
+# beats "bbc.co.uk", and a subdomain matches its parent ("feeds.npr.org" ->
+# "npr.org").
+#
+#   name            the credit shown on cards and in digests, in the wording the
+#                   publisher's terms ask for where they ask (#66 survey: NPR,
+#                   Science Daily, BBC News). The RSS channel title is not used:
+#                   CNBC's is "US Top News and Analysis".
+#   hotlink_images  False where the terms forbid linking to their images
+#                   (The Verge, Refinery29) or to their content "in-line"
+#                   (TechCrunch, CNBC). Those cards are type-only (ADR-013).
+#
+# A link that matches nothing keeps the feed's own name. Items from an
+# aggregator feed (AGGREGATORS, keyed by the feed's title) link to arbitrary
+# sites, so they are credited "<site> via <aggregator>".
+#
+# Applied at fetch time, and again at serve time so rows stored before a change
+# here pick it up. Both are idempotent.
+# ---------------------------------------------------------------------------
+PUBLISHERS = {
+    "arstechnica.com":   {"name": "Ars Technica"},
+    "theverge.com":      {"name": "The Verge", "hotlink_images": False},
+    "techcrunch.com":    {"name": "TechCrunch", "hotlink_images": False},
+    "engadget.com":      {"name": "Engadget"},
+    "cnbc.com":          {"name": "CNBC", "hotlink_images": False},
+    "bbc.co.uk":         {"name": "BBC News"},
+    "bbc.com":           {"name": "BBC News"},
+    "bbc.co.uk/sport":   {"name": "BBC Sport"},
+    "bbc.com/sport":     {"name": "BBC Sport"},
+    "skysports.com":     {"name": "Sky Sports"},
+    "npr.org":           {"name": "NPR"},
+    "dev.to":            {"name": "DEV Community"},
+    "infoq.com":         {"name": "InfoQ"},
+    "phys.org":          {"name": "Phys.org"},
+    "sciencedaily.com":  {"name": "Science Daily"},
+    "allure.com":        {"name": "Allure"},
+    "refinery29.com":    {"name": "Refinery29", "hotlink_images": False},
+}
+
+AGGREGATORS = {
+    "Hacker News: Front Page": "Hacker News",
+}
+
+
+def _host_and_path(url: str) -> tuple:
+    try:
+        parts = urlsplit(url or "")
+    except ValueError:
+        return "", ""
+    host = (parts.hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host, parts.path or "/"
+
+
+def publisher_for(url: str):
+    """The PUBLISHERS entry for an article link, or None."""
+    host, path = _host_and_path(url)
+    if not host:
+        return None
+    best, best_len = None, -1
+    for key, entry in PUBLISHERS.items():
+        k_host, _, k_path = key.partition("/")
+        if not (host == k_host or host.endswith("." + k_host)):
+            continue
+        if k_path and not (path == "/" + k_path or path.startswith("/" + k_path + "/")):
+            continue
+        if len(key) > best_len:
+            best, best_len = entry, len(key)
+    return best
+
+
+def publisher_credit(url: str, feed_source: str) -> str:
+    """The name to credit for an article: the registry's, else '<site> via
+    <aggregator>' for aggregator items, else the feed's own name."""
+    entry = publisher_for(url)
+    if entry:
+        return entry["name"]
+    feed_source = (feed_source or "").strip()
+    if feed_source in AGGREGATORS:
+        host, _ = _host_and_path(url)
+        if host:
+            return f"{host} via {AGGREGATORS[feed_source]}"
+    return feed_source or "Unknown"
+
+
+def image_allowed(url: str) -> bool:
+    """False when the article's publisher forbids hot-linking its images."""
+    entry = publisher_for(url)
+    return entry is None or entry.get("hotlink_images", True)
+
 
 # BBC feeds link a 240 px thumbnail; a card shows it 4-9x enlarged. The same
 # image is served at larger widths by changing that path segment (976 checked
@@ -315,15 +359,19 @@ def upgrade_image_url(url: str) -> str:
 
 
 def present_for_client(articles: list) -> list:
-    """Per-article fields the feed adds for the clients. Mutates and returns.
+    """The publisher rules and the BBC image upgrade, applied to a deck about to
+    be served. Mutates and returns.
 
-    Done at serve time rather than only at fetch time so rows stored before the
-    BBC upgrade get it too (they live up to PURGE_OLDER_THAN_DAYS).
+    Done at serve time as well as at fetch time, so rows stored before a rule
+    changed get it too (they live up to PURGE_OLDER_THAN_DAYS).
     """
     for item in articles:
-        url = item.get('image_url') or ''
-        item['image_is_stock'] = url in _STOCK_IMAGES
-        item['image_url'] = upgrade_image_url(url)
+        link = item.get('url') or ''
+        item['source'] = publisher_credit(link, item.get('source'))
+        image = item.get('image_url') or ''
+        item['image_url'] = upgrade_image_url(image) if image_allowed(link) else ''
+        for rel in item.get('related') or []:
+            rel['source'] = publisher_credit(rel.get('url'), rel.get('source'))
     return articles
 
 
@@ -384,8 +432,6 @@ def extract_rss_image(entry) -> str:
 DESC_PUBLISHER = "publisher"
 DESC_KEYWORD_TEMPLATE = "keyword_template"
 DESC_TOPIC_FALLBACK = "topic_fallback"
-
-DESCRIPTION_SOURCES = (DESC_PUBLISHER, DESC_KEYWORD_TEMPLATE, DESC_TOPIC_FALLBACK)
 
 KEYWORD_SUMMARY_RULES = [
     (("ai", "artificial intelligence", "machine learning"),
@@ -488,62 +534,59 @@ def generate_short_summary_tiered(title: str, category: str, raw_desc: str,
     return get_topic_config(category)["summary_fallback"], DESC_TOPIC_FALLBACK
 
 
-def fetch_from_news_api(category: str, count: int = ARTICLES_PER_CATEGORY) -> list:
-    """Fetch news for one topic from NewsAPI.org."""
-    if not NEWS_API_KEY or NEWS_API_KEY == "your_news_api_key_here":
-        return []
+_robots_cache = {}  # "scheme://host" -> (fetched_at, RobotFileParser)
 
-    config = get_topic_config(category)
-    params = {
-        "q": config["newsapi_query"],
-        "language": "en",
-        "sortBy": "publishedAt",
-        "pageSize": count,
-        "apiKey": NEWS_API_KEY,
-    }
 
+def _robots_for(url: str) -> RobotFileParser:
+    """The host's robots.txt, fetched with our User-Agent, cached per host.
+
+    Status handling follows RFC 9309, section 2.3.1:
+      - 2xx: obey the file.
+      - 4xx (including 401/403): "unavailable", the crawler MAY access
+        anything. Python's RobotFileParser.read() would treat 401/403 as
+        disallow-all instead, which is why the file is fetched here.
+      - 5xx or no answer: "unreachable", the crawler MUST assume complete
+        disallow. Cached for an hour rather than a day, so a brief outage
+        does not cost the feed for a whole day.
+    """
+    parts = urlsplit(url)
+    base = f"{parts.scheme}://{parts.netloc}"
+    now = time.time()
+    cached = _robots_cache.get(base)
+    if cached and now < cached[0]:
+        return cached[1]
+
+    parser = RobotFileParser()
+    ttl = ROBOTS_CACHE_SECONDS
     try:
-        resp = requests.get("https://newsapi.org/v2/everything", params=params, timeout=8)
-        if resp.status_code != 200:
-            print(f"[Warning] NewsAPI returned {resp.status_code} for {category}")
-            return []
+        req = urllib.request.Request(base + "/robots.txt",
+                                     headers={"User-Agent": FETCH_USER_AGENT})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            parser.parse(resp.read().decode("utf-8", "replace").splitlines())
+    except urllib.error.HTTPError as exc:
+        if 400 <= exc.code < 500:
+            parser.allow_all = True
+        else:
+            parser.disallow_all = True
+            ttl = 3600
+    except Exception:
+        parser.disallow_all = True
+        ttl = 3600
 
-        articles = resp.json().get("articles", [])
-        results = []
-        for idx, art in enumerate(articles[:count]):
-            img = upgrade_image_url(art.get("urlToImage")) or fallback_image(category, idx)
+    _robots_cache[base] = (now + ttl, parser)
+    return parser
 
-            pub_time = art.get("publishedAt", "")
-            try:
-                dt = datetime.strptime(pub_time[:19], "%Y-%m-%dT%H:%M:%S")
-                pub_str = dt.strftime("%b %d, %Y - %H:%M")
-            except Exception:
-                pub_str = pub_time or "Recently"
 
-            src_name = art.get("source", {}).get("name", "News API")
-            title = art.get("title", "Untitled News")
-            desc, desc_source = generate_short_summary_tiered(
-                title, category, art.get("description", ""), src_name)
-
-            results.append({
-                "title": title,
-                "description": desc,
-                "description_source": desc_source,
-                "raw_description": art.get("description", ""),
-                "source": src_name,
-                "published_at": pub_str,
-                "category": category,
-                "image_url": img,
-                "url": art.get("url", "#"),
-            })
-        return results
-    except Exception as e:
-        print(f"[Warning] NewsAPI fetch failed for {category}: {e}")
-    return []
+def feed_allowed(url: str) -> bool:
+    """True when the feed host's robots.txt lets FETCH_USER_AGENT fetch url."""
+    return _robots_for(url).can_fetch(FETCH_USER_AGENT, url)
 
 
 def fetch_from_rss(category: str, count: int = ARTICLES_PER_CATEGORY) -> list:
     """Fetch one topic, round-robin across its publisher feeds.
+
+    Publisher RSS is the only news source (ADR-014 removed NewsAPI, which never
+    worked from the server).
 
     Round-robin rather than concatenate. BBC Sport returns 76 entries and Sky
     returns 20, so reading them in order would make nearly every Sports card a
@@ -561,13 +604,14 @@ def fetch_from_rss(category: str, count: int = ARTICLES_PER_CATEGORY) -> list:
     """
     config = get_topic_config(category)
     urls = config.get("rss_urls") or []
-    if isinstance(urls, str):        # tolerate the old single-URL form
-        urls = [urls]
 
     batches = []
     for url in urls:
+        if not feed_allowed(url):
+            print(f"[Skip] {category}: robots.txt disallows {url} for {FETCH_USER_AGENT!r}")
+            continue
         try:
-            feed = feedparser.parse(url)
+            feed = feedparser.parse(url, agent=FETCH_USER_AGENT)
             entries = list(getattr(feed, "entries", []))
             if not entries:
                 # feedparser does not raise on a 404 or a bot challenge; it
@@ -594,9 +638,8 @@ def fetch_from_rss(category: str, count: int = ARTICLES_PER_CATEGORY) -> list:
 
             entry = entries[position]
 
-            source = feed_title or "Unknown"
-            if hasattr(entry, 'source') and hasattr(entry.source, 'title'):
-                source = entry.source.title
+            link = entry.get("link", "#")
+            source = publisher_credit(link, feed_title)
 
             # The old code stripped everything after the last ' - ' from both
             # title and source, because Google News appends ' - Publisher' to
@@ -622,32 +665,13 @@ def fetch_from_rss(category: str, count: int = ARTICLES_PER_CATEGORY) -> list:
                 "source": source,
                 "published_at": pub_str,
                 "category": category,
-                "image_url": upgrade_image_url(extract_rss_image(entry)) or fallback_image(category, len(results)),
-                "url": entry.get("link", "#"),
+                # No image is better than a stock one (ADR-013), and none at all
+                # where the publisher forbids hot-linking (ADR-016).
+                "image_url": upgrade_image_url(extract_rss_image(entry)) if image_allowed(link) else "",
+                "url": link,
             })
 
     return results
-
-
-def fetch_topic(category: str, count: int = ARTICLES_PER_CATEGORY) -> list:
-    """Fetch one topic, preferring NewsAPI and falling back to RSS when the
-    key is missing or the API returns a short batch.
-
-    In practice on the deployed VM, RSS is not the fallback -- it is the only
-    source. All 532 rows in the database came from it. NewsAPI's free Developer
-    plan is licensed for development use and rejects requests from server
-    environments, so a key that works on a laptop still returns nothing from
-    Oracle Cloud, and this function silently falls through every time.
-
-    Left in place because it costs nothing and starts working the day the plan
-    is upgraded. But do not read `newsapi_query` as if it were live.
-    """
-    items = fetch_from_news_api(category, count)
-    if len(items) < count:
-        rss_items = fetch_from_rss(category, count)
-        if len(rss_items) > len(items):
-            items = rss_items
-    return items[:count]
 
 
 def fetch_and_sync_news_to_db(categories=None) -> list:
@@ -666,7 +690,7 @@ def fetch_and_sync_news_to_db(categories=None) -> list:
     per_topic_counts = {}
 
     for category in target_categories:
-        items = fetch_topic(category, ARTICLES_PER_CATEGORY)
+        items = fetch_from_rss(category, ARTICLES_PER_CATEGORY)
         per_topic_counts[category] = len(items)
         raw_articles.extend(items)
         print(f"[Fetch] {category}: {len(items)} item(s) retrieved.")
@@ -687,10 +711,6 @@ def fetch_and_sync_news_to_db(categories=None) -> list:
             item['category'] = true_category
             reclassified_count += 1
             print(f"[Reclassified] {query_category} -> {true_category}: {item['title'][:50]}...")
-            # Its filler hero image belonged to the old topic; only swap generic
-            # filler, never a real photo the publisher supplied.
-            if item.get('image_url') in _STOCK_IMAGES:
-                item['image_url'] = fallback_image(true_category, idx)
 
         # Rebuild the blurb against the FINAL topic so a politics story can never
         # keep a tech-flavoured fallback line. The tier is recaptured with it --

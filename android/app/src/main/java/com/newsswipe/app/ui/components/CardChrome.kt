@@ -49,13 +49,14 @@ val NewsArticle.topicName: String
     get() = categoryLabel ?: category.lowercase().replaceFirstChar { it.uppercase() }
 
 /**
- * Show a photo only when the publisher sent one. Stock filler -- 22 of 69 cards
- * in the sample behind ADR-013 -- is dropped, and the card leads with type.
- * `imageUrl` is declared non-null but Gson can still leave it null.
+ * Show a photo only when the publisher sent one; otherwise the card leads with
+ * type (ADR-013). The backend sends "" for no photo, including publishers that
+ * forbid hot-linking (ADR-016). `imageUrl` is declared non-null but Gson can
+ * still leave it null.
  */
 @Suppress("SENSELESS_COMPARISON")
 val NewsArticle.showsPhoto: Boolean
-    get() = imageUrl != null && imageUrl.isNotBlank() && imageIsStock != true
+    get() = imageUrl != null && imageUrl.isNotBlank()
 
 /** Hide a canned blurb: it reads as a summary of this story and is not one. */
 @Suppress("SENSELESS_COMPARISON")

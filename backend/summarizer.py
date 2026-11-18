@@ -1,15 +1,17 @@
 """Weekly per-topic summaries.
 
-This is a summary OF summaries. Nothing here reads article bodies. It works from
-what earlier stages already stored per article:
+This is a summary OF summaries. Nothing here reads article bodies, and nothing
+in Paperswap stores them (ADR-015). It works from what the feeds published and
+what earlier stages stored per article:
 
   description      the card blurb, from news_fetcher at fetch time
-  summary_bullets  up to 3 TextRank sentences from the body, from enrichment.py
   embedding        a MiniLM vector of "title. description", from enrichment.py
 
-The default generator, stories:v2, groups the week's articles into stories by
-embedding similarity and reports each story's first extracted sentence, i.e.
-what happened, rather than the headline vocabulary extractive:v1 counts.
+The default generator, stories:v3, groups the week's articles into stories by
+embedding similarity and reports each story's headline with the first sentence
+of the publisher's own description, i.e. what happened, rather than the
+headline vocabulary extractive:v1 counts. (stories:v2 used a sentence copied
+from the article body instead; rows it wrote keep that generator id.)
 
 Two things about that input shape the whole module.
 
@@ -46,17 +48,18 @@ from datetime import date, datetime, timedelta, timezone
 import requests
 
 import database as db
+import news_fetcher as nf
 
 logger = logging.getLogger("paperswap.summarizer")
 
 
 # --- Configuration -----------------------------------------------------------
 
-# 'stories:v2' (default: offline, deterministic, free), 'extractive:v1' (the
+# 'stories:v3' (default: offline, deterministic, free), 'extractive:v1' (the
 # previous offline generator) or 'anthropic' (LLM-written from the story groups).
-SUMMARY_GENERATOR = os.getenv("SUMMARY_GENERATOR", "stories:v2").strip()
+SUMMARY_GENERATOR = os.getenv("SUMMARY_GENERATOR", "stories:v3").strip()
 
-# stories:v2 -- two articles belong to the same story when the average cosine
+# stories:v3 -- two articles belong to the same story when the average cosine
 # similarity between their groups is at least this. See ADR-011 for how the
 # value was chosen and `python summarizer.py --explain` for tuning it.
 STORY_SIMILARITY = float(os.getenv("SUMMARY_STORY_SIMILARITY", "0.45"))
@@ -237,7 +240,7 @@ def _extractive_v1(topic: str, articles: list) -> tuple:
     return (opening + body).strip(), "extractive:v1"
 
 
-# --- stories:v2 --------------------------------------------------------------
+# --- stories:v3 --------------------------------------------------------------
 #
 # Pure Python on purpose. The API process never imports numpy (only the
 # enrichment job does), and this runs inside the API's scheduler, so numpy here
@@ -344,6 +347,32 @@ def _coverage(sources: list, n_articles: int) -> str:
     return f"{n_articles} {noun} · {', '.join(named)}{tail}"
 
 
+_FIRST_SENTENCE = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'“])")
+
+# A digest line has to stay one line on a phone. Most publisher descriptions
+# open with a sentence well under this; the few that do not are run-ons.
+LEDE_MAX_CHARS = 240
+
+
+def _publisher_lede(article: dict):
+    """The first sentence of the article's publisher-written description, or
+    None.
+
+    Only description_source == 'publisher'. A canned blurb would put a fact
+    about news_fetcher's rule table into the digest, and NULL (a row older than
+    the column) is unknown provenance, which is not guessed (invariant 5).
+    """
+    if article.get("description_source") != "publisher":
+        return None
+    text = " ".join((article.get("description") or "").split())
+    if not text:
+        return None
+    sentence = _FIRST_SENTENCE.split(text, maxsplit=1)[0]
+    if len(sentence) > LEDE_MAX_CHARS:
+        sentence = sentence[:LEDE_MAX_CHARS].rsplit(" ", 1)[0].rstrip(",;:") + "…"
+    return sentence
+
+
 def build_stories(articles: list, threshold: float = None) -> list:
     """Every story in the week, most covered first.
 
@@ -351,12 +380,12 @@ def build_stories(articles: list, threshold: float = None) -> list:
     outlets reporting one event says more about the week than one outlet
     filing six updates on it.
 
-    The line for each story is the FIRST summary bullet of the article closest
-    to the story's centroid, among the members that have bullets. Bullets are
-    kept in document order (enrichment.textrank), and news is written lede
-    first, so that sentence is normally what happened. A story where no member
-    has bullets (body extraction failed or has not run) falls back to the
-    representative headline, and `from_bullet` records which one was used.
+    The line for each story is the first sentence of the publisher-written
+    description of the article closest to the story's centroid, among the
+    members that have one. Publishers write the feed description lede first,
+    so that sentence is normally what happened. A story where no member has a
+    publisher description falls back to the representative headline, and
+    `from_description` records which one was used.
     """
     vecs = _unit_vectors(articles)
     stories = []
@@ -370,13 +399,16 @@ def build_stories(articles: list, threshold: float = None) -> list:
             closeness = {}
         by_centrality = sorted(members, key=lambda i: (-closeness.get(i, float("-inf")), i))
 
-        with_bullets = [i for i in by_centrality if articles[i].get("summary_bullets")]
-        rep = with_bullets[0] if with_bullets else by_centrality[0]
+        described = [i for i in by_centrality if _publisher_lede(articles[i])]
+        rep = described[0] if described else by_centrality[0]
         headline = (articles[rep].get("title") or "").strip()
-        lede = articles[rep]["summary_bullets"][0] if with_bullets else None
+        lede = _publisher_lede(articles[rep]) if described else None
 
-        source_counts = Counter(articles[i].get("source") for i in members
-                                if articles[i].get("source"))
+        # Credited the way the cards are (ADR-016), so a digest names "CNBC",
+        # not the feed's channel title, even for rows stored before the rule.
+        credits = [nf.publisher_credit(articles[i].get("url"), articles[i].get("source"))
+                   for i in members if articles[i].get("source")]
+        source_counts = Counter(credits)
         sources = [s for s, _ in sorted(source_counts.items(), key=lambda kv: (-kv[1], kv[0]))]
 
         stories.append({
@@ -386,7 +418,7 @@ def build_stories(articles: list, threshold: float = None) -> list:
             "representative": rep,
             "headline": headline,
             "lede": lede,
-            "from_bullet": lede is not None,
+            "from_description": lede is not None,
             "text": lede or headline,
             "coverage": _coverage(sources, len(members)),
         })
@@ -405,12 +437,13 @@ def _pick_stories(stories: list) -> list:
     return multi + singles[:MIN_STORIES - len(multi)]
 
 
-def _stories_v2(topic: str, articles: list, threshold: float = None) -> tuple:
+def _stories_v3(topic: str, articles: list, threshold: float = None) -> tuple:
     """Deterministic, offline, free. One line per story: what happened, then
     how many articles covered it and which outlets.
 
-    The text quotes extracted sentences verbatim and adds only counts. It does
-    not paraphrase, so it cannot state anything the articles did not.
+    The text is the publishers' own headlines and feed descriptions plus
+    counts. It does not paraphrase, so it cannot state anything the feeds did
+    not.
     """
     label = db.CATEGORIES[db.normalize_category(topic)]["label"]
     picked = _pick_stories(build_stories(articles, threshold))
@@ -424,7 +457,7 @@ def _stories_v2(topic: str, articles: list, threshold: float = None) -> tuple:
                    f"and no story appeared in more than one. A sample:")
 
     lines = [opening] + [f"• {s['text']} ({s['coverage']})" for s in picked]
-    return "\n".join(lines), "stories:v2"
+    return "\n".join(lines), "stories:v3"
 
 
 # --- anthropic ---------------------------------------------------------------
@@ -433,8 +466,8 @@ _PROMPT = """You are writing a weekly digest for the "{label}" topic of a news a
 
 The list below is NOT full articles. {n} articles were grouped into stories by
 similarity. Each line is one story: how many articles covered it and from which
-outlets, a representative headline, and, where available, one sentence
-extracted verbatim from an article body. Lines are ordered by how widely the
+outlets, a representative headline, and, where available, the first sentence
+of the publisher's own description of it. Lines are ordered by how widely the
 story was covered. Write accordingly and do not imply you read the articles.
 
 Rules:
@@ -508,7 +541,7 @@ def _anthropic(topic: str, articles: list) -> tuple:
         )
 
     label = db.CATEGORIES[db.normalize_category(topic)]["label"]
-    # Coverage, headline and extracted sentence. Never the URL: handing a model
+    # Coverage, headline and the publisher's description sentence. Never the URL: handing a model
     # a link is an invitation to cite it as though it had been read.
     lines = _story_lines(build_stories(articles)[:_ANTHROPIC_MAX_STORIES])
     prompt = _PROMPT.format(label=label, n=len(articles), lines=lines)
@@ -569,20 +602,20 @@ def summarise(topic: str, articles: list) -> tuple:
     from a real summary and there is nothing left to check it against. A missing
     row is visible, recoverable while the articles survive, and honest.
 
-    Under SUMMARY_GENERATOR=anthropic a failed call falls back to stories:v2.
+    Under SUMMARY_GENERATOR=anthropic a failed call falls back to stories:v3.
     That is not a placeholder: it is a complete digest, and the row's generator
-    column says stories:v2, so nothing claims the model wrote it.
+    column says stories:v3, so nothing claims the model wrote it.
     """
     if SUMMARY_GENERATOR.startswith("anthropic"):
         try:
             return _anthropic(topic, articles)
         except Exception as exc:
-            logger.warning("Anthropic summary failed for %s, falling back to stories:v2: %s",
+            logger.warning("Anthropic summary failed for %s, falling back to stories:v3: %s",
                            topic, exc, exc_info=True)
-            return _stories_v2(topic, articles)
+            return _stories_v3(topic, articles)
     if SUMMARY_GENERATOR == "extractive:v1":
         return _extractive_v1(topic, articles)
-    return _stories_v2(topic, articles)
+    return _stories_v3(topic, articles)
 
 
 def generate_weekly_summaries(week_start: date = None, force: bool = False) -> dict:
@@ -619,8 +652,7 @@ def generate_weekly_summaries(week_start: date = None, force: bool = False) -> d
 
             if len(articles) < MIN_ARTICLES_FOR_SUMMARY:
                 # No row rather than a thin one. Common for the narrow topics --
-                # Beauty and Programming on Google News RSS often have almost no
-                # publisher descriptions. This is the system working.
+                # Beauty and Programming often have few publisher descriptions. This is the system working.
                 skipped.append({
                     "topic": topic,
                     "usable": len(articles),
@@ -676,7 +708,7 @@ def generate_weekly_summaries(week_start: date = None, force: bool = False) -> d
 # --- Tuning ------------------------------------------------------------------
 
 def explain_week(week_start: date, topics: list, thresholds: list, out=sys.stdout) -> None:
-    """Print how stories:v2 groups one week at several thresholds. Read-only.
+    """Print how stories:v3 groups one week at several thresholds. Read-only.
 
     This is how SUMMARY_STORY_SIMILARITY gets tuned: run it on a real week, read
     the multi-article groups, and look for the two failure modes. Too low merges
@@ -688,9 +720,9 @@ def explain_week(week_start: date, topics: list, thresholds: list, out=sys.stdou
         articles = db.get_articles_for_week(topic, week_start, publisher_only=PUBLISHER_ONLY,
                                             limit=SUMMARY_MAX_ARTICLES)
         embedded = sum(1 for v in _unit_vectors(articles) if v is not None)
-        bulleted = sum(1 for a in articles if a.get("summary_bullets"))
+        described = sum(1 for a in articles if _publisher_lede(a))
         print(f"\n=== {topic}  week {week_start}: {len(articles)} usable articles, "
-              f"{embedded} embedded, {bulleted} with bullets", file=out)
+              f"{embedded} embedded, {described} with a publisher description", file=out)
         if not articles:
             continue
 
@@ -705,7 +737,7 @@ def explain_week(week_start: date, topics: list, thresholds: list, out=sys.stdou
                     mark = "*" if i == s["representative"] else " "
                     print(f"   {mark} {articles[i].get('title')}", file=out)
 
-        text, _ = _stories_v2(topic, articles)
+        text, _ = _stories_v3(topic, articles)
         print(f"\n--- digest at the configured SUMMARY_STORY_SIMILARITY "
               f"({STORY_SIMILARITY:.2f}):\n{text}", file=out)
 

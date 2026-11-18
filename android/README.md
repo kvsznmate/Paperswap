@@ -2,12 +2,14 @@
 
 A native Android app in **Kotlin** with **Jetpack Compose**. It talks to the FastAPI backend in `../backend` and shows topic-balanced news cards across seven categories in a swipe interface, a weekly edition, and a Saved list. The look is the Paper design (ADR-013): ink on paper by day, following the phone's dark mode at night. The package name is still `com.newsswipe.app`, a leftover from the project's original name.
 
+> **Non-commercial demo.** PaperSwap is a portfolio project with no ads, subscriptions or revenue, and it is not affiliated with any publisher. It shows each story's headline, the publisher's own feed description and a link to the original, credited to its publisher; it never copies article text (ADR-015). Stories belong to their publishers.
+
 ---
 
 ## Features
 
-- **Swipe deck.** Swipe right, or tap **Read →**, to open the article in Android Custom Tabs. Swipe left, or tap **Pass**, to skip. Cards lead with the headline; a photo shows only when the publisher sent one, and a canned blurb is hidden (`image_is_stock`, `description_source`).
-- **Card flip.** Tap a card to see its key points, the sentences the backend enrichment job picked. The back says so when the article has not been enriched yet.
+- **Swipe deck.** Swipe right, or tap **Read →**, to open the article in Android Custom Tabs. Swipe left, or tap **Pass**, to skip. Cards lead with the headline; a photo shows only when the publisher sent one and allows hot-linking it (ADR-016), and a canned blurb is hidden (`description_source`). Each card credits its real publisher.
+- **Card flip.** Tap a card to see the publisher's own description and **Also covered by**: the same story from other publishers, matched by the backend from article embeddings (ADR-015). Tap one to open it. Nothing on the card is copied from the article page.
 - **Swipe logging.** Each swipe sends `POST /api/v1/swipe` with `dwell_ms` and `flipped`. `dwell_ms` counts only the time the deck was actually on screen: the timer pauses on the other tabs, in the Custom Tab and in the background. If a swipe can't be saved, a notice appears under the deck.
 - **Undo.** Each swipe is held for 5 seconds before it is sent, so an undo within that window cancels it entirely. Older swipes have already been recorded, and undo only brings their card back.
 - **This week.** Every topic's digest for one week on one scroll, from `GET /api/v1/summaries`, with ‹ › to step through past weeks.
@@ -40,7 +42,7 @@ android/app/src/main/java/com/newsswipe/app/
 │   └── components/
 │       ├── CardChrome.kt           # Paper frame + kicker shared by both faces; photo/blurb rules
 │       ├── NewsCard.kt             # Card front: headline first
-│       ├── NewsCardBack.kt         # Card back (key points)
+│       ├── NewsCardBack.kt         # Card back (description + related coverage)
 │       ├── SwipeableCardStack.kt   # Drag/fling gestures, flip, swipe stamps
 │       ├── Masthead.kt             # Serif title + double rule
 │       ├── BottomNavBar.kt         # Deck / This week / Saved
@@ -67,9 +69,48 @@ android/app/src/main/java/com/newsswipe/app/
 
 ---
 
+## Releasing
+
+Release APKs are signed with one key that is kept outside the repo (#65). Android installs an update only if it is signed with the same key as the installed app, so **this key is the app's identity**. If it is lost, no existing install can ever be updated again.
+
+**One-time setup on the machine that signs.** Generate the key with any JDK 17 `keytool`. Put its values in `~/.gradle/gradle.properties`, never in the repo (`*.jks` is gitignored):
+
+```bash
+keytool -genkeypair -keystore ~/.paperswap-keys/paperswap-release.jks -storetype PKCS12 \
+  -alias paperswap -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=Paperswap"
+```
+```properties
+paperswap.signing.storeFile=C:/Users/<you>/.paperswap-keys/paperswap-release.jks
+paperswap.signing.storePassword=...
+paperswap.signing.keyAlias=paperswap
+# PKCS12 uses the store password for the key too.
+paperswap.signing.keyPassword=...
+```
+
+Back up the `.jks` file **and** the password together; a password manager can hold both. Each property can also come from an environment variable: `PAPERSWAP_SIGNING_STORE_FILE`, `..._STORE_PASSWORD`, `..._KEY_ALIAS` and `..._KEY_PASSWORD`. If none is set, `assembleRelease` builds an unsigned APK, as before. If only some are set, the build fails and names the missing ones.
+
+**Build a signed APK locally.** `./gradlew :app:assembleRelease` writes `app/build/outputs/apk/release/app-release.apk`; the name loses `-unsigned` once the APK is signed. Check it with `apksigner verify --print-certs`.
+
+**Publish a release** with `android/release.sh`. The key stays on the signing machine and is never uploaded: no CI secret holds it, by choice.
+
+1. Bump `versionCode` (+1) and `versionName` in `app/build.gradle.kts`. Open a PR into `dev`, then release `dev` into `main`.
+2. On the signing machine, with `JAVA_HOME` set to JDK 17–22:
+   ```bash
+   git switch main && git pull
+   cd android && ./release.sh --dry-run   # build, sign and verify only
+   ./release.sh                           # then tag v<versionName> and publish
+   ```
+3. The script refuses to run unless the working tree is clean, `HEAD` is `origin/main` and the tag `v<versionName>` is new. It builds and signs the APK, checks it with `apksigner`, then pushes the tag. Last, it creates a GitHub Release with `paperswap-<version>.apk` and generated notes.
+
+`PAPERSWAP_BASE_URL=https://… ./release.sh` sets the backend that the release APK talks to. If it is unset, the APK keeps the Tailscale default and only works on the tailnet until #32 lands.
+
+**Installing over a debug build.** The debug APK is signed with the debug key of the machine that built it, so a signed release cannot install over it. Uninstall the debug build once (this clears Saved and the topic filter), then install the release.
+
+---
+
 ## App size
 
-The release APK is **~1.07 MB**, down from 11.0 MB.
+The release APK is **~1.1 MB**, down from 11.0 MB.
 
 | Change | Release APK |
 | --- | --- |
@@ -89,7 +130,5 @@ About 56% of the remaining code is Compose itself (ui, runtime, foundation), the
 - **`usesCleartextTraffic="true"`** in the manifest is a workaround for the backend serving plain HTTP. Remove it once HTTPS lands.
 - **Failed swipes are not retried.** A notice appears under the deck, but the swipe itself is dropped. Any swipe still in its 5-second undo window when the process is killed outright is also lost. Backgrounding the app sends it immediately.
 - **No repository layer.** The ViewModels call Retrofit through `apiCall {}` directly, so there is no seam for a cache or a test fake.
-- **The deck ignores topic filtering.** It never passes `?categories=` to `/api/v1/feed`.
 - **No offline support.** A cold start without connectivity shows only an error.
 - **No tests.** There is no unit or instrumented test source set.
-- **Release builds are unsigned.** There is no `signingConfig` for `release`, so the ~1 MB release APK has to be signed (Android Studio → *Build → Generate Signed App Bundle / APK*) before it can be installed. The debug build (~16 MB, unshrunk) is what *Run ▶* installs.

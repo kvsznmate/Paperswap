@@ -7,8 +7,7 @@
 #   android        compiles the debug APK and the release Kotlin (R8 config)
 #
 # Nothing here deploys. Nothing here needs a secret: the docker job uses dummy
-# keys, and NewsAPI answering 401 to them is part of what it proves the app
-# survives.
+# keys.
 name: CI
 
 on:
@@ -92,7 +91,6 @@ jobs:
       # Dummies. docker-compose.yml refuses to start without these (the :? form).
       POSTGRES_USER: ci
       POSTGRES_PASSWORD: ci
-      NEWS_API_KEY: ci-dummy
       ADMIN_API_KEY: ci-dummy-admin-key
     steps:
       - uses: actions/checkout@v7
@@ -147,8 +145,9 @@ jobs:
       # The runner image ships the Android SDK and sets ANDROID_HOME, which
       # stands in for the untracked local.properties.
       # assembleRelease, not just compileReleaseKotlin: it runs R8 and resource
-      # shrinking, which is where a missing keep rule breaks the build. There is
-      # no signingConfig, so it produces an unsigned APK and needs no secret.
+      # shrinking, which is where a missing keep rule breaks the build. No
+      # signing secrets are set here, so it builds an unsigned APK (signing is
+      # done locally by android/release.sh, #65).
       # (Offline it also needs the lintVital* tasks skipped; CI has network.)
       - run: ./gradlew --no-daemon :app:assembleDebug :app:assembleRelease
       - uses: actions/upload-artifact@v7

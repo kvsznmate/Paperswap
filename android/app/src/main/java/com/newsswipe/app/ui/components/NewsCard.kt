@@ -94,7 +94,7 @@ fun NewsCard(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             // Without a hint, tap-to-flip is invisible.
-            Text("Tap for key points", fontFamily = PaperSans, fontSize = 12.sp, color = c.muted)
+            Text("Tap for more coverage", fontFamily = PaperSans, fontSize = 12.sp, color = c.muted)
             if (position != null) {
                 Text(position, fontFamily = PaperSans, fontSize = 12.sp, color = c.muted)
             }
