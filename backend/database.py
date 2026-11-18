@@ -131,19 +131,9 @@ def _decorate_articles(rows: list) -> list:
         if item.get('created_at') is not None:
             item['created_at'] = item['created_at'].isoformat()
 
-        # Stored as a JSON string; the client wants an array. A row enriched by
-        # an older version of the job, or not enriched at all, yields [] rather
-        # than null so the Android card can iterate unconditionally.
-        raw_bullets = item.pop('summary_bullets', None)
-        if raw_bullets:
-            try:
-                parsed = json.loads(raw_bullets)
-                item['summary_bullets'] = parsed if isinstance(parsed, list) else []
-            except (ValueError, TypeError):
-                logger.warning("Unparseable summary_bullets on article %s", item.get('id'))
-                item['summary_bullets'] = []
-        else:
-            item['summary_bullets'] = []
+        # related_ids is a JSON array of article ids written by enrichment.py.
+        # Resolved to headline/publisher/link by _attach_related, after this.
+        item['related_ids'] = _parse_id_list(item.get('related_ids'), item.get('id'))
 
         slug = normalize_category(item.get('category'))
         meta = CATEGORIES[slug]
@@ -152,6 +142,43 @@ def _decorate_articles(rows: list) -> list:
         item['accent_color'] = meta['accent']
         item['index'] = idx
         articles.append(item)
+    return _attach_related(articles)
+
+
+def _parse_id_list(raw, article_id) -> list:
+    """A JSON array of ints from a TEXT column; [] for NULL or anything else."""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        logger.warning("Unparseable related_ids on article %s", article_id)
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [i for i in parsed if isinstance(i, int) and not isinstance(i, bool)]
+
+
+def _attach_related(articles: list) -> list:
+    """Replace each card's related_ids with `related`: headline, publisher and
+    link of each related article, most similar first (ADR-015).
+
+    One query for the whole deck. An id whose article has been purged since the
+    enrichment run simply drops out, so `related` never points at a dead row.
+    Only headline, publisher and link: that is what the feeds' terms allow us to
+    show, and it is what a reader needs to open the other coverage.
+    """
+    wanted = sorted({i for a in articles for i in a.get('related_ids') or []})
+    found = {}
+    if wanted:
+        with db_cursor() as cursor:
+            cursor.execute(
+                "SELECT id, title, source, url FROM articles WHERE id = ANY(%s)",
+                (wanted,))
+            found = {r['id']: dict(r) for r in cursor.fetchall()}
+    for a in articles:
+        ids = a.pop('related_ids', None) or []
+        a['related'] = [found[i] for i in ids if i in found]
     return articles
 
 
@@ -304,30 +331,31 @@ def init_db():
             )
         ''')
 
-        # Enrichment output, written by the nightly enrichment.py job.
+        # Enrichment output, written by the enrichment.py job (ADR-012, ADR-015).
         #
-        # full_text is the extracted article body -- the RSS description is one
-        # or two sentences, and running an extractive summarizer over two
-        # sentences returns those two sentences. summary_bullets is a JSON array
-        # of strings. embedding is 384 float32 values packed little-endian; see
-        # database.pack_embedding / unpack_embedding.
+        # embedding is 384 float32 values packed little-endian, computed from
+        # "title. description"; see database.pack_embedding / unpack_embedding.
+        # related_ids is a JSON array of the ids of the closest articles from
+        # other publishers. NULL = not computed yet, [] = computed, none found.
         #
         # enriched_at is the completion marker AND the idempotency key: the job
         # selects WHERE enriched_at IS NULL, so a crash mid-batch resumes rather
-        # than reprocessing. Never set it before all stages for that row finish.
-        cursor.execute('ALTER TABLE articles ADD COLUMN IF NOT EXISTS full_text TEXT')
-        cursor.execute('ALTER TABLE articles ADD COLUMN IF NOT EXISTS summary_bullets TEXT')
+        # than reprocessing.
         cursor.execute('ALTER TABLE articles ADD COLUMN IF NOT EXISTS embedding BYTEA')
         cursor.execute('ALTER TABLE articles ADD COLUMN IF NOT EXISTS enriched_at TIMESTAMPTZ')
+        cursor.execute('ALTER TABLE articles ADD COLUMN IF NOT EXISTS related_ids TEXT')
 
-        # Retry budget for enrichment. enriched_at alone was not enough: the job
-        # used to set it even when body extraction failed, so one bad fetch
-        # marked a row permanently done with no bullets and it was never
-        # retried. Now enriched_at means "finished successfully", this counts
-        # attempts, and the job selects WHERE enriched_at IS NULL AND
-        # enrich_attempts < ENRICH_MAX_ATTEMPTS. Transient network failures get
-        # another night; permanently unreadable pages stop after a few tries
-        # instead of being refetched forever.
+        # The article body and the sentences copied from it, removed by ADR-015:
+        # the publishers' terms and the EU TDM opt-outs do not allow copying
+        # their article text, and nothing else used it. Dropping the columns is
+        # what deletes the copies already stored.
+        cursor.execute('ALTER TABLE articles DROP COLUMN IF EXISTS full_text')
+        cursor.execute('ALTER TABLE articles DROP COLUMN IF EXISTS summary_bullets')
+
+        # Retry budget for enrichment. enriched_at means "finished successfully";
+        # this counts attempts, and the job selects WHERE enriched_at IS NULL AND
+        # enrich_attempts < ENRICH_MAX_ATTEMPTS, so a row that keeps raising
+        # stops after a few runs instead of being retried forever.
         cursor.execute('ALTER TABLE articles ADD COLUMN IF NOT EXISTS enrich_attempts INTEGER DEFAULT 0')
 
         # User swipe actions (Read / Pass).
@@ -707,7 +735,7 @@ def get_latest_articles(limit: int = 50, categories=None) -> list:
 
     sql = '''
         SELECT id, title, description, source, published_at, category, image_url, url, created_at,
-               summary_bullets, description_source
+               related_ids, description_source
         FROM articles
     '''
     params = []
@@ -748,13 +776,13 @@ def get_balanced_feed(limit: int = 70, categories=None, per_category: int = None
     sql = f'''
         WITH ranked AS (
             SELECT id, title, description, source, published_at, category,
-                   image_url, url, created_at, summary_bullets, description_source,
+                   image_url, url, created_at, related_ids, description_source,
                    ROW_NUMBER() OVER (PARTITION BY category ORDER BY id DESC) AS rank_in_category
             FROM articles
             {where_sql}
         )
         SELECT id, title, description, source, published_at, category,
-               image_url, url, created_at, summary_bullets, description_source,
+               image_url, url, created_at, related_ids, description_source,
                rank_in_category
         FROM ranked
         WHERE rank_in_category <= %s
@@ -1178,9 +1206,7 @@ def get_articles_for_week(topic: str, week_start: date,
     be asked for explicitly rather than being what you get by forgetting. See
     news_fetcher's KEYWORD_SUMMARY_RULES comment for why it matters.
 
-    Also returns what enrichment.py stored, for the stories:v2 generator:
-      summary_bullets  list of str, [] when the article was never enriched or
-                       the body could not be extracted
+    Also returns what enrichment.py stored, for the stories generator:
       embedding        the raw little-endian float32 BYTEA as `bytes`, or None.
                        Bytes rather than a numpy array so the API process never
                        imports numpy (summarizer decodes it with struct). Not
@@ -1189,7 +1215,7 @@ def get_articles_for_week(topic: str, week_start: date,
     """
     sql = f'''
         SELECT id, title, description, source, published_at, category, url,
-               description_source, created_at, summary_bullets, embedding
+               description_source, created_at, embedding
         FROM articles
         WHERE category = %s AND {_WEEK_WINDOW_SQL}
     '''
@@ -1213,17 +1239,6 @@ def get_articles_for_week(topic: str, week_start: date,
         item = dict(row)
         if item.get('created_at') is not None:
             item['created_at'] = item['created_at'].isoformat()
-
-        raw_bullets = item.get('summary_bullets')
-        bullets = []
-        if raw_bullets:
-            try:
-                parsed = json.loads(raw_bullets)
-                if isinstance(parsed, list):
-                    bullets = [b.strip() for b in parsed if isinstance(b, str) and b.strip()]
-            except (ValueError, TypeError):
-                logger.warning("Unparseable summary_bullets on article %s", item.get('id'))
-        item['summary_bullets'] = bullets
 
         if item.get('embedding') is not None:
             item['embedding'] = bytes(item['embedding'])
@@ -1327,13 +1342,19 @@ def save_topic_summary(topic: str, week_start: date, week_end: date, summary: st
 def _summary_basis(generator: str) -> str:
     """One sentence on what a summary row was built from, per generator."""
     generator = generator or ""
-    if generator.startswith("stories:"):
+    if generator == "stories:v2":
+        # Written before ADR-015. Kept as written: topic_summaries is never
+        # purged (invariant 6), and the basis has to describe the row it labels.
         return ("Articles ingested during this window, grouped into stories by "
                 "similarity. Each line quotes one sentence extracted from an article "
                 "in that story. Ingest time, not publication time.")
+    if generator.startswith("stories:"):
+        return ("Articles ingested during this window, grouped into stories by "
+                "similarity. Each line is a publisher's headline or feed description "
+                "for that story. Ingest time, not publication time.")
     if generator.startswith("anthropic:"):
-        return ("Written by a language model from the window's headlines and "
-                "extracted sentences, not from full articles. Ingest time, not "
+        return ("Written by a language model from the window's headlines and one "
+                "short line per story, not from full articles. Ingest time, not "
                 "publication time.")
     return ("Generated from publisher-written article summaries ingested during "
             "this window. Ingest time, not publication time.")

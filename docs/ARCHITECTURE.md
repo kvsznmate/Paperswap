@@ -357,6 +357,10 @@ At 0.6, four of six stories would have been reported as separate stories. 0.45 i
 
 **Enforcement.** `backend/tests/test_stories.py` uses synthetic embeddings built from an exact Gram matrix, so every similarity is chosen rather than whatever a model produces. It covers paraphrases grouping where v1's word overlap does not, near misses staying apart, no chaining, ranking, lede selection and fallback, exact counts, the Anthropic fallback, and the database round trip.
 
+### Revision (2026-11, #66) — `stories:v3`: the lede is the publisher's own description
+
+ADR-015 removed article-body extraction, and with it `summary_bullets`. A story's line is now the first sentence of the **publisher-written feed description** (`description_source = 'publisher'`) of the member closest to the centroid, clipped to one line (240 characters), or the headline when no member has one. Grouping, ranking and counts are unchanged. The generator id moves to `stories:v3`, so the rows `stories:v2` wrote (which quote one sentence from an article body) stay distinguishable in the never-purged history, and their `basis` sentence still says so.
+
 ---
 
 ## ADR-012 — Enrichment runs off-process; swipes are kept forever in `swipe_events`
@@ -386,6 +390,10 @@ The API process carries no ML dependencies at runtime (they share the image, but
 `swipe_events` is the only irreplaceable table and currently has **no backup** — it lives on one free-tier volume. A scheduled `pg_dump` / local archive is the open follow-up (see [DATABASE_GUIDE.md](DATABASE_GUIDE.md)).
 
 Bullet quality and the ranker are both unevaluated; see Open questions.
+
+### Revision (2026-11, #66) — no article bodies
+
+ADR-015 removed the body-extraction stage: no trafilatura, no TextRank bullets, no `full_text` or `summary_bullets` columns. Enrichment now embeds title + description (as it always did) and computes related coverage from those vectors. With no page downloads, a batch takes seconds instead of minutes. `enrich_attempts` now counts runs that raised on a row. The "feeds must link to publishers" rule stays, for attribution rather than extraction, and `check_feeds.py` checks robots.txt instead of extractability.
 
 ---
 
@@ -461,6 +469,45 @@ A paid NewsAPI plan was not considered worth it for a project that keeps externa
 - An existing `backend/.env` may still contain `NEWS_API_KEY`. Compose no longer reads it, so it is harmless and can be deleted.
 - `requests` stays in `requirements.txt`: `summarizer.py` still uses it.
 
+## ADR-015 — No article text: the card back is built from the database
+
+**Status:** Accepted (2026-11, #66)
+
+### Context
+
+The app is a free, non-commercial demo for recruiters and friends. Before sharing it, the publishers' terms were surveyed (18 Nov 2026, recorded on #66).
+
+- **Feed fields are mostly fine.** Showing the headline, the feed's own description and a link is allowed under conditions by several feeds (NPR, TechCrunch, Phys.org, ScienceDaily, InfoQ), and is ordinary RSS-reader use for the rest when nobody makes money from it.
+- **Copying article text is not.** `enrichment.py` downloaded every article page with trafilatura, stored the body (`full_text`), and showed three sentences copied from it on the card back (`summary_bullets`, 294 of 300 live cards) and as weekly-summary ledes. Most feeds' terms forbid scraping or storing their content. BBC's robots.txt reserves text and data mining under DSM Art. 4 and bans "using BBC content to create summaries". ScienceDaily forbids entering its content "into a database". Under the press publishers' right (DSM Art. 15, Dutch NRA art. 7b), several copied sentences per story are probably more than "very short extracts".
+- **robots.txt matters legally in the EU.** It is not a law itself, but the TDM exception (DSM Art. 4, Auteurswet art. 15o) applies only where the owner has not opted out in a machine-readable way, and robots.txt is that way. The exception never covers showing the copied text to users.
+- **Nothing analytical used the body.** Embeddings, story clustering and the ranker input were already computed from title + description, the stimulus the user swipes on. The body fed only the copied sentences, so it was all display and no analysis.
+
+### Decision
+
+1. **No article pages are fetched or stored.** trafilatura, `extract_full_text`, TextRank and `check_feeds.py --extract` are removed. `init_db()` drops `full_text` and `summary_bullets`, which deletes the copies already stored.
+2. **The card back shows database work instead of copied text:** the publisher's own description, then **related coverage**, meaning the nearest articles from other publishers by cosine similarity of their title + description embeddings, within 72 hours of each other. Each one is served as headline + publisher + link (`related` in `/api/v1/feed`). `enrichment.refresh_related()` recomputes `related_ids` for every embedded row on each run and writes only changes; NULL means "not computed", `[]` means "none found".
+3. **The threshold was measured, not guessed.** On the live deck (300 cards, 18 Nov 2026, the production MiniLM model), pairs at 0.55 and above were nearly all the same story from another outlet. 0.45–0.55 was mostly the same topic but a different story: a football and a rugby result for one country, a deals list and a scam warning. At 0.55, 57 of the 300 cards (19%) get related coverage. `RELATED_SIMILARITY`, `RELATED_MAX` and `RELATED_WINDOW_HOURS` are configurable.
+4. **Weekly summaries** use the publisher's description, not body sentences (`stories:v3`, ADR-011 revision).
+5. **Polite fetching.** Feeds are fetched as `FETCH_USER_AGENT` ("Paperswap/1.0 (non-commercial demo news reader)"), and a feed whose robots.txt disallows that agent is skipped. Status handling follows RFC 9309: 4xx means no rules, 5xx or unreachable means assume disallow (cached for an hour).
+
+### Consequences
+
+- The card back is thinner for single-outlet stories, which are about 80% of cards: they show the description and "No other publisher yet". Related coverage is also a better demonstration of the database than quoted sentences.
+- `topic_summaries` rows written by `stories:v2` still contain one quoted sentence per story. They are left as written (invariant 6), and their `basis` says so. Blanking their ledes is an open option on #66.
+- Image hot-linking (#71) and publisher credits (#72) are separate issues.
+- The web preview now routes every feed-supplied URL through `safeUrl()` (http(s) only, normalised by `URL.href`), because `escapeHtml` does not escape quotes inside attributes.
+
+### Enforcement
+
+`backend/tests/test_related.py`:
+- the neighbour rules (other publisher only, ordering, cap, threshold, time window);
+- NULL versus `[]`, and writes only on change;
+- the feed serving headline + publisher + link and dropping purged ids;
+- no `full_text` or `summary_bullets` column, and no page fetching in `enrichment.py`;
+- the robots.txt status rules.
+
+`test_stories.py` checks that a canned or NULL-sourced description is never a lede.
+
 ---
 
 ## Failure modes we've hit
@@ -517,5 +564,5 @@ The connection pool now exists, but `init_pool()`/`init_db()` still have no retr
 - **Are the weekly summaries any good?** ADR-011 ships them unevaluated. The cheapest answer is a handful of weeks scored blind against the `extractive:v1` baseline — which, being free and deterministic, is a fair control.
 - **Can per-user personalisation be justified?** `user_swipes` collects implicit feedback, but with a single user any personalisation claim is statistically unsupportable. Framing it as a single-user cold-start study is more honest.
 - **Should the classifier be replaced?** Only a labelled dataset can answer this. If a keyword scorer matches TF-IDF at a fraction of the latency on a 956 MB box, keeping it is a defensible engineering result — but it has to be measured to be claimed.
-- **Are extractive bullets worse than abstractive ones here?** ADR-011 chose extractive on a hardware constraint, not on quality. Unmeasured. The comparison is a laptop job against an export, and it is the one part of the enrichment work that would produce a defensible number.
+- **Is related coverage right?** ADR-015's 0.55 cut-off was chosen by reading pairs from one day's deck. A labelled set of same-story / different-story pairs (#35) would give it a precision and recall instead of a judgement.
 - **Does the ranker beat chronological order?** Not yet built, and the answer is only meaningful against a baseline. Random and reverse-chronological are the two that matter; precision@5 and NDCG over a chronological holdout are the metrics. Claiming a recommender works without that comparison would be the ADR-010 failure in a new place.

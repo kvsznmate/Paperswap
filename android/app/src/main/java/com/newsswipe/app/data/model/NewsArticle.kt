@@ -24,14 +24,15 @@ data class NewsArticle(
     @SerializedName("image_url") val imageUrl: String,
     @SerializedName("url") val url: String,
 
-    // Key sentences picked by the backend enrichment job (trafilatura body
-    // extraction + TextRank), shown on the card back. Empty is normal: the job
-    // runs every 6 hours, and extraction fails on paywalled or JS-only pages.
+    // Coverage of the same story by other publishers, matched by the backend
+    // from article embeddings (ADR-015) and shown on the card back. Empty is
+    // normal: most stories are covered by one outlet, and new articles are
+    // matched every 6 hours.
     //
     // Nullable rather than defaulted: Gson skips Kotlin default values, so an
     // older backend that omits the key would leave a non-null List null anyway.
     // Call sites use .orEmpty().
-    @SerializedName("summary_bullets") val summaryBullets: List<String>? = null,
+    @SerializedName("related") val related: List<RelatedArticle>? = null,
 
     // True when image_url is one of the backend's generic topic photos rather
     // than the publisher's own. The card then shows no photo at all: a stock
@@ -44,6 +45,14 @@ data class NewsArticle(
     // canned blurb, because it reads as a summary of this story and is not.
     // Null = not recorded (older row or backend); the blurb is then shown.
     @SerializedName("description_source") val descriptionSource: String? = null
+)
+
+/** Another publisher's article on the same story: headline, publisher, link. */
+data class RelatedArticle(
+    @SerializedName("id") val id: Int,
+    @SerializedName("title") val title: String,
+    @SerializedName("source") val source: String,
+    @SerializedName("url") val url: String
 )
 
 data class CategoriesResponse(

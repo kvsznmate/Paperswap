@@ -1,4 +1,14 @@
-"""Scheduled enrichment: article body extraction, extractive bullets, embeddings.
+"""Scheduled enrichment: article embeddings and related coverage.
+
+Two stages, both computed from what the feed itself published (title and
+description). The job never downloads article pages: the publishers' terms and
+the EU text-and-data-mining opt-outs do not allow copying their article text,
+and nothing the analysis needs comes from it (ADR-015).
+
+  1. Embed each new article's "title. description" with MiniLM.
+  2. Related coverage: for every article, the nearest articles from OTHER
+     publishers by cosine similarity, stored as `related_ids` and served on
+     the card back as headline + publisher + link.
 
 Runs as a SEPARATE ONE-SHOT PROCESS, not as an APScheduler job inside the API.
 That is the whole design constraint. This deployment is an OCI E2.1.Micro with
@@ -10,15 +20,14 @@ anything else that can be avoided, and if the process exits when it is done.
     docker compose run --rm enrichment python enrichment.py --limit 5
     docker compose run --rm enrichment python enrichment.py
 
-Run every 6 hours by run_enrichment.sh (cron on the VM); a no-op when nothing
-is pending. Measured cost is a few seconds per article, so a full 84-article
-batch takes ~5-9 minutes. Design rationale: ADR-012 in docs/ARCHITECTURE.md.
+Run every 6 hours by run_enrichment.sh (cron on the VM). Embedding loads the
+ONNX session only when articles are pending; the related-coverage pass is
+numpy over the stored vectors and runs every time. Design rationale: ADR-012
+and ADR-015 in docs/ARCHITECTURE.md.
 
-Cost of the models chosen, on this box:
+Cost of the model chosen, on this box:
 
     all-MiniLM-L6-v2, int8 ONNX   ~23 MB on disk, ~150 MB peak RSS
-    TextRank                       pure numpy, no model
-    trafilatura                    HTTP + lxml, no model
 
 The models NOT chosen, and why: distilbart-cnn-12-6 (1.2 GB) and
 bart-large-mnli (1.6 GB) do not fit in the ~550 MB left after Postgres and the
@@ -52,7 +61,6 @@ a confusing ONNX parse error.
 """
 
 import os
-import re
 import sys
 import json
 import time
@@ -66,38 +74,33 @@ logger = logging.getLogger("paperswap.enrichment")
 MODEL_PATH = os.getenv("EMBED_MODEL_PATH", "models/minilm-int8.onnx")
 TOKENIZER_PATH = os.getenv("EMBED_TOKENIZER_PATH", "models/tokenizer.json")
 
-BULLET_COUNT = int(os.getenv("BULLET_COUNT", "3"))
-MAX_FULL_TEXT_CHARS = int(os.getenv("MAX_FULL_TEXT_CHARS", "20000"))
-
-# Give up on a row after this many failed attempts. Three nights is enough for a
-# transient outage to clear; beyond that the page is genuinely unreadable
-# (paywall, JS shell, bot challenge) and refetching it nightly forever is waste.
+# Give up on a row after this many failed attempts. Embedding a headline does
+# not touch the network, so a row that raises three runs in a row is a poison
+# row (bad encoding, a tokenizer edge case), and retrying it every 6 h forever
+# would hide the problem in the logs.
 MAX_ATTEMPTS = int(os.getenv("ENRICH_MAX_ATTEMPTS", "3"))
+
+# Related coverage. Two articles are related when their title+description
+# vectors have cosine similarity >= RELATED_SIMILARITY, they come from different
+# publishers, and they were fetched within RELATED_WINDOW_HOURS of each other.
+# 0.55 was measured on the live deck (300 cards, 2026-11-18): from 0.55 up the
+# pairs are nearly all the same story from another outlet; 0.45-0.55 is mostly
+# the same topic, not the same story (a football and a rugby result for one
+# country, a deals list and a scam warning). 57 of 300 cards (19%) got at
+# least one related article at 0.55. ADR-015.
+RELATED_SIMILARITY = float(os.getenv("RELATED_SIMILARITY", "0.55"))
+RELATED_MAX = int(os.getenv("RELATED_MAX", "3"))
+RELATED_WINDOW_HOURS = float(os.getenv("RELATED_WINDOW_HOURS", "72"))
+
+# all-MiniLM-L6-v2. A stored vector of any other length came from a different
+# model and cannot be compared with these, so it is left out of the pass.
+EMBED_DIM = 384
 
 # Refuse to load the ONNX session below this much available memory. 250 MB is
 # roughly the session plus activations plus headroom; starting under it means
 # swapping, and swapping here means the OOM killer picks a victim -- usually
 # Postgres, because it is the largest RSS on the box.
 MIN_AVAILABLE_MB = int(os.getenv("ENRICH_MIN_AVAILABLE_MB", "250"))
-
-# Domains whose links are redirect wrappers rather than articles. Google News
-# bounces through consent.google.com and loops; trafilatura burns three retries
-# and ~2 s per row discovering this. Skipping them up front costs nothing.
-#
-# The feeds were switched to direct publishers, so this should match nothing new
-# -- it is here so a future feed change that reintroduces a wrapper fails
-# cheaply and visibly instead of quietly producing empty card backs.
-UNREADABLE_HOSTS = ("news.google.com", "consent.google.com")
-
-# Sentences shorter than this are bylines, photo credits, or "Sign up for our
-# newsletter". They score well on TextRank because they are lexically similar to
-# everything, and they are useless as bullets.
-MIN_SENTENCE_CHARS = 40
-# And an upper bound, because a card has to display these. Anything longer is
-# usually a list or a table that survived extraction as one block.
-MAX_SENTENCE_CHARS = 320
-MAX_SENTENCES = 60
-
 
 # ---------------------------------------------------------------------------
 # MEMORY GUARD
@@ -120,136 +123,6 @@ def available_mb() -> int:
     except (OSError, ValueError, IndexError):
         pass
     return -1
-
-
-# ---------------------------------------------------------------------------
-# STAGE 1 -- ARTICLE BODY
-# ---------------------------------------------------------------------------
-
-def extract_full_text(url: str):
-    """Pull the article body. Returns None on any failure.
-
-    None is a real value here and is stored as such: it means extraction was
-    attempted and did not produce usable text. Bullets are then skipped rather
-    than being generated from the two-sentence RSS description, which would just
-    hand those two sentences back as "bullets".
-    """
-    if not url or any(host in url for host in UNREADABLE_HOSTS):
-        return None
-
-    try:
-        import trafilatura
-    except ImportError:
-        logger.error("trafilatura not installed -- pip install trafilatura")
-        return None
-
-    try:
-        downloaded = trafilatura.fetch_url(url)
-        if not downloaded:
-            return None
-        text = trafilatura.extract(
-            downloaded,
-            include_comments=False,
-            include_tables=False,
-            no_fallback=False,
-        )
-    except Exception as exc:
-        logger.debug("Extraction failed for %s: %s", url, exc)
-        return None
-
-    if not text or len(text) < 400:
-        return None
-    return text[:MAX_FULL_TEXT_CHARS]
-
-
-# ---------------------------------------------------------------------------
-# SENTENCE SPLITTING + TEXTRANK
-#
-# TextRank is implemented here rather than imported from sumy, for two reasons.
-# sumy's tokenizer wants the nltk punkt corpus, a ~35 MB download onto a box
-# that is already tight. And the algorithm is forty lines: build a sentence
-# similarity graph, run PageRank on it, take the top-k. Writing it out means it
-# can be explained rather than cited.
-#
-# The similarity edges use MiniLM sentence embeddings rather than the TF-IDF
-# overlap the original 2004 paper used. The model is already loaded for the
-# article vector, so the better similarity measure is free -- it catches
-# sentences that restate an idea in different words, which TF-IDF misses.
-# ---------------------------------------------------------------------------
-
-_SENTENCE_BREAK = re.compile(r'(?<=[.!?])\s+(?=[A-Z"\'\u201c])')
-_LIST_MARKER = re.compile(r'^\s*(?:[-*\u2022\u2013]|\d+[.)])\s+')
-
-
-def split_sentences(text: str) -> list:
-    """Split into candidate bullet sentences.
-
-    Splits on LINE BREAKS FIRST, then on sentence punctuation within each line.
-    The first version flattened newlines to spaces before splitting, which
-    destroyed the only boundary between list items -- trafilatura returns bullet
-    lists as separate lines whose items often have no terminal punctuation, so
-    an entire list collapsed into one 400-character "sentence" and TextRank
-    happily ranked it first. Real example from production:
-
-        "Architecture Shape PES splits the agent into two components: The
-        contract bridge between them enforces: - Approval matrix: ... - DLP
-        grading: ... - Identity continuity: ..."
-
-    Leading list markers are stripped so a bullet does not start with a dash,
-    and MAX_SENTENCE_CHARS drops anything that is still a run-on, because these
-    have to fit on a phone card.
-    """
-    out = []
-    for line in text.split("\n"):
-        line = _LIST_MARKER.sub("", line.strip())
-        if not line:
-            continue
-        for sentence in _SENTENCE_BREAK.split(line):
-            sentence = " ".join(sentence.split())
-            if MIN_SENTENCE_CHARS <= len(sentence) <= MAX_SENTENCE_CHARS:
-                out.append(sentence)
-            if len(out) >= MAX_SENTENCES:
-                return out
-    return out
-
-
-def textrank(sentences: list, embeddings, top_k: int) -> list:
-    """Return the top_k sentences by PageRank over the similarity graph,
-    restored to their original document order.
-
-    Document order matters: three sentences pulled out by score and printed in
-    score order read as disconnected fragments. In source order they usually
-    still read as a summary, because news writing is already ordered.
-    """
-    import numpy as np
-
-    n = len(sentences)
-    if n <= top_k:
-        return sentences
-
-    # Embeddings are L2-normalized, so the Gram matrix IS the cosine similarity.
-    sim = embeddings @ embeddings.T
-    np.fill_diagonal(sim, 0.0)
-    sim = np.clip(sim, 0.0, None)
-
-    row_sums = sim.sum(axis=1, keepdims=True)
-    # A sentence similar to nothing else gets a uniform row rather than a
-    # divide-by-zero. Without this one orphan sentence turns the whole vector
-    # into NaN and the summary comes back empty.
-    row_sums[row_sums == 0] = 1.0
-    transition = sim / row_sums
-
-    damping = 0.85
-    scores = np.full(n, 1.0 / n)
-    for _ in range(50):
-        updated = (1 - damping) / n + damping * (transition.T @ scores)
-        if np.abs(updated - scores).sum() < 1e-6:
-            scores = updated
-            break
-        scores = updated
-
-    top_idx = sorted(np.argsort(scores)[-top_k:])
-    return [sentences[i] for i in top_idx]
 
 
 # ---------------------------------------------------------------------------
@@ -326,17 +199,17 @@ class Embedder:
 
 
 # ---------------------------------------------------------------------------
-# PIPELINE
+# STAGE 1 -- EMBEDDINGS
 # ---------------------------------------------------------------------------
 
 def pending_articles(limit=None) -> list:
-    """Rows awaiting enrichment.
+    """Rows awaiting an embedding.
 
-    enriched_at IS NULL is the resume point; enrich_attempts caps how many
-    nights a permanently unreadable page can cost us.
+    enriched_at IS NULL is the resume point; enrich_attempts caps how many runs
+    a row that keeps raising can cost.
     """
     sql = '''
-        SELECT id, title, description, url, full_text, enrich_attempts
+        SELECT id, title, description, enrich_attempts
         FROM articles
         WHERE enriched_at IS NULL
           AND COALESCE(enrich_attempts, 0) < %s
@@ -354,66 +227,146 @@ def pending_articles(limit=None) -> list:
         return [dict(r) for r in cursor.fetchall()]
 
 
-def enrich_article(row: dict, embedder: "Embedder") -> dict:
-    """Produce full_text, bullets, and the article vector for one row."""
-    full_text = row.get("full_text") or extract_full_text(row.get("url"))
+def embed_article(row: dict, embedder: "Embedder") -> bytes:
+    """The article vector, packed for the BYTEA column.
 
-    bullets = []
-    if full_text:
-        sentences = split_sentences(full_text)
-        if len(sentences) >= 2:
-            sentence_vectors = embedder.encode(sentences)
-            bullets = textrank(sentences, sentence_vectors, BULLET_COUNT)
-
-    # The article vector embeds title + description, NOT the body. The user
-    # swipes on the card, and the card shows the headline and the short summary.
-    # Embedding 20,000 characters the user never saw would train the ranker on a
-    # different stimulus than the one that produced the label.
-    stimulus = f"{row['title']}. {row.get('description') or ''}".strip()
-    article_vector = embedder.encode([stimulus])[0]
-
-    return {
-        "full_text": full_text,
-        "bullets": bullets,
-        "embedding": db.pack_embedding(article_vector),
-    }
-
-
-def write_enrichment(article_id: int, result: dict) -> bool:
-    """Commit one article. Returns True if the row is finished.
-
-    enriched_at is set ONLY when bullets were produced. The previous version set
-    it unconditionally, so a failed body fetch marked the row permanently done
-    with an empty card back and no retry -- it silently poisoned eight rows in
-    production before anyone read the summary_bullets column.
-
-    The embedding is written either way, because it is computed from title and
-    description and is real work regardless of whether the body was reachable.
-
-    Per-row commit rather than per-batch: this runs beside Postgres on a box that
-    can OOM, and a kill 40 articles in should keep those 40.
+    It embeds title + description, the text the user sees on the card and
+    swipes on. The ranker learns from swipes, so its input has to be the same
+    stimulus that produced the label.
     """
-    finished = bool(result["bullets"])
+    stimulus = f"{row['title']}. {row.get('description') or ''}".strip()
+    return db.pack_embedding(embedder.encode([stimulus])[0])
 
+
+def write_embedding(article_id: int, embedding: bytes) -> None:
+    """Commit one article. Per-row commit rather than per-batch: this runs
+    beside Postgres on a box that can OOM, and a kill 40 articles in should
+    keep those 40."""
     with db.db_cursor(commit=True) as cursor:
         cursor.execute('''
             UPDATE articles
-            SET full_text       = %s,
-                summary_bullets = %s,
-                embedding       = %s,
+            SET embedding       = %s,
                 enrich_attempts = COALESCE(enrich_attempts, 0) + 1,
-                enriched_at     = CASE WHEN %s THEN NOW() ELSE NULL END
+                enriched_at     = NOW()
             WHERE id = %s
-        ''', (
-            result["full_text"],
-            json.dumps(result["bullets"]) if result["bullets"] else None,
-            result["embedding"],
-            finished,
-            article_id,
-        ))
+        ''', (embedding, article_id))
 
-    return finished
 
+def record_failed_attempt(article_id: int) -> None:
+    """Count a run that raised on this row, so MAX_ATTEMPTS can stop it."""
+    with db.db_cursor(commit=True) as cursor:
+        cursor.execute(
+            "UPDATE articles SET enrich_attempts = COALESCE(enrich_attempts, 0) + 1 "
+            "WHERE id = %s", (article_id,))
+
+
+# ---------------------------------------------------------------------------
+# STAGE 2 -- RELATED COVERAGE
+#
+# For each article, the closest articles from OTHER publishers in the same few
+# days. This is what the card back shows instead of text copied from the
+# article (ADR-015): coverage of the same story elsewhere, which the database
+# can work out from its own vectors and which the publishers' terms allow
+# (headline, publisher, link).
+#
+# Recomputed for every embedded row on every run, not just the new ones: a new
+# article can be the best neighbour of an old one. ~1,000 rows x 384 floats is a
+# 4 MB similarity matrix, milliseconds of numpy, and no ONNX session.
+# ---------------------------------------------------------------------------
+
+def compute_related(ids: list, sources: list, times: list, vectors,
+                    threshold: float = None, top_k: int = None,
+                    window_hours: float = None) -> dict:
+    """Return {article_id: [related ids, most similar first]}.
+
+    Pure function, so it is tested without a database. `times` are datetimes
+    (None means unknown, which no window excludes); `vectors` is (n, dim).
+    An article with no neighbour maps to [], which is a computed answer, not a
+    missing one.
+    """
+    import numpy as np
+
+    threshold = RELATED_SIMILARITY if threshold is None else threshold
+    top_k = RELATED_MAX if top_k is None else top_k
+    window_hours = RELATED_WINDOW_HOURS if window_hours is None else window_hours
+
+    n = len(ids)
+    if n == 0:
+        return {}
+
+    V = np.asarray(vectors, dtype=np.float32).reshape(n, -1)
+    V = V / np.clip(np.linalg.norm(V, axis=1, keepdims=True), 1e-9, None)
+    sim = V @ V.T
+
+    # Same publisher (which includes the diagonal) never counts: "related
+    # coverage" means another outlet, not the same outlet's follow-up.
+    src = np.array([s or "" for s in sources], dtype=object)
+    sim[src[:, None] == src[None, :]] = -np.inf
+
+    if window_hours and window_hours > 0:
+        t = np.array([ts.timestamp() if ts is not None else np.nan for ts in times])
+        # NaN compares False, so an unknown time is never excluded.
+        sim[np.abs(t[:, None] - t[None, :]) > window_hours * 3600] = -np.inf
+
+    related = {}
+    for i in range(n):
+        best = np.argsort(-sim[i], kind="stable")[:top_k]
+        related[ids[i]] = [int(ids[j]) for j in best if sim[i, j] >= threshold]
+    return related
+
+
+def refresh_related() -> dict:
+    """Recompute related_ids for every embedded article; write only changes.
+
+    Returns counts for the run log. related_ids stays NULL on rows with no
+    embedding yet: NULL means "not computed", [] means "computed, none found".
+    """
+    import numpy as np
+
+    with db.db_cursor() as cursor:
+        cursor.execute('''
+            SELECT id, source, created_at, embedding, related_ids
+            FROM articles
+            WHERE embedding IS NOT NULL
+        ''')
+        rows = [dict(r) for r in cursor.fetchall()]
+
+    usable = []
+    for r in rows:
+        vec = np.frombuffer(bytes(r["embedding"]), dtype="<f4")
+        if vec.shape[0] == EMBED_DIM:
+            usable.append((r, vec))
+
+    related = compute_related(
+        [r["id"] for r, _ in usable],
+        [r["source"] for r, _ in usable],
+        [r["created_at"] for r, _ in usable],
+        np.vstack([v for _, v in usable]) if usable else np.zeros((0, EMBED_DIM)),
+    )
+
+    changed = []
+    for r, _ in usable:
+        value = json.dumps(related[r["id"]])
+        if r["related_ids"] != value:
+            changed.append((value, r["id"]))
+
+    if changed:
+        with db.db_cursor(commit=True) as cursor:
+            for value, article_id in changed:
+                cursor.execute("UPDATE articles SET related_ids = %s WHERE id = %s",
+                               (value, article_id))
+
+    return {
+        "articles": len(usable),
+        "skipped_foreign_dim": len(rows) - len(usable),
+        "with_related": sum(1 for ids in related.values() if ids),
+        "changed": len(changed),
+    }
+
+
+# ---------------------------------------------------------------------------
+# RUN
+# ---------------------------------------------------------------------------
 
 def run(limit=None, dry_run: bool = False) -> None:
     started = time.time()
@@ -421,7 +374,7 @@ def run(limit=None, dry_run: bool = False) -> None:
     db.init_pool()
     try:
         pending = pending_articles(limit)
-        logger.info("%d article(s) awaiting enrichment", len(pending))
+        logger.info("%d article(s) awaiting an embedding", len(pending))
 
         if dry_run:
             for row in pending:
@@ -429,63 +382,53 @@ def run(limit=None, dry_run: bool = False) -> None:
                             (row.get("enrich_attempts") or 0) + 1,
                             (row.get("title") or "")[:70])
             return
-        if not pending:
-            return
 
-        mem = available_mb()
-        if mem == -1:
-            logger.warning("Cannot read /proc/meminfo -- skipping the memory guard")
-        elif mem < MIN_AVAILABLE_MB:
-            logger.error(
-                "Only %d MB available, need %d. Refusing to load the ONNX session: "
-                "starting here means swapping, and swapping here means the OOM "
-                "killer takes Postgres. Retry when the box is quieter.",
-                mem, MIN_AVAILABLE_MB,
-            )
-            sys.exit(1)
+        embedded = errored = exhausted = 0
+        if pending:
+            mem = available_mb()
+            if mem == -1:
+                logger.warning("Cannot read /proc/meminfo -- skipping the memory guard")
+            elif mem < MIN_AVAILABLE_MB:
+                logger.error(
+                    "Only %d MB available, need %d. Refusing to load the ONNX session: "
+                    "starting here means swapping, and swapping here means the OOM "
+                    "killer takes Postgres. Retry when the box is quieter.",
+                    mem, MIN_AVAILABLE_MB,
+                )
+                sys.exit(1)
 
-        embedder = Embedder(MODEL_PATH, TOKENIZER_PATH)
-        logger.info("ONNX session up (%d MB available)", available_mb())
+            embedder = Embedder(MODEL_PATH, TOKENIZER_PATH)
+            logger.info("ONNX session up (%d MB available)", available_mb())
 
-        # Counted separately on purpose. The old single "enriched" counter
-        # reported 5 successes for a batch that produced zero bullets, which is
-        # the same class of error ADR-010 exists to prevent -- a number that
-        # reads as a measurement but is not one.
-        with_bullets = no_text = errored = exhausted = 0
-
-        for row in pending:
-            try:
-                result = enrich_article(row, embedder)
-                if write_enrichment(row["id"], result):
-                    with_bullets += 1
-                else:
-                    no_text += 1
+            for row in pending:
+                try:
+                    write_embedding(row["id"], embed_article(row, embedder))
+                    embedded += 1
+                except Exception as exc:
+                    # One bad article must not end the batch. enriched_at stays
+                    # NULL, so a later run retries it within the attempt budget.
+                    logger.warning("Article %s raised: %s", row["id"], exc)
+                    errored += 1
+                    record_failed_attempt(row["id"])
                     if (row.get("enrich_attempts") or 0) + 1 >= MAX_ATTEMPTS:
                         exhausted += 1
-                        logger.info("  giving up on %s after %d attempts: %s",
-                                    row["id"], MAX_ATTEMPTS,
-                                    (row.get("url") or "")[:80])
-            except Exception as exc:
-                # One bad article must not end the batch. enriched_at stays NULL
-                # so a later run retries it, within the attempt budget.
-                logger.warning("Article %s raised: %s", row["id"], exc)
-                errored += 1
+                        logger.info("  giving up on %s after %d attempts",
+                                    row["id"], MAX_ATTEMPTS)
 
-            done = with_bullets + no_text + errored
-            if done % 10 == 0:
-                logger.info("  %d/%d processed", done, len(pending))
+                done = embedded + errored
+                if done % 10 == 0:
+                    logger.info("  %d/%d processed", done, len(pending))
 
+        rel = refresh_related()
         logger.info(
-            "%d with bullets, %d embedded but no article text, %d errored "
-            "(%d gave up permanently) in %.1fs",
-            with_bullets, no_text, errored, exhausted, time.time() - started,
+            "%d embedded, %d errored (%d gave up permanently); related coverage: "
+            "%d of %d articles have at least one, %d rows changed%s, in %.1fs",
+            embedded, errored, exhausted,
+            rel["with_related"], rel["articles"], rel["changed"],
+            f", {rel['skipped_foreign_dim']} skipped (vector from another model)"
+            if rel["skipped_foreign_dim"] else "",
+            time.time() - started,
         )
-        if no_text and not with_bullets:
-            logger.warning(
-                "Every article embedded but none produced bullets. Check that "
-                "articles.url points at publishers rather than a redirect "
-                "wrapper -- run check_feeds.py --extract."
-            )
     finally:
         db.close_pool()
 
@@ -495,13 +438,7 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    # trafilatura logs every redirect hop at INFO through urllib3, which buried
-    # the actual result lines behind hundreds of URLs during the Google News
-    # failures. Warnings still surface.
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("trafilatura").setLevel(logging.WARNING)
-
-    parser = argparse.ArgumentParser(description="Nightly Paperswap enrichment.")
+    parser = argparse.ArgumentParser(description="Paperswap enrichment: embeddings and related coverage.")
     parser.add_argument("--limit", type=int, help="Cap the number of articles.")
     parser.add_argument("--dry-run", action="store_true",
                         help="List what would be processed; write nothing.")

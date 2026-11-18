@@ -1,13 +1,29 @@
 import os
 import re
-import feedparser
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime
+from urllib.parse import urlsplit
+from urllib.robotparser import RobotFileParser
+
+import feedparser
 
 import database as db  # also loads backend/.env
 
 # How many articles to pull per topic on each refresh cycle.
 # 7 topics x 12 = 84 candidate articles per batch (before dedup).
 ARTICLES_PER_CATEGORY = int(os.getenv("ARTICLES_PER_CATEGORY", "12"))
+
+# How the fetcher introduces itself to publishers. A named agent instead of
+# feedparser's default lets a publisher see who is reading their feed and
+# address robots.txt rules to it (ADR-015). Override to add a contact URL.
+FETCH_USER_AGENT = os.getenv(
+    "FETCH_USER_AGENT", "Paperswap/1.0 (non-commercial demo news reader)").strip()
+
+# robots.txt answers are cached per host for this long, so a refresh of ~20
+# feeds costs a handful of robots requests a day, not one per feed per refresh.
+ROBOTS_CACHE_SECONDS = 24 * 3600
 
 
 # ---------------------------------------------------------------------------
@@ -22,14 +38,11 @@ ARTICLES_PER_CATEGORY = int(os.getenv("ARTICLES_PER_CATEGORY", "12"))
 # These were Google News search feeds until every one of them was replaced.
 # Google News does not publish article links, it publishes redirect wrappers
 # (news.google.com/rss/articles/CBMi...) that bounce through consent.google.com
-# and loop. A phone browser follows them fine, so swipe-to-read always worked --
-# but server-side extraction gets nothing, so full_text was NULL on all 532
-# rows and every card back was empty. Since 2024 the wrapper cannot be decoded
-# offline either; resolving it needs Google's undocumented batchexecute endpoint.
+# and loop, and they credit Google rather than the publisher. Publisher feeds
+# link straight to the story, which is what the feeds' terms ask for.
 #
-# Feeds rot. Re-run `python check_feeds.py --extract` before trusting a change
-# here -- and note that --extract is the test that matters: MarketWatch,
-# Politico and Nature all return perfectly clean links that yield zero text.
+# Feeds rot. Re-run `python check_feeds.py` before trusting a change here, and
+# read a new feed's terms of use first (#66): some forbid use in an app.
 # ---------------------------------------------------------------------------
 TOPIC_FEEDS = {
     "TECH": {
@@ -474,6 +487,54 @@ def generate_short_summary_tiered(title: str, category: str, raw_desc: str,
     return get_topic_config(category)["summary_fallback"], DESC_TOPIC_FALLBACK
 
 
+_robots_cache = {}  # "scheme://host" -> (fetched_at, RobotFileParser)
+
+
+def _robots_for(url: str) -> RobotFileParser:
+    """The host's robots.txt, fetched with our User-Agent, cached per host.
+
+    Status handling follows RFC 9309, section 2.3.1:
+      - 2xx: obey the file.
+      - 4xx (including 401/403): "unavailable", the crawler MAY access
+        anything. Python's RobotFileParser.read() would treat 401/403 as
+        disallow-all instead, which is why the file is fetched here.
+      - 5xx or no answer: "unreachable", the crawler MUST assume complete
+        disallow. Cached for an hour rather than a day, so a brief outage
+        does not cost the feed for a whole day.
+    """
+    parts = urlsplit(url)
+    base = f"{parts.scheme}://{parts.netloc}"
+    now = time.time()
+    cached = _robots_cache.get(base)
+    if cached and now < cached[0]:
+        return cached[1]
+
+    parser = RobotFileParser()
+    ttl = ROBOTS_CACHE_SECONDS
+    try:
+        req = urllib.request.Request(base + "/robots.txt",
+                                     headers={"User-Agent": FETCH_USER_AGENT})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            parser.parse(resp.read().decode("utf-8", "replace").splitlines())
+    except urllib.error.HTTPError as exc:
+        if 400 <= exc.code < 500:
+            parser.allow_all = True
+        else:
+            parser.disallow_all = True
+            ttl = 3600
+    except Exception:
+        parser.disallow_all = True
+        ttl = 3600
+
+    _robots_cache[base] = (now + ttl, parser)
+    return parser
+
+
+def feed_allowed(url: str) -> bool:
+    """True when the feed host's robots.txt lets FETCH_USER_AGENT fetch url."""
+    return _robots_for(url).can_fetch(FETCH_USER_AGENT, url)
+
+
 def fetch_from_rss(category: str, count: int = ARTICLES_PER_CATEGORY) -> list:
     """Fetch one topic, round-robin across its publisher feeds.
 
@@ -499,8 +560,11 @@ def fetch_from_rss(category: str, count: int = ARTICLES_PER_CATEGORY) -> list:
 
     batches = []
     for url in urls:
+        if not feed_allowed(url):
+            print(f"[Skip] {category}: robots.txt disallows {url} for {FETCH_USER_AGENT!r}")
+            continue
         try:
-            feed = feedparser.parse(url)
+            feed = feedparser.parse(url, agent=FETCH_USER_AGENT)
             entries = list(getattr(feed, "entries", []))
             if not entries:
                 # feedparser does not raise on a 404 or a bot challenge; it

@@ -7,7 +7,7 @@ Swipe-based news reader. FastAPI + PostgreSQL 16 backend (`backend/`), Kotlin/Co
 - `backend/main.py`: routes, admin auth (header for POSTs, header-or-cookie for read-only admin GETs), the request-log buffer, `refresh_pipeline()`, lifespan, and the `--cli` runner.
 - `backend/database.py`: connection pool, the whole schema and its migrations (`init_db()`: `CREATE ... IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`, no Alembic), queries, purges and telemetry. Loads `backend/.env`.
 - `backend/news_fetcher.py`: `TOPIC_FEEDS`, the keyword classifier and card blurbs (`generate_short_summary_tiered` returns `(text, description_source)`).
-- `backend/summarizer.py`: weekly digests. `backend/enrichment.py`: a one-shot ML job run from cron, never imported by the API.
+- `backend/summarizer.py`: weekly digests. `backend/enrichment.py`: a one-shot job run from cron (embeddings + related coverage), never imported by the API.
 - Topics: `database.CATEGORIES` is the single source of truth. A new topic needs an entry there plus one in `news_fetcher.TOPIC_FEEDS`, and no client change.
 
 ## Invariants — do not break
@@ -24,6 +24,7 @@ Swipe-based news reader. FastAPI + PostgreSQL 16 backend (`backend/`), Kotlin/Co
 10. **No database I/O on the request path for logging.** The middleware appends to an in-memory deque, and the scheduler flushes it.
 11. **Escape server data before it reaches `innerHTML`** in the templates. Request paths and RSS titles are attacker-influenced.
 12. **Every public write path is bounded globally, not just per IP** (`public_limits.py`: swipe and new-session budgets, per-session swipe dedupe, cold-start gate). A new public endpoint that writes rows or calls out needs the same.
+13. **No article text.** Never fetch, store or display publishers' article pages (ADR-015). Cards and summaries use only feed fields (headline, the feed's description, link, publisher) and what the database computes from them. Feeds are fetched as `FETCH_USER_AGENT` and robots.txt is obeyed.
 
 ## Working conventions
 

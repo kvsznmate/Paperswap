@@ -98,7 +98,7 @@ Modern Python web framework. Fast, lightweight, and generates interactive API do
 
 | Table | Holds |
 | --- | --- |
-| `articles` | Headline, summary, source, topic, image URL, link, and `article_key`. Plus the enrichment columns: `full_text`, `summary_bullets`, `embedding`, `enriched_at`, `enrich_attempts`, and `description_source` (where the description came from) |
+| `articles` | Headline, summary, source, topic, image URL, link, and `article_key`. Plus the enrichment columns: `embedding`, `related_ids`, `enriched_at`, `enrich_attempts`, and `description_source` (where the description came from) |
 | `categories` | The topic catalogue, synced from `database.CATEGORIES` on every boot |
 | `user_swipes` | One row per swipe — `read` or `pass` — cascading on article delete |
 | `swipe_events` | The same swipe, denormalised and **never purged**. The training set |
@@ -129,10 +129,9 @@ docker compose run --rm enrichment python enrichment.py --limit 5
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `full_text` | `TEXT` | Article body via trafilatura, capped at 20k chars. NULL means extraction was attempted and failed |
-| `summary_bullets` | `TEXT` | JSON array of strings. `_decorate_articles` parses it to a real array before it reaches the client, and yields `[]` rather than null so the Android card can iterate unconditionally |
+| `related_ids` | `TEXT` | JSON array of the ids of the closest articles from other publishers, most similar first (ADR-015). NULL = not computed yet, `[]` = computed, none found. The feed resolves it to `related` (headline, publisher, link) and drops ids purged since |
 | `embedding` | `BYTEA` | 384 little-endian float32 values. Use `database.pack_embedding` / `unpack_embedding`, never raw `np.tobytes()` — the explicit `<f4` byte order is what lets a VM-written dump load correctly on a laptop |
-| `enriched_at` | `TIMESTAMPTZ` | Completion marker **and** resume point. The job selects `WHERE enriched_at IS NULL`, so never set it before every stage for that row has finished |
+| `enriched_at` | `TIMESTAMPTZ` | Completion marker **and** resume point: set when the embedding is written. The job selects `WHERE enriched_at IS NULL` |
 
 Neither feed query selects `embedding`, so the bytes never reach JSON serialisation. If you add a query, name your columns explicitly rather than using `SELECT *` — `bytea` is not JSON-serialisable and the failure surfaces as a 500 at response time, not at query time.
 

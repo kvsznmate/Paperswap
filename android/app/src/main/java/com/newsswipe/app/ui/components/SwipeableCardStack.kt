@@ -50,8 +50,8 @@ private const val SWIPE_THRESHOLD_FRACTION = 0.30f
 // off, and holds that angle rather than winding up further on a long drag.
 private const val MAX_CARD_ROTATION = 16f
 
-// Card flip: tap turns the card over to show the enrichment bullets
-// (NewsCardBack). They arrive with the feed, so flipping costs no request.
+// Card flip: tap turns the card over to show the description and related
+// coverage (NewsCardBack). Both arrive with the feed, so flipping costs no request.
 private const val FLIP_DURATION_MS = 420
 
 // Perspective depth for the Y-axis flip. Without raising this from the default
