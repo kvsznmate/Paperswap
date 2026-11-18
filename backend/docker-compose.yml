@@ -89,7 +89,7 @@ services:
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7}
       # --- Weekly topic summaries ---
       # Unset ANTHROPIC_API_KEY is fine: the default generator is offline.
-      SUMMARY_GENERATOR: ${SUMMARY_GENERATOR:-stories:v2}
+      SUMMARY_GENERATOR: ${SUMMARY_GENERATOR:-stories:v3}
       SUMMARY_STORY_SIMILARITY: ${SUMMARY_STORY_SIMILARITY:-0.45}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       SUMMARY_MODEL: ${SUMMARY_MODEL:-}
