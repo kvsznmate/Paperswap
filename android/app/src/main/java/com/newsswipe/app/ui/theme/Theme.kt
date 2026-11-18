@@ -17,7 +17,7 @@ import androidx.core.view.WindowCompat
 /**
  * Headlines and story text. FontFamily.Serif is Noto Serif on Android: a real
  * newspaper serif that costs the APK nothing, because it ships with the OS.
- * The web preview loads the same family from Google Fonts.
+ * The web preview serves the same family itself (backend/static/fonts, ADR-017).
  */
 val PaperSerif: FontFamily = FontFamily.Serif
 

@@ -31,4 +31,7 @@ ENV UVICORN_TIMEOUT_KEEP_ALIVE=3
 
 # Run FastAPI app with Uvicorn. Exec form, so uvicorn is PID 1 and receives
 # SIGTERM directly: the lifespan shutdown flushes the buffered request logs.
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --no-access-log: uvicorn's access log starts every line with the client IP and
+# would keep it in the container log (ADR-017). The app's own request log
+# records the route, method and status without it.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

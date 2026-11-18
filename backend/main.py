@@ -23,6 +23,7 @@ from fastapi import (
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.security import APIKeyHeader
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from apscheduler.schedulers.background import BackgroundScheduler
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -284,6 +285,12 @@ def require_admin_session(
 # ---------------------------------------------------------------------------
 limiter = Limiter(key_func=get_remote_address)
 
+# The client IP is the limiter's key, and only lives in its in-memory counters
+# (ADR-017). slowapi logs that key at WARNING on every rejected request, which
+# would write IPs to the container log; 429s are already visible, without the
+# address, in the request log below.
+logging.getLogger("slowapi").setLevel(logging.ERROR)
+
 
 def refresh_pipeline():
     """One full refresh cycle: fetch + dedup new news, summarise the last
@@ -484,6 +491,9 @@ app = FastAPI(
 )
 
 app.state.limiter = limiter
+# Self-hosted fonts (#67): the public pages make no request to Google.
+app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")),
+          name="static")
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # The deck is ~80 KB of JSON; gzip cuts it to roughly a third. Egress is the
 # one Oracle Always Free meter a client can drive (10 TB/month on a 50 Mbps link).
@@ -697,8 +707,9 @@ class SwipeRequest(BaseModel):
 
 
 class HeartbeatRequest(BaseModel):
+    # Only the random id. Older web pages also send user_agent; it is ignored
+    # and never stored (ADR-017).
     session_id: str = Field(min_length=1, max_length=64)
-    user_agent: Optional[str] = Field(default=None, max_length=256)
 
 
 class AdminLogin(BaseModel):
@@ -782,6 +793,27 @@ def read_root():
 def read_mobile_app():
     """Serve the touch swipe UI (deck + weekly summaries tabs)."""
     return _serve_template("mobile_preview.html")
+
+
+# Filled in at serve time so the page states the retention windows this server
+# actually runs with, not the defaults.
+PRIVACY_FIELDS = {
+    "{{ARTICLE_DAYS}}": lambda: PURGE_OLDER_THAN_DAYS,
+    "{{SESSION_DAYS}}": lambda: SESSION_RETENTION_DAYS,
+    "{{REQUEST_LOG_DAYS}}": lambda: REQUEST_LOG_RETENTION_DAYS,
+}
+
+
+@app.get("/privacy", response_class=HTMLResponse, tags=["pages"])
+def read_privacy():
+    """The privacy policy (#67): what is stored, why and for how long."""
+    page = _serve_template("privacy.html")
+    if page.status_code != 200:
+        return page
+    html = page.body.decode("utf-8")
+    for placeholder, value in PRIVACY_FIELDS.items():
+        html = html.replace(placeholder, str(int(value())))
+    return HTMLResponse(content=html)
 
 
 @app.get("/api/v1/categories", tags=["public"])
@@ -1134,9 +1166,7 @@ def user_heartbeat(request: Request, req: HeartbeatRequest):
     if not db.refresh_session(req.session_id):
         if not SESSION_BUDGET.take():
             raise _busy(SESSION_BUDGET, "new sessions")
-        client_ip = request.client.host if request.client else "unknown"
-        user_agent = (req.user_agent or request.headers.get("user-agent", ""))[:256]
-        db.record_session_heartbeat(req.session_id, user_agent=user_agent, ip_address=client_ip)
+        db.record_session_heartbeat(req.session_id)
     return JSONResponse(content={"status": "ok", "session_id": req.session_id})
 
 
@@ -1228,4 +1258,5 @@ if __name__ == "__main__":
             "main:app", host="0.0.0.0", port=args.port, reload=False,
             limit_concurrency=int(os.getenv("UVICORN_LIMIT_CONCURRENCY", "64")),
             timeout_keep_alive=int(os.getenv("UVICORN_TIMEOUT_KEEP_ALIVE", "3")),
+            access_log=False,  # see the Dockerfile CMD (ADR-017)
         )
