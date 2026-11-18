@@ -153,7 +153,7 @@ def main():
     if empty:
         print(f"\n  No working feed for: {', '.join(empty)}")
         print("  Find replacements in news_fetcher.TOPIC_FEEDS, or those topics "
-              "fall back to NewsAPI only.")
+              "get no articles at all.")
 
     if not args.extract:
         print("\n  These passed the link check only. Re-run with --extract "

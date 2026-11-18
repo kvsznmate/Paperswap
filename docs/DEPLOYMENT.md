@@ -8,7 +8,7 @@ _Last verified: July 2026. Cloud free tiers and prices change constantly — rec
 
 ## What we're actually deploying
 
-One Dockerized **FastAPI container** + one **Postgres** database. The workload is tiny: a few hundred article rows, a news fetch every 12 hours, and occasional swipe writes. Images are hot-linked from the source (NewsAPI / Unsplash), so we store and serve almost no bytes ourselves. Requirements: **data persistence** + a **public HTTPS endpoint** the phone can reach.
+One Dockerized **FastAPI container** + one **Postgres** database. The workload is tiny: a few hundred article rows, a news fetch every 12 hours, and occasional swipe writes. Images are hot-linked from the source (publisher sites, Unsplash and loremflickr for fallback images), so we store and serve almost no bytes ourselves. Requirements: **data persistence** + a **public HTTPS endpoint** the phone can reach.
 
 Two things decide the cheapest viable choice:
 

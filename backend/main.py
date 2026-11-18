@@ -865,9 +865,9 @@ def trigger_refresh(request: Request, background: BackgroundTasks):
     """Trigger a news refresh (fetch + dedup + purge).
 
     POST, not GET: this mutates state and fans out to ~84 outbound requests
-    against NewsAPI and Google News. Browsers, link prefetchers and crawlers
-    treat GET as safe and will follow it, which previously made a single
-    prefetch enough to start burning the NewsAPI daily quota.
+    against the publisher RSS feeds. Browsers, link prefetchers and crawlers
+    treat GET as safe and will follow it, so a single prefetch would start a
+    full fetch, summarise and purge.
 
     Returns 202 immediately and runs the pipeline in the background rather than
     holding the client open for the duration of 84 HTTP calls.

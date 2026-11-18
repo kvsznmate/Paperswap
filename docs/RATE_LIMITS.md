@@ -15,7 +15,7 @@ where it is.
 | `/api/v1/telemetry/stats` | GET | 30/min | admin | ~10 queries + `du` per call |
 | `/api/v1/telemetry/logs` | GET | 30/min | admin | In-memory read |
 | `/api/v1/auth/session` | POST | 10/min | none | Brute-forcing the admin key |
-| `/api/v1/cards/refresh` | POST | 2/hour | admin | ~84 outbound calls to NewsAPI / RSS feeds |
+| `/api/v1/cards/refresh` | POST | 2/hour | admin | ~84 outbound calls to publisher RSS feeds |
 | `/api/v1/summaries/generate` | POST | 4/hour | admin | Spends money under `SUMMARY_GENERATOR=anthropic` |
 
 Limits are keyed on client IP and enforced by

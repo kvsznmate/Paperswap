@@ -1,6 +1,6 @@
 # Paperswap — notes for coding agents
 
-Swipe-based news reader. FastAPI + PostgreSQL 16 backend (`backend/`), Kotlin/Compose Android client (`android/`), and a web preview served by the backend (`backend/templates/mobile_preview.html`). Start with `README.md`, then `docs/ARCHITECTURE.md` (ADR-001..012). Each ADR explains *why*, and most of the non-obvious code below traces back to one.
+Swipe-based news reader. FastAPI + PostgreSQL 16 backend (`backend/`), Kotlin/Compose Android client (`android/`), and a web preview served by the backend (`backend/templates/mobile_preview.html`). Start with `README.md`, then `docs/ARCHITECTURE.md` (ADR-001..014). Each ADR explains *why*, and most of the non-obvious code below traces back to one.
 
 ## Layout that matters
 

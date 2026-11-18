@@ -1,12 +1,9 @@
 import os
 import re
-import requests
 import feedparser
 from datetime import datetime
 
 import database as db  # also loads backend/.env
-
-NEWS_API_KEY = os.getenv("NEWS_API_KEY", "").strip()
 
 # How many articles to pull per topic on each refresh cycle.
 # 7 topics x 12 = 84 candidate articles per batch (before dedup).
@@ -18,7 +15,6 @@ ARTICLES_PER_CATEGORY = int(os.getenv("ARTICLES_PER_CATEGORY", "12"))
 # One entry per slug in database.CATEGORIES. To add a topic: add it to
 # database.CATEGORIES, then add a matching block here. Nothing else changes.
 #
-#   newsapi_query   -> passed to NewsAPI /v2/everything (primary source)
 #   rss_urls        -> publisher feeds, round-robin. Verified with check_feeds.py
 #   summary_fallback-> used when the feed gives no usable description
 #   images          -> hero image used only when the article has none of its own
@@ -37,7 +33,6 @@ ARTICLES_PER_CATEGORY = int(os.getenv("ARTICLES_PER_CATEGORY", "12"))
 # ---------------------------------------------------------------------------
 TOPIC_FEEDS = {
     "TECH": {
-        "newsapi_query": "technology OR tech OR AI",
         "rss_urls": [
             "https://feeds.arstechnica.com/arstechnica/index",
             "https://www.theverge.com/rss/index.xml",
@@ -53,10 +48,8 @@ TOPIC_FEEDS = {
         ],
     },
     "FINANCE": {
-        "newsapi_query": "finance OR stocks OR markets OR earnings",
         "rss_urls": [
             "https://www.cnbc.com/id/100003114/device/rss/rss.html",
-            "https://finance.yahoo.com/news/rssindex",
             "https://feeds.bbci.co.uk/news/business/rss.xml",
         ],
         "summary_fallback": "Financial sector analysis covering corporate earnings, market trends, and strategic investment movements.",
@@ -68,7 +61,6 @@ TOPIC_FEEDS = {
         ],
     },
     "SPORTS": {
-        "newsapi_query": "sports OR football OR basketball OR soccer OR tennis",
         "rss_urls": [
             "https://feeds.bbci.co.uk/sport/rss.xml",
             "https://www.skysports.com/rss/12040",
@@ -82,7 +74,6 @@ TOPIC_FEEDS = {
         ],
     },
     "POLITICS": {
-        "newsapi_query": "politics OR election OR parliament OR government policy",
         "rss_urls": [
             "https://feeds.bbci.co.uk/news/politics/rss.xml",
             "https://feeds.npr.org/1014/rss.xml",
@@ -96,7 +87,6 @@ TOPIC_FEEDS = {
         ],
     },
     "PROGRAMMING": {
-        "newsapi_query": "programming OR \"software development\" OR \"open source\" OR developer tools",
         "rss_urls": [
             "https://dev.to/feed",
             "https://feed.infoq.com/",
@@ -113,7 +103,6 @@ TOPIC_FEEDS = {
         ],
     },
     "SCIENCE": {
-        "newsapi_query": "science OR research OR space OR physics OR biology",
         "rss_urls": [
             "https://phys.org/rss-feed/",
             "https://www.sciencedaily.com/rss/all.xml",
@@ -128,7 +117,6 @@ TOPIC_FEEDS = {
         ],
     },
     "BEAUTY": {
-        "newsapi_query": "beauty OR skincare OR cosmetics OR makeup",
         "rss_urls": [
             "https://www.allure.com/feed/rss",
             "https://www.refinery29.com/en-us/beauty/rss.xml",
@@ -385,8 +373,6 @@ DESC_PUBLISHER = "publisher"
 DESC_KEYWORD_TEMPLATE = "keyword_template"
 DESC_TOPIC_FALLBACK = "topic_fallback"
 
-DESCRIPTION_SOURCES = (DESC_PUBLISHER, DESC_KEYWORD_TEMPLATE, DESC_TOPIC_FALLBACK)
-
 KEYWORD_SUMMARY_RULES = [
     (("ai", "artificial intelligence", "machine learning"),
      "Industry developments in AI model scaling, infrastructure, and enterprise adoption reported by {source}."),
@@ -488,62 +474,11 @@ def generate_short_summary_tiered(title: str, category: str, raw_desc: str,
     return get_topic_config(category)["summary_fallback"], DESC_TOPIC_FALLBACK
 
 
-def fetch_from_news_api(category: str, count: int = ARTICLES_PER_CATEGORY) -> list:
-    """Fetch news for one topic from NewsAPI.org."""
-    if not NEWS_API_KEY or NEWS_API_KEY == "your_news_api_key_here":
-        return []
-
-    config = get_topic_config(category)
-    params = {
-        "q": config["newsapi_query"],
-        "language": "en",
-        "sortBy": "publishedAt",
-        "pageSize": count,
-        "apiKey": NEWS_API_KEY,
-    }
-
-    try:
-        resp = requests.get("https://newsapi.org/v2/everything", params=params, timeout=8)
-        if resp.status_code != 200:
-            print(f"[Warning] NewsAPI returned {resp.status_code} for {category}")
-            return []
-
-        articles = resp.json().get("articles", [])
-        results = []
-        for idx, art in enumerate(articles[:count]):
-            img = upgrade_image_url(art.get("urlToImage")) or fallback_image(category, idx)
-
-            pub_time = art.get("publishedAt", "")
-            try:
-                dt = datetime.strptime(pub_time[:19], "%Y-%m-%dT%H:%M:%S")
-                pub_str = dt.strftime("%b %d, %Y - %H:%M")
-            except Exception:
-                pub_str = pub_time or "Recently"
-
-            src_name = art.get("source", {}).get("name", "News API")
-            title = art.get("title", "Untitled News")
-            desc, desc_source = generate_short_summary_tiered(
-                title, category, art.get("description", ""), src_name)
-
-            results.append({
-                "title": title,
-                "description": desc,
-                "description_source": desc_source,
-                "raw_description": art.get("description", ""),
-                "source": src_name,
-                "published_at": pub_str,
-                "category": category,
-                "image_url": img,
-                "url": art.get("url", "#"),
-            })
-        return results
-    except Exception as e:
-        print(f"[Warning] NewsAPI fetch failed for {category}: {e}")
-    return []
-
-
 def fetch_from_rss(category: str, count: int = ARTICLES_PER_CATEGORY) -> list:
     """Fetch one topic, round-robin across its publisher feeds.
+
+    Publisher RSS is the only news source (ADR-014 removed NewsAPI, which never
+    worked from the server).
 
     Round-robin rather than concatenate. BBC Sport returns 76 entries and Sky
     returns 20, so reading them in order would make nearly every Sports card a
@@ -561,8 +496,6 @@ def fetch_from_rss(category: str, count: int = ARTICLES_PER_CATEGORY) -> list:
     """
     config = get_topic_config(category)
     urls = config.get("rss_urls") or []
-    if isinstance(urls, str):        # tolerate the old single-URL form
-        urls = [urls]
 
     batches = []
     for url in urls:
@@ -629,27 +562,6 @@ def fetch_from_rss(category: str, count: int = ARTICLES_PER_CATEGORY) -> list:
     return results
 
 
-def fetch_topic(category: str, count: int = ARTICLES_PER_CATEGORY) -> list:
-    """Fetch one topic, preferring NewsAPI and falling back to RSS when the
-    key is missing or the API returns a short batch.
-
-    In practice on the deployed VM, RSS is not the fallback -- it is the only
-    source. All 532 rows in the database came from it. NewsAPI's free Developer
-    plan is licensed for development use and rejects requests from server
-    environments, so a key that works on a laptop still returns nothing from
-    Oracle Cloud, and this function silently falls through every time.
-
-    Left in place because it costs nothing and starts working the day the plan
-    is upgraded. But do not read `newsapi_query` as if it were live.
-    """
-    items = fetch_from_news_api(category, count)
-    if len(items) < count:
-        rss_items = fetch_from_rss(category, count)
-        if len(rss_items) > len(items):
-            items = rss_items
-    return items[:count]
-
-
 def fetch_and_sync_news_to_db(categories=None) -> list:
     """
     1. Fetches ARTICLES_PER_CATEGORY items for every enabled topic
@@ -666,7 +578,7 @@ def fetch_and_sync_news_to_db(categories=None) -> list:
     per_topic_counts = {}
 
     for category in target_categories:
-        items = fetch_topic(category, ARTICLES_PER_CATEGORY)
+        items = fetch_from_rss(category, ARTICLES_PER_CATEGORY)
         per_topic_counts[category] = len(items)
         raw_articles.extend(items)
         print(f"[Fetch] {category}: {len(items)} item(s) retrieved.")
