@@ -8,7 +8,7 @@ Paperswap borrows the Tinder interaction model for reading headlines. Instead of
 
 - 👉 **Swipe right** — Interested. Opens the article on the publisher's site.
 - 👈 **Swipe left** — Pass. The next headline appears.
-- **Tap** — Flip the card to read extracted summary bullets.
+- **Tap** — Flip the card: the publisher's description and the same story from other publishers.
 
 The repository contains a **Dockerized FastAPI + PostgreSQL backend** that ingests news across seven topics, deduplicates it, serves a topic-balanced deck over REST, records swipe feedback and writes a weekly per-topic digest. It also contains a **native Android client** (Kotlin/Compose) and a **touch-enabled web preview** served by the backend.
 
@@ -26,7 +26,7 @@ graph TD
     S["⏰ APScheduler — every 12 h"] -->|"refresh_pipeline: fetch → summarise → purge"| B
     B --> D["⚡ news_fetcher.py — publisher RSS"]
     B --> E["🐘 PostgreSQL 16"]
-    F["🧠 enrichment.py — cron, every 6 h, separate container"] -->|"full_text, bullets, embeddings"| E
+    F["🧠 enrichment.py — cron, every 6 h, separate container"] -->|"embeddings, related coverage"| E
 ```
 
 The backend renders nothing. It stores article *fields* (headline, summary, source, image URL, link) and the client draws the card. See [ADR-001](docs/ARCHITECTURE.md).
@@ -37,14 +37,14 @@ The backend renders nothing. It stores article *fields* (headline, summary, sour
 2. **Classify.** A weighted keyword scorer reassigns an article away from its feed's topic only when another topic wins by a clear margin. Its accuracy is unmeasured ([ADR-007](docs/ARCHITECTURE.md)).
 3. **Deduplicate.** `article_key = md5(title + url)` is a unique column, and inserts use `ON CONFLICT DO NOTHING`, so dedup is atomic ([ADR-004](docs/ARCHITECTURE.md)).
 4. **Summarise and purge.** The weekly summariser runs inside the refresh, *before* the purge deletes its input. Articles are then purged after 9 days ([ADR-011](docs/ARCHITECTURE.md)).
-5. **Enrich.** A separate one-shot job extracts article bodies, ranks summary bullets and computes embeddings ([ADR-012](docs/ARCHITECTURE.md)).
+5. **Enrich.** A separate one-shot job embeds each article's title and description and links each card to the same story from other publishers (related coverage). It never downloads article pages ([ADR-012](docs/ARCHITECTURE.md), [ADR-015](docs/ARCHITECTURE.md)).
 6. **Serve.** `/api/v1/feed` interleaves topics round-robin with a window function ([ADR-005](docs/ARCHITECTURE.md)). Each article carries its own `category_label` and `accent_color`, so adding a topic needs no client release ([ADR-006](docs/ARCHITECTURE.md)).
 7. **Record.** Swipes go to `user_swipes` (purged with the article, for analytics) and `swipe_events` (kept forever, the training set).
 
 ### Tech stack
 
 - **Backend:** Python 3.12 · FastAPI · psycopg2 (pooled) · APScheduler · slowapi · feedparser · PostgreSQL 16
-- **Enrichment:** trafilatura · onnxruntime (int8 all-MiniLM-L6-v2) · numpy TextRank
+- **Enrichment:** onnxruntime (int8 all-MiniLM-L6-v2) · numpy cosine nearest neighbours
 - **Android:** Kotlin · Jetpack Compose · Retrofit · Coil · Custom Tabs
 - **Infrastructure:** Docker Compose on Oracle Cloud Always Free (E2.1.Micro, 956 MB RAM + 2 GB swap)
 
@@ -66,8 +66,8 @@ Paperswap/
 │   ├── database.py           # Pool, schema/migrations, queries, purges, telemetry
 │   ├── news_fetcher.py       # Ingestion, classification, card blurbs
 │   ├── summarizer.py         # Weekly per-topic digests
-│   ├── enrichment.py         # One-shot body extraction / bullets / embeddings
-│   ├── check_feeds.py        # RSS feed health check
+│   ├── enrichment.py         # One-shot embeddings + related coverage
+│   ├── check_feeds.py        # RSS feed health check (robots.txt, entries, links)
 │   ├── run_enrichment.sh     # Cron wrapper for enrichment.py
 │   ├── templates/            # mobile_preview.html, dashboard.html, analytics.html
 │   ├── tests/                # Standalone suites — see tests/README.md
@@ -156,7 +156,7 @@ The app runs on an Oracle Cloud E2.1.Micro under Docker Compose ([ADR-003](docs/
 - No offline support, no topic filter on the deck, and no automated tests. See [android/README.md](android/README.md#known-issues).
 
 **Data science**
-- The topic classifier, the summary bullets and the weekly digests have never been evaluated against labelled data or a baseline.
+- The topic classifier, the related-coverage threshold and the weekly digests have never been evaluated against labelled data or a baseline.
 - `swipe_events` collects implicit feedback that nothing consumes yet. The feed is identical for every user.
 
 ---

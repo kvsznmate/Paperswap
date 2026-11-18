@@ -73,6 +73,8 @@ services:
       SUMMARY_CACHE_SECONDS: ${SUMMARY_CACHE_SECONDS:-600}
       FEED_COLD_FETCH_COOLDOWN: ${FEED_COLD_FETCH_COOLDOWN:-600}
       ARTICLES_PER_CATEGORY: ${ARTICLES_PER_CATEGORY:-12}
+      # How the feed fetcher names itself to publishers (robots.txt rules match it).
+      FETCH_USER_AGENT: ${FETCH_USER_AGENT:-Paperswap/1.0 (non-commercial demo news reader)}
       FEED_DEFAULT_LIMIT: ${FEED_DEFAULT_LIMIT:-70}
       ADMIN_SESSION_TTL: ${ADMIN_SESSION_TTL:-43200}  # /analytics sign-in lifetime, seconds
       # Flip to true once HTTPS terminates in front; a Secure cookie over plain
@@ -122,7 +124,7 @@ services:
   # mem_limit. On a 956 MB box the failure mode that matters is the OOM killer
   # picking Postgres, because Postgres has the largest RSS. Capping this
   # container means a runaway enrichment run kills itself instead. 400m covers
-  # the ~250 MB the ONNX session, tokenizer and lxml actually need, and leaves
+  # the ~250 MB the ONNX session and tokenizer actually need, and leaves
   # headroom above Postgres (~250) and the API (~130).
   enrichment:
     image: paperswap-backend:latest
@@ -131,10 +133,13 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-newsdb}
       EMBED_MODEL_PATH: ${EMBED_MODEL_PATH:-models/minilm-int8.onnx}
       EMBED_TOKENIZER_PATH: ${EMBED_TOKENIZER_PATH:-models/tokenizer.json}
-      BULLET_COUNT: ${BULLET_COUNT:-3}
-      # Give up on a row after this many failed extraction attempts, so a
-      # permanently unreadable page stops costing a fetch every night.
+      # Give up on a row after this many runs that raised on it.
       ENRICH_MAX_ATTEMPTS: ${ENRICH_MAX_ATTEMPTS:-3}
+      # Related coverage on the card back (ADR-015): cosine cut-off, how many per
+      # card, and how far apart in fetch time two articles may be.
+      RELATED_SIMILARITY: ${RELATED_SIMILARITY:-0.55}
+      RELATED_MAX: ${RELATED_MAX:-3}
+      RELATED_WINDOW_HOURS: ${RELATED_WINDOW_HOURS:-72}
       # The job reads MemAvailable from /proc/meminfo, which inside a container
       # reports the HOST's memory, not this container's limit. That is what we
       # want -- the question is whether the box has room, not whether the cgroup

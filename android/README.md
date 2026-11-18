@@ -7,7 +7,7 @@ A native Android app in **Kotlin** with **Jetpack Compose**. It talks to the Fas
 ## Features
 
 - **Swipe deck.** Swipe right, or tap **Read →**, to open the article in Android Custom Tabs. Swipe left, or tap **Pass**, to skip. Cards lead with the headline; a photo shows only when the publisher sent one, and a canned blurb is hidden (`image_is_stock`, `description_source`).
-- **Card flip.** Tap a card to see its key points, the sentences the backend enrichment job picked. The back says so when the article has not been enriched yet.
+- **Card flip.** Tap a card to see the publisher's own description and **Also covered by**: the same story from other publishers, matched by the backend from article embeddings (ADR-015). Tap one to open it. Nothing on the card is copied from the article page.
 - **Swipe logging.** Each swipe sends `POST /api/v1/swipe` with `dwell_ms` and `flipped`. `dwell_ms` counts only the time the deck was actually on screen: the timer pauses on the other tabs, in the Custom Tab and in the background. If a swipe can't be saved, a notice appears under the deck.
 - **Undo.** Each swipe is held for 5 seconds before it is sent, so an undo within that window cancels it entirely. Older swipes have already been recorded, and undo only brings their card back.
 - **This week.** Every topic's digest for one week on one scroll, from `GET /api/v1/summaries`, with ‹ › to step through past weeks.
@@ -40,7 +40,7 @@ android/app/src/main/java/com/newsswipe/app/
 │   └── components/
 │       ├── CardChrome.kt           # Paper frame + kicker shared by both faces; photo/blurb rules
 │       ├── NewsCard.kt             # Card front: headline first
-│       ├── NewsCardBack.kt         # Card back (key points)
+│       ├── NewsCardBack.kt         # Card back (description + related coverage)
 │       ├── SwipeableCardStack.kt   # Drag/fling gestures, flip, swipe stamps
 │       ├── Masthead.kt             # Serif title + double rule
 │       ├── BottomNavBar.kt         # Deck / This week / Saved

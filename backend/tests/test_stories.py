@@ -1,4 +1,4 @@
-"""stories:v2: weekly digests built from story groups, not headline vocabulary.
+"""stories:v3: weekly digests built from story groups, not headline vocabulary.
 
 Claims under test:
   1. Paraphrases group. Three write-ups of one event with almost no words in
@@ -10,17 +10,19 @@ Claims under test:
      not glue A and C together: average linkage, not single linkage.
   4. Ranking. Distinct outlets outrank raw size: one event covered by three
      outlets beats one outlet filing four updates.
-  5. The lede. Each line is the first bullet of the member closest to the
-     story centroid, among members with bullets. With no bullets anywhere in
-     the story, the headline -- and from_bullet says which.
+  5. The lede. Each line is the first sentence of the publisher-written
+     description of the member closest to the story centroid, among members
+     that have one. A canned blurb or a NULL description_source is never used
+     (invariant 5). With none in the story, the headline -- and
+     from_description says which.
   6. Nothing is lost or invented. Every article is in exactly one story,
      articles without an embedding (or with a foreign dimension) become
      single-article stories, and the digest's stated counts are the input's.
-  7. The database hands the generator bullets as a list and the embedding as
-     bytes, and a week is written with generator = stories:v2 by default,
-     with number_of_articles unchanged.
+  7. The database hands the generator the embedding as bytes and no article
+     text (ADR-015), and a week is written with generator = stories:v3 by
+     default, with number_of_articles unchanged.
   8. Under SUMMARY_GENERATOR=anthropic, a failed or truncated call falls back
-     to stories:v2 and the row says stories:v2.
+     to stories:v3 and the row says stories:v3.
   9. get_articles_for_week never reaches a route: its rows carry BYTEA.
 
 Embeddings are synthetic, built from a chosen Gram matrix, so every similarity
@@ -95,12 +97,14 @@ def pack(vec):
     return struct.pack(f"<{len(vec)}f", *vec)
 
 
-def article(title, vec=None, source="Wire", bullets=None):
+def article(title, vec=None, source="Wire", lede=None, desc_source=None):
+    """lede: a publisher-written description. Without one the article carries a
+    canned topic blurb, which the generator must never quote."""
     return {
         "title": title,
         "source": source,
-        "description": f"Publisher blurb for {title}.",
-        "summary_bullets": bullets or [],
+        "description": lede if lede else f"Canned topic blurb for {title}.",
+        "description_source": desc_source or ("publisher" if lede else "topic_fallback"),
         "embedding": pack(vec) if vec is not None else None,
     }
 
@@ -205,37 +209,46 @@ check("a single outlet is named once with its count",
 # ---------------------------------------------------------------------------
 # 5. The lede
 # ---------------------------------------------------------------------------
-section("5. the lede: first bullet of the most central article")
+section("5. the lede: the publisher's first sentence, most central article")
 
-# Article 2 is the most central but was never enriched; article 1 is next and
-# has bullets; article 0 is the least central and also has bullets.
+# Article 2 is the most central but has only a canned blurb; article 1 is next
+# and has a publisher description; article 0 is the least central and has one.
 gram = block_gram([3], within=0.7, overrides={(0, 1): 0.62, (1, 2): 0.95, (0, 2): 0.8})
 vecs = vectors_from_gram(gram)
 arts = [
-    article("peripheral write-up", vecs[0], "A", ["Peripheral first sentence about it.",
-                                                   "Peripheral second sentence."]),
-    article("central write-up", vecs[1], "B", ["The central article's lede sentence.",
-                                                "Its second sentence."]),
-    article("central but unenriched", vecs[2], "C", []),
+    article("peripheral write-up", vecs[0], "A",
+            "Peripheral first sentence about it. Peripheral second sentence."),
+    article("central write-up", vecs[1], "B",
+            "The central article's lede sentence. Its second sentence."),
+    article("central but canned", vecs[2], "C"),
 ]
 story = sm.build_stories(arts, threshold=0.6)[0]
 check("one story of three", story["size"] == 3, str(story["members"]))
-check("fixture: the unenriched article really is the most central",
+check("fixture: the canned article really is the most central",
       sm._dot(vecs[2], [sum(c) for c in zip(*vecs[:3])])
       > sm._dot(vecs[1], [sum(c) for c in zip(*vecs[:3])]))
-check("the representative is the most central article WITH bullets",
+check("the representative is the most central article WITH a publisher description",
       story["representative"] == 1, f"got {story['representative']}")
-check("the line is its FIRST bullet", story["text"] == "The central article's lede sentence.",
-      story["text"])
-check("from_bullet is recorded", story["from_bullet"] is True)
+check("the line is the description's FIRST sentence",
+      story["text"] == "The central article's lede sentence.", story["text"])
+check("from_description is recorded", story["from_description"] is True)
+check("a canned blurb is never a lede",
+      sm._publisher_lede(article("x", lede="Match results, transfers.",
+                                 desc_source="keyword_template")) is None)
+check("a NULL description_source is never a lede (not guessed)",
+      sm._publisher_lede({"description": "Real-looking text.", "description_source": None})
+      is None)
+long_lede = sm._publisher_lede(article("x", lede="word " * 200))
+check("a run-on description is clipped to one line",
+      long_lede.endswith("…") and len(long_lede) <= sm.LEDE_MAX_CHARS + 1, long_lede[-40:])
 
 vecs = vectors_from_gram(block_gram([2], within=0.9))
-arts = [article("Headline one of an unenriched story", vecs[0], "A"),
-        article("Headline two of an unenriched story", vecs[1], "B")]
+arts = [article("Headline one of a canned story", vecs[0], "A"),
+        article("Headline two of a canned story", vecs[1], "B")]
 story = sm.build_stories(arts, threshold=0.6)[0]
-check("no bullets anywhere -> the headline is used",
+check("no publisher description anywhere -> the headline is used",
       story["text"] in {a["title"] for a in arts}, story["text"])
-check("...and from_bullet says so", story["from_bullet"] is False)
+check("...and from_description says so", story["from_description"] is False)
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +258,7 @@ section("6. counts and fallbacks")
 
 vecs = vectors_from_gram(block_gram([3, 2], within=0.85, between=0.1))
 arts = [article(f"grouped {i}", vecs[i], source=f"Outlet {i}",
-                bullets=[f"Extracted sentence number {i} about the event."]) for i in range(5)]
+                lede=f"Publisher sentence number {i} about the event.") for i in range(5)]
 arts.append(article("never enriched", None, source="Outlet 5"))
 arts.append(article("foreign dimension", None, source="Outlet 6"))
 arts[-1]["embedding"] = pack([0.1] * 512)
@@ -263,17 +276,17 @@ for idx in (5, 6, 7, 8):
     story = next(s for s in stories if idx in s["members"])
     check(f"'{arts[idx]['title']}' is a single-article story", story["size"] == 1)
 
-text, generator = sm._stories_v2(TOPIC, arts, threshold=0.6)
+text, generator = sm._stories_v3(TOPIC, arts, threshold=0.6)
 lines = text.split("\n")
-check("generator id is stories:v2", generator == "stories:v2")
+check("generator id is stories:v3", generator == "stories:v3")
 check("the opening states the input count", lines[0].startswith(f"{len(arts)} "), lines[0])
 check("multi-article stories only when there are enough (2 here, topped up to 3)",
       len(lines) == 1 + sm.MIN_STORIES, text)
 check("the biggest story leads, with its true count", "(3 articles" in lines[1], lines[1])
 check("the second story carries its true count", "(2 articles" in lines[2], lines[2])
 check("the top-up story says 1 article", "(1 article ·" in lines[3], lines[3])
-check("lines quote extracted sentences verbatim",
-      lines[1].startswith("• Extracted sentence number "), lines[1])
+check("lines quote the publisher's description, not invented text",
+      lines[1].startswith("• Publisher sentence number "), lines[1])
 
 check("'and N others' appears only when there are others",
       sm._coverage(["A", "B", "C", "D", "E"], 6) == "6 articles · A, B, C and 2 others"
@@ -283,17 +296,17 @@ check("'and N others' appears only when there are others",
 
 vecs = vectors_from_gram(block_gram([1, 1, 1, 1], within=1.0, between=0.1))
 arts = [article(f"scattered {i}", vecs[i], source=f"O{i}") for i in range(4)]
-text, _ = sm._stories_v2(TOPIC, arts, threshold=0.6)
+text, _ = sm._stories_v3(TOPIC, arts, threshold=0.6)
 check("a week with no repeated story does not claim 'most covered'",
       "Most covered" not in text and "no story appeared in more than one" in text, text)
 check("...and shows MIN_STORIES of them", len(text.split("\n")) == 1 + sm.MIN_STORIES, text)
 
 check("deterministic: the same input gives the same text",
-      sm._stories_v2(TOPIC, arts, 0.6) == sm._stories_v2(TOPIC, arts, 0.6))
+      sm._stories_v3(TOPIC, arts, 0.6) == sm._stories_v3(TOPIC, arts, 0.6))
 
 
 # ---------------------------------------------------------------------------
-# 8. Anthropic falls back to stories:v2   (no network: requests.post is faked)
+# 8. Anthropic falls back to stories:v3   (no network: requests.post is faked)
 # ---------------------------------------------------------------------------
 section("8. anthropic fallback")
 
@@ -323,7 +336,7 @@ try:
     logging.getLogger("paperswap.summarizer").disabled = True   # expected warnings
     sm.SUMMARY_GENERATOR, sm.ANTHROPIC_API_KEY, sm.SUMMARY_MODEL = "anthropic", "", "test-model"
     _, gen = sm.summarise(TOPIC, arts)
-    check("missing API key -> stories:v2, labelled as such", gen == "stories:v2", gen)
+    check("missing API key -> stories:v3, labelled as such", gen == "stories:v3", gen)
 
     sm.ANTHROPIC_API_KEY = "test-key"
     sm.requests.post = fake_post
@@ -332,11 +345,11 @@ try:
                                        "content": [{"type": "text", "text": "Cut off mid"}]})
     text, gen = sm.summarise(TOPIC, arts)
     check("a truncated reply is not stored as the summary",
-          gen == "stories:v2" and "Cut off mid" not in text, gen)
+          gen == "stories:v3" and "Cut off mid" not in text, gen)
 
     sent["reply"] = FakeResponse(500, {"error": "overloaded"})
     _, gen = sm.summarise(TOPIC, arts)
-    check("an HTTP error -> stories:v2", gen == "stories:v2", gen)
+    check("an HTTP error -> stories:v3", gen == "stories:v3", gen)
 
     sent["reply"] = FakeResponse(200, {"stop_reason": "end_turn",
                                        "content": [{"type": "text", "text": "A real digest."}]})
@@ -355,7 +368,7 @@ try:
     # 20 unrelated stories, so the 15-story cap and the char cap both bind.
     big_vecs = vectors_from_gram(block_gram([1] * 20, within=1.0, between=0.0))
     big = [article(f"{i} " + "H" * 5000, big_vecs[i], source=f"{i} " + "S" * 500,
-                   bullets=["L" * 5000]) for i in range(20)]
+                   lede="L" * 5000) for i in range(20)]
     sm.summarise(TOPIC, big)
     prompt = sent["body"]["messages"][0]["content"]
     n_lines = prompt.count("\n- [")
@@ -408,40 +421,35 @@ try:
     check(f"fixture week {WEEK} is clean", n_live == 0, f"found {n_live} live article(s)")
 
     vecs = vectors_from_gram(block_gram([3, 1], within=0.85, between=0.1))
-    bullets = [["First extracted sentence of the shared story, long enough.", "Second."],
-               ["Another outlet's opening sentence about the same story."],
-               [], ["The lone story's own opening sentence, long enough."]]
+    descriptions = ["First publisher sentence of the shared story, long enough. Second.",
+                    "Another outlet's opening sentence about the same story.",
+                    "A third outlet's description of the shared story, long enough.",
+                    "The lone story's own opening sentence, long enough."]
     for i in range(4):
         aid, _ = db.save_article({
             "title": f"stories fixture {i}", "url": f"{FIXTURE_URL_PREFIX}{i}",
-            "description": f"A genuine publisher description {i}, long enough to keep.",
+            "description": descriptions[i],
             "description_source": nf.DESC_PUBLISHER, "source": f"Outlet {i}",
             "published_at": "Recently", "category": TOPIC, "image_url": "",
         })
         with db.db_cursor(commit=True) as cur:
-            cur.execute("UPDATE articles SET created_at = %s, embedding = %s, "
-                        "summary_bullets = %s WHERE id = %s",
-                        (at(1, 8 + i), pack(vecs[i]),
-                         json.dumps(bullets[i]) if bullets[i] else None, aid))
-    # One with a corrupt bullets column: it must read as [], not crash the week.
+            cur.execute("UPDATE articles SET created_at = %s, embedding = %s WHERE id = %s",
+                        (at(1, 8 + i), pack(vecs[i]), aid))
+    # One not embedded yet: it must still be counted, as a single-article story.
     aid, _ = db.save_article({
-        "title": "stories fixture corrupt", "url": f"{FIXTURE_URL_PREFIX}corrupt",
-        "description": "A genuine publisher description for the corrupt row, long enough.",
+        "title": "stories fixture unembedded", "url": f"{FIXTURE_URL_PREFIX}unembedded",
+        "description": "A genuine publisher description for the unembedded row, long enough.",
         "description_source": nf.DESC_PUBLISHER, "source": "Outlet 9",
         "published_at": "Recently", "category": TOPIC, "image_url": "",
     })
     with db.db_cursor(commit=True) as cur:
-        cur.execute("UPDATE articles SET created_at = %s, summary_bullets = 'not json' "
-                    "WHERE id = %s", (at(2, 9), aid))
+        cur.execute("UPDATE articles SET created_at = %s WHERE id = %s", (at(2, 9), aid))
 
-    # The corrupt row logs a WARNING by design; keep a passing run quiet.
-    logging.getLogger("paperswap.database").disabled = True
     rows = db.get_articles_for_week(TOPIC, WEEK)
     check("all five fixtures returned", len(rows) == 5, str(len(rows)))
-    check("summary_bullets comes back as a list",
-          rows[0]["summary_bullets"] == bullets[0], str(rows[0]["summary_bullets"]))
-    check("a NULL bullets column comes back as []", rows[2]["summary_bullets"] == [])
-    check("an unparseable bullets column comes back as []", rows[4]["summary_bullets"] == [])
+    check("no article text reaches the generator (ADR-015)",
+          all("summary_bullets" not in r and "full_text" not in r for r in rows),
+          str(sorted(rows[0])))
     check("embedding comes back as bytes", isinstance(rows[0]["embedding"], bytes),
           type(rows[0]["embedding"]).__name__)
     decoded = struct.unpack(f"<{DIM}f", rows[0]["embedding"])
@@ -450,29 +458,32 @@ try:
     check("an un-embedded row comes back as None", rows[4]["embedding"] is None)
 
     saved_gen = sm.SUMMARY_GENERATOR
-    sm.SUMMARY_GENERATOR = "stories:v2"
+    sm.SUMMARY_GENERATOR = "stories:v3"
     try:
         sm.generate_weekly_summaries(week_start=WEEK)
     finally:
         sm.SUMMARY_GENERATOR = saved_gen
-        logging.getLogger("paperswap.database").disabled = False
     row = next((r for r in db.get_topic_summaries(WEEK) if r["topic"] == TOPIC), None)
     check("a summary row was written", row is not None)
     if row:
-        check("generator column records stories:v2", row["generator"] == "stories:v2",
+        check("generator column records stories:v3", row["generator"] == "stories:v3",
               row["generator"])
         check("number_of_articles is what the generator read (unchanged by grouping)",
               row["number_of_articles"] == 5, str(row["number_of_articles"]))
         check("articles_in_window unchanged", row["articles_in_window"] == 5)
-        check("the shared story leads with its first bullet",
-              row["summary"].split("\n")[1].startswith("• First extracted sentence"),
+        first_line = row["summary"].split("\n")[1]
+        check("the shared story leads with a publisher's first sentence",
+              first_line.startswith("• First publisher sentence") and "Second." not in first_line,
               row["summary"])
-        check("the basis sentence describes stories:v2", "grouped into stories" in row["basis"],
+        check("the basis sentence describes stories:v3",
+              "grouped into stories" in row["basis"] and "extracted" not in row["basis"],
               row["basis"])
         check("the API payload is JSON-serialisable", bool(json.dumps(row)))
 
-    check("the shipped default generator is stories:v2",
-          'os.getenv("SUMMARY_GENERATOR", "stories:v2")' in inspect.getsource(sm))
+    check("the shipped default generator is stories:v3",
+          'os.getenv("SUMMARY_GENERATOR", "stories:v3")' in inspect.getsource(sm))
+    check("a stories:v2 row keeps its own basis (it did quote article text)",
+          "extracted" in db._summary_basis("stories:v2"))
 finally:
     try:
         drop_fixtures()
@@ -484,4 +495,4 @@ print("\n" + "=" * 62)
 if fails:
     print(f"FAILED ({len(fails)}): " + ", ".join(fails))
     sys.exit(1)
-print("All stories:v2 checks passed.")
+print("All stories:v3 checks passed.")
