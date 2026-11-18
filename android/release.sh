@@ -10,8 +10,10 @@
 #
 # Needs: JDK 17-22 in JAVA_HOME, the paperswap.signing.* properties in
 # ~/.gradle/gradle.properties, the Android SDK (ANDROID_HOME or sdk.dir in
-# local.properties) and an authenticated gh. Optional PAPERSWAP_BASE_URL sets
-# the backend the APK talks to (default: the Gradle default, Tailscale).
+# local.properties) and an authenticated gh. PAPERSWAP_BASE_URL sets the
+# backend the APK talks to, and must be https:// (#32): release builds allow no
+# cleartext, and Gradle refuses to package a signed APK with an http:// URL.
+#   PAPERSWAP_BASE_URL=https://<domain>/ ./release.sh
 set -euo pipefail
 cd "$(dirname "$0")"
 

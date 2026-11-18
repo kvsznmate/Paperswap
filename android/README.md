@@ -102,7 +102,7 @@ Back up the `.jks` file **and** the password together; a password manager can ho
    ```
 3. The script refuses to run unless the working tree is clean, `HEAD` is `origin/main` and the tag `v<versionName>` is new. It builds and signs the APK, checks it with `apksigner`, then pushes the tag. Last, it creates a GitHub Release with `paperswap-<version>.apk` and generated notes.
 
-`PAPERSWAP_BASE_URL=https://… ./release.sh` sets the backend that the release APK talks to. If it is unset, the APK keeps the Tailscale default and only works on the tailnet until #32 lands.
+`PAPERSWAP_BASE_URL=https://… ./release.sh` sets the backend that the release APK talks to. It must be `https://` (#32, ADR-018): release builds allow no cleartext, and Gradle refuses to package a signed APK with an `http://` URL. Debug builds keep cleartext (`src/debug/AndroidManifest.xml`) for the Tailscale default and the emulator.
 
 **Installing over a debug build.** The debug APK is signed with the debug key of the machine that built it, so a signed release cannot install over it. Uninstall the debug build once (this clears Saved and the topic filter), then install the release.
 

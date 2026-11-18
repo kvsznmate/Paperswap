@@ -32,6 +32,7 @@ docker compose exec news-cards-backend python tests/test_public_limits.py
 docker compose exec news-cards-backend python tests/test_load_shedding.py
 docker compose exec news-cards-backend python tests/test_paper_feed.py
 docker compose exec news-cards-backend python tests/test_privacy.py
+docker compose exec news-cards-backend python tests/test_proxy.py
 ```
 
 Or all of them:
@@ -57,6 +58,7 @@ docker compose exec news-cards-backend sh -c 'for t in tests/test_*.py; do echo 
 | `test_related.py` | yes (sections 2-4) | Related coverage (ADR-015): other publishers only, most similar first, capped, thresholded, within the time window; NULL vs `[]`; writes only changes; the feed serves headline + publisher + link and drops purged ids; no `full_text`/`summary_bullets` column and no page fetching; robots.txt obeyed with RFC 9309 status rules |
 | `test_paper_feed.py` | yes (sections 4-5) | Images and credits behind the Paper cards (ADR-013, ADR-016): BBC thumbnails served at 976 px; the publisher registry (credit wording, longest match, subdomains, "<site> via Hacker News", idempotent); no image from publishers that forbid hot-linking, at fetch and at serve time; rows stored under the old rules served correctly; stored stock filler cleared by `init_db`; `description_source` as stored, NULL never backfilled; no embedding in the payload |
 | `test_privacy.py` | yes (sections 1-2) | No IP or User-Agent at rest (ADR-017): `init_db` drops the old `user_sessions` columns with their data; a heartbeat stores only the id and timestamps; a rate-limited request logs no client address; uvicorn's access log is off; `/privacy` states the configured retention windows; no public page loads Google Fonts and every self-hosted font file is served |
+| `test_proxy.py` | yes (sections 3-4) | Behind Cloudflare Tunnel (ADR-018): `client_ip` uses `CLIENT_IP_HEADER` only from `TRUSTED_PROXIES`, falls back on a missing or malformed header; visitors behind the proxy get separate rate-limit buckets, an untrusted sender cannot escape its bucket; `/privacy` names Cloudflare only when behind it; cloudflared pinned and profiled; release builds without cleartext, a signed release only with an https URL (Android checks skipped without `android/`) |
 
 ## Notes
 
