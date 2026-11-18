@@ -89,20 +89,18 @@ Back up the `.jks` file **and** the password together; a password manager can ho
 
 **Build a signed APK locally.** `./gradlew :app:assembleRelease` writes `app/build/outputs/apk/release/app-release.apk`; the name loses `-unsigned` once the APK is signed. Check it with `apksigner verify --print-certs`.
 
-**Publish a release** (`.github/workflows/release.yml`):
+**Publish a release** with `android/release.sh`. The key stays on the signing machine and is never uploaded: no CI secret holds it, by choice.
 
 1. Bump `versionCode` (+1) and `versionName` in `app/build.gradle.kts`. Open a PR into `dev`, then release `dev` into `main`.
-2. Tag the commit on `main` and push the tag: `git tag v1.1 && git push origin v1.1`. The tag must equal `v` + `versionName`.
-3. The workflow builds, signs and verifies `paperswap-1.1.apk`, then attaches it to a GitHub Release with generated notes.
+2. On the signing machine, with `JAVA_HOME` set to JDK 17–22:
+   ```bash
+   git switch main && git pull
+   cd android && ./release.sh --dry-run   # build, sign and verify only
+   ./release.sh                           # then tag v<versionName> and publish
+   ```
+3. The script refuses to run unless the working tree is clean, `HEAD` is `origin/main` and the tag `v<versionName>` is new. It builds and signs the APK, checks it with `apksigner`, then pushes the tag. Last, it creates a GitHub Release with `paperswap-<version>.apk` and generated notes.
 
-The workflow needs four repository secrets:
-
-- `PAPERSWAP_KEYSTORE_BASE64`: the output of `base64 -w0 paperswap-release.jks`
-- `PAPERSWAP_SIGNING_STORE_PASSWORD`
-- `PAPERSWAP_SIGNING_KEY_ALIAS`
-- `PAPERSWAP_SIGNING_KEY_PASSWORD`
-
-The optional repository variable `PAPERSWAP_BASE_URL` sets the backend that the release APK talks to. If it is unset, the APK keeps the Tailscale default and only works on the tailnet until #32 lands.
+`PAPERSWAP_BASE_URL=https://… ./release.sh` sets the backend that the release APK talks to. If it is unset, the APK keeps the Tailscale default and only works on the tailnet until #32 lands.
 
 **Installing over a debug build.** The debug APK is signed with the debug key of the machine that built it, so a signed release cannot install over it. Uninstall the debug build once (this clears Saved and the topic filter), then install the release.
 
