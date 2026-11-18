@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
+    <title>PaperSwap privacy</title>
+    <!-- Self-hosted fonts (#67): no request from this page leaves this server. -->
+    <link rel="stylesheet" href="/static/fonts/fonts.css">
+    <style>
+        /* Paper palette, same tokens as mobile_preview.html (ADR-013). */
+        :root {
+            --ground: #F4EFE4; --card: #FFFDF8; --rule: #D9D1C0;
+            --ink: #1C1A16; --ink2: #47433B; --muted: #6B655A;
+            --serif: 'Noto Serif', Georgia, serif;
+            --sans: Roboto, system-ui, sans-serif;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --ground: #14120E; --card: #1E1B16; --rule: #3A352C;
+                --ink: #EDE6D6; --ink2: #C9C1AF; --muted: #A39B89;
+            }
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0; background: var(--ground); color: var(--ink);
+            font: 16px/1.55 var(--sans); -webkit-font-smoothing: antialiased;
+        }
+        main { max-width: 680px; margin: 0 auto; padding: 32px 16px 64px; }
+        h1, h2 { font-family: var(--serif); line-height: 1.25; }
+        h1 { font-size: 30px; margin: 0 0 4px; }
+        h2 { font-size: 21px; margin: 36px 0 8px; }
+        p, li { color: var(--ink2); }
+        .meta { color: var(--muted); font-size: 14px; margin: 0 0 24px; }
+        .lead { font-family: var(--serif); font-size: 18px; color: var(--ink); }
+        a { color: var(--ink); }
+        .table { overflow-x: auto; border: 1px solid var(--rule); border-radius: 8px; background: var(--card); }
+        table { border-collapse: collapse; width: 100%; font-size: 14px; }
+        th, td { text-align: left; vertical-align: top; padding: 10px 12px; border-bottom: 1px solid var(--rule); }
+        tr:last-child td { border-bottom: 0; }
+        th { font-weight: 500; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+        td:first-child { color: var(--ink); font-weight: 500; }
+        /* On a phone each row becomes a card, so "Kept for" is never off-screen. */
+        @media (max-width: 600px) {
+            table, tbody, tr, td { display: block; }
+            thead { display: none; }
+            tr { border-bottom: 1px solid var(--rule); padding: 4px 0; }
+            tr:last-child { border-bottom: 0; }
+            td { border: 0; padding: 6px 14px; }
+            td:first-child { font-family: var(--serif); font-size: 17px; padding-top: 12px; }
+            td[data-label]::before {
+                content: attr(data-label); display: block; color: var(--muted);
+                font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+            }
+        }
+        code { font-size: 13px; overflow-wrap: anywhere; }
+        .box { background: var(--card); border: 1px solid var(--rule); border-radius: 8px; padding: 14px 16px; }
+        button {
+            font: inherit; font-size: 14px; color: var(--ground); background: var(--ink);
+            border: 0; border-radius: 6px; padding: 8px 14px; cursor: pointer; margin-top: 8px;
+        }
+        button:focus-visible, a:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+    </style>
+</head>
+<body>
+<main>
+    <h1>Privacy</h1>
+    <p class="meta">PaperSwap · last changed 18 November 2026</p>
+
+    <p class="lead">PaperSwap has no accounts, no ads, no tracking cookies and no third-party analytics. The server does not store your IP address or anything else that names you.</p>
+
+    <p>PaperSwap is a non-commercial demo project by a student, published at <a href="https://github.com/kvsznmate/Paperswap">github.com/kvsznmate/Paperswap</a>. The maintainer of that repository is responsible for the data described here. To ask a question or use one of your rights, open an issue there.</p>
+
+    <h2>What the server stores</h2>
+    <p>Every row below is tied at most to a random id that your browser or app made up. Nothing links that id to you.</p>
+    <div class="table"><table>
+        <thead><tr><th>Data</th><th>What is in it</th><th>Why</th><th>Kept for</th></tr></thead>
+        <tbody>
+        <tr>
+            <td>Swipes</td>
+            <td data-label="What is in it">Which article, read or pass, how long the card was open, whether you turned it over, the time, and a random session id</td>
+            <td data-label="Why">Usage statistics, and the dataset for the recommender this project studies</td>
+            <td data-label="Kept for">{{ARTICLE_DAYS}} days, with the article. An archive copy (headline, topic, publisher, your action, how long, turned over, session id, time) has no end date.</td>
+        </tr>
+        <tr>
+            <td>Sessions (web page only)</td>
+            <td data-label="What is in it">The random session id, when it started, its last ping, and how long it lasted</td>
+            <td data-label="Why">Counting visits and how long they last</td>
+            <td data-label="Kept for">{{SESSION_DAYS}} days after the last ping</td>
+        </tr>
+        <tr>
+            <td>Request statistics</td>
+            <td data-label="What is in it">The route (for example <code>/api/v1/feed</code>), the method, the status code and the time. No address, no query string.</td>
+            <td data-label="Why">Seeing load and errors</td>
+            <td data-label="Kept for">{{REQUEST_LOG_DAYS}} days</td>
+        </tr>
+        </tbody>
+    </table></div>
+    <p>The articles themselves (headlines, descriptions, links) are public publisher data, kept for {{ARTICLE_DAYS}} days.</p>
+
+    <h2>What the server only holds in memory</h2>
+    <ul>
+        <li><strong>Your IP address</strong>, as a key in the rate limiter that stops one client from flooding the server. It is never written to the database or to a log file, and it is gone after the limit window (at most one hour) or when the server restarts.</li>
+        <li>The last 100 requests (method, path and status, no address), for the operator's status screen.</li>
+    </ul>
+
+    <h2>What stays on your device</h2>
+    <ul>
+        <li><strong>Web page:</strong> your saved articles, your topic choice and the random session id, in this browser's local storage. Clear the site data to remove them.</li>
+        <li><strong>Android app:</strong> your saved articles and topic choice, in the app's storage. Clear the app's storage or uninstall it to remove them. The app makes a new session id each time it starts and does not keep it.</li>
+    </ul>
+
+    <h2>Other servers your device contacts</h2>
+    <ul>
+        <li><strong>Publishers' image servers.</strong> Card photos load straight from the publisher (for example the BBC or Ars Technica), so that publisher sees your IP address, under its own privacy policy. Cards without a photo contact no one.</li>
+        <li><strong>The publisher's site</strong>, when you open an article.</li>
+    </ul>
+    <p>Fonts are served by PaperSwap itself, not by Google. The server runs on Oracle Cloud Infrastructure, which hosts the data on the project's behalf. The connection is plain HTTP for now; HTTPS is planned (<a href="https://github.com/kvsznmate/Paperswap/issues/32">#32</a>).</p>
+
+    <h2>Legal basis</h2>
+    <p>Legitimate interest (GDPR Article 6(1)(f)): running the service, protecting it from abuse, and measuring how the demo is used. The data is minimal and cannot identify you on its own.</p>
+
+    <h2>Your rights</h2>
+    <p>You can ask for access to, or deletion of, your data, and you can object to its use. Because PaperSwap holds nothing that identifies you, it can only find your rows if you give it your session id (GDPR Article 11). You can also complain to the Dutch data protection authority, the <a href="https://autoriteitpersoonsgegevens.nl/">Autoriteit Persoonsgegevens</a>.</p>
+    <div class="box">
+        <div>This browser's session id: <code id="sid">none</code></div>
+        <button type="button" id="forget" hidden>Forget this id</button>
+        <p id="forgot" hidden style="margin:8px 0 0">Forgotten. The next visit starts a new session id that nothing links to the old one.</p>
+    </div>
+
+    <h2>Changes</h2>
+    <p>This page is part of the source code, so <a href="https://github.com/kvsznmate/Paperswap/commits/main/backend/templates/privacy.html">every change to it</a> is public.</p>
+</main>
+<script>
+    (function () {
+        var key = 'paperswap_session_id', id = null;
+        try { id = localStorage.getItem(key); } catch (e) {}
+        if (!id) return;
+        document.getElementById('sid').textContent = id;
+        var btn = document.getElementById('forget');
+        btn.hidden = false;
+        btn.onclick = function () {
+            try { localStorage.removeItem(key); } catch (e) {}
+            document.getElementById('sid').textContent = 'none';
+            btn.hidden = true;
+            document.getElementById('forgot').hidden = false;
+        };
+    })();
+</script>
+</body>
+</html>

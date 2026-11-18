@@ -476,11 +476,14 @@ def init_db():
                 session_id TEXT PRIMARY KEY,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 last_heartbeat TIMESTAMPTZ DEFAULT NOW(),
-                duration_seconds INTEGER DEFAULT 0,
-                user_agent TEXT,
-                ip_address TEXT
+                duration_seconds INTEGER DEFAULT 0
             )
         ''')
+        # Data minimisation (#67, ADR-017). These columns held the client IP and
+        # User-Agent of every new session, and nothing ever read them. Dropping
+        # them deletes what was stored; IF EXISTS makes it a no-op afterwards.
+        cursor.execute('ALTER TABLE user_sessions DROP COLUMN IF EXISTS ip_address')
+        cursor.execute('ALTER TABLE user_sessions DROP COLUMN IF EXISTS user_agent')
 
         # Telemetry: Request logs for hourly peak usage distribution.
         cursor.execute('''
@@ -975,16 +978,19 @@ def refresh_session(session_id: str) -> bool:
         return cursor.rowcount > 0
 
 
-def record_session_heartbeat(session_id: str, user_agent: str = None, ip_address: str = None):
-    """Record or refresh a user session heartbeat and update duration."""
+def record_session_heartbeat(session_id: str):
+    """Record or refresh a user session heartbeat and update duration.
+
+    Only the client's random id and timestamps: no IP, no User-Agent (ADR-017).
+    """
     with db_cursor(commit=True) as cursor:
         cursor.execute('''
-            INSERT INTO user_sessions (session_id, user_agent, ip_address, created_at, last_heartbeat, duration_seconds)
-            VALUES (%s, %s, %s, NOW(), NOW(), 0)
+            INSERT INTO user_sessions (session_id, created_at, last_heartbeat, duration_seconds)
+            VALUES (%s, NOW(), NOW(), 0)
             ON CONFLICT (session_id) DO UPDATE SET
                 last_heartbeat = NOW(),
                 duration_seconds = GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - user_sessions.created_at))))
-        ''', (session_id, user_agent or '', ip_address or ''))
+        ''', (session_id,))
 
 
 def log_request_events_bulk(rows: list) -> int:

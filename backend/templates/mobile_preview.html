@@ -5,11 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="color-scheme" content="light dark">
     <title>PaperSwap</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <!-- Noto Serif is what Android's FontFamily.Serif renders, so the web preview
-         and the app set headlines in the same face. -->
-    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif:wght@400;700&family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+         and the app set headlines in the same face. Self-hosted, so the page
+         sends no visitor's IP address to Google (#67). -->
+    <link rel="stylesheet" href="/static/fonts/fonts.css">
     <style>
         /* The Paper palette (#13, ADR-013). Same roles and values as the Android
            theme (ui/theme/Color.kt); night follows the device's dark mode. */
@@ -307,7 +306,7 @@
             <p class="sub">Kept in this browser. The deck reloads with your choice.</p>
             <div id="sheet-rows"></div>
             <button class="btn solid" id="sheet-apply" onclick="applySheet()">Show all topics</button>
-            <p class="note" style="margin-top:16px;font-size:12px">PaperSwap is a non-commercial demo project, not affiliated with any publisher. Stories, headlines and descriptions belong to their publishers, and every card links to the original.</p>
+            <p class="note" style="margin-top:16px;font-size:12px">PaperSwap is a non-commercial demo project, not affiliated with any publisher. Stories, headlines and descriptions belong to their publishers, and every card links to the original. <a href="/privacy" style="color:inherit">Privacy</a></p>
         </div>
     </div>
 
@@ -913,7 +912,7 @@
             fetch('/api/v1/telemetry/heartbeat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ session_id: sessionId, user_agent: navigator.userAgent.slice(0, 256) })
+                body: JSON.stringify({ session_id: sessionId })
             }).catch(() => {});
         }
         sendHeartbeat();

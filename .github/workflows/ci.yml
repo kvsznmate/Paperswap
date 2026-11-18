@@ -114,6 +114,8 @@ jobs:
           expect 200 localhost:8000/                         || rc=1
           expect 200 localhost:8000/mobile                   || rc=1
           expect 200 localhost:8000/summaries                || rc=1
+          expect 200 localhost:8000/privacy                  || rc=1
+          expect 200 localhost:8000/static/fonts/fonts.css   || rc=1
           expect 200 localhost:8000/api/v1/categories        || rc=1
           expect 200 "localhost:8000/api/v1/feed?limit=5"    || rc=1
           expect 200 localhost:8000/api/v1/summaries         || rc=1
