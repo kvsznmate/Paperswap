@@ -139,7 +139,7 @@ Admin auth fails **closed**: with `ADMIN_API_KEY` unset, the admin endpoints ret
 
 ## Deployment
 
-The app runs on an Oracle Cloud E2.1.Micro under Docker Compose ([ADR-003](docs/ARCHITECTURE.md); for other hosts see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)). Deploying is manual: `git pull` on the VM, then `docker compose down && docker compose up -d`. Use `down`/`up` and not `--force-recreate`, because the latter can carry stale environment forward.
+The app runs on an Oracle Cloud E2.1.Micro under Docker Compose ([ADR-003](docs/ARCHITECTURE.md); for other hosts see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)). Deploying is manual: `git pull` on the VM, then `docker compose down && docker compose up -d`. Use `down`/`up` and not `--force-recreate`, because the latter can carry stale environment forward. Public HTTPS comes from a Cloudflare Tunnel, so the VM opens no inbound port ([setup](docs/DEPLOYMENT.md#public-https-cloudflare-tunnel-32-adr-018), ADR-018).
 
 ---
 
@@ -147,7 +147,7 @@ The app runs on an Oracle Cloud E2.1.Micro under Docker Compose ([ADR-003](docs/
 
 **Operations**
 - CI (`.github/workflows/ci.yml`) lints, runs every backend suite against Postgres 16, boots the Compose stack and builds both APKs on each PR. It does not deploy, and there are no Android tests, only the compile. Signed APKs are built and published from the signing machine with `android/release.sh` (`android/README.md`, Releasing).
-- The server is plain HTTP only. HTTPS through Caddy is planned, and it needs `X-Forwarded-For` handling for the rate limiter plus `ADMIN_COOKIE_SECURE=true`.
+- Public HTTPS goes through a Cloudflare Tunnel (ADR-018). Until the domain and tunnel are set up on the VM ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#public-https-cloudflare-tunnel-32-adr-018)), the server is reachable over plain HTTP on the tailnet only.
 - Startup has no database retry, so an unreachable Postgres crash-loops the container. There is no `/health` endpoint.
 - `swipe_events`, the one irreplaceable table, has no scheduled backup.
 

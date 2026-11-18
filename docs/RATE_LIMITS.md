@@ -198,25 +198,30 @@ resets on the wall-clock boundary, so 120 requests at 12:00:59 and another 120 a
 than a smooth cap. Adequate here; worth knowing before treating a limit as a
 hard rate.
 
-## Known gap: reverse proxy
+## Behind Cloudflare Tunnel (#32, ADR-018)
 
-Limits key on `request.client.host`. Today the app is exposed directly, so that
-is the real client IP.
+Limits key on `main.client_ip()`, never on `request.client.host` directly.
+Behind the tunnel every request arrives from the cloudflared container, so the
+socket address alone would put every visitor in one bucket.
 
-**Once Caddy is in front (planned), every request will
-appear to come from the proxy.** All users collapse into one bucket and each
-limit becomes a global cap across the whole userbase rather than per-client.
+- `CLIENT_IP_HEADER` unset (default: local runs, CI, Tailscale): the socket
+  address.
+- `CLIENT_IP_HEADER=CF-Connecting-IP` (the VM behind the tunnel): the header,
+  but only when the socket peer is in `TRUSTED_PROXIES` (loopback and private
+  ranges, where cloudflared sits). A request from anywhere else is keyed on its
+  own address, so sending the header directly does not buy a fresh bucket.
 
-The fix is to trust `X-Forwarded-For`, which is only safe when the proxy is
-trusted and overwrites the header — otherwise any client can spoof its way past
-the limiter by sending its own. Wire it behind an explicit `TRUST_PROXY` flag,
-defaulting off, at the same time HTTPS lands. Tracked as a follow-up; the limits
-above are correct only until that day.
+That last rule is a second line. The first is that the origin is unreachable
+from the internet (`API_BIND=127.0.0.1` and no ingress rule for 8000).
+
+Cloudflare adds one rate-limiting rule of its own on `POST /api/v1/swipe`,
+set above this limiter's 120/min so it only stops floods at the edge.
 
 ## Verifying
 
 `backend/tests/test_api_security.py` asserts the swipe limiter trips above
 120/min and that a realistic 60-swipe session is never rejected.
+`backend/tests/test_proxy.py` covers whose address the limiter keys on behind the tunnel.
 `backend/tests/test_load_shedding.py` covers the request ceiling, the admin
 bypass, the docs flag, and checks that every `UVICORN_*` variable in the
 Dockerfile and compose file is an option uvicorn actually reads. A misspelt one

@@ -1,6 +1,6 @@
 # Paperswap — notes for coding agents
 
-Swipe-based news reader. FastAPI + PostgreSQL 16 backend (`backend/`), Kotlin/Compose Android client (`android/`), and a web preview served by the backend (`backend/templates/mobile_preview.html`). Start with `README.md`, then `docs/ARCHITECTURE.md` (ADR-001..017). Each ADR explains *why*, and most of the non-obvious code below traces back to one.
+Swipe-based news reader. FastAPI + PostgreSQL 16 backend (`backend/`), Kotlin/Compose Android client (`android/`), and a web preview served by the backend (`backend/templates/mobile_preview.html`). Start with `README.md`, then `docs/ARCHITECTURE.md` (ADR-001..018). Each ADR explains *why*, and most of the non-obvious code below traces back to one.
 
 ## Layout that matters
 
@@ -25,7 +25,7 @@ Swipe-based news reader. FastAPI + PostgreSQL 16 backend (`backend/`), Kotlin/Co
 11. **Escape server data before it reaches `innerHTML`** in the templates. Request paths and RSS titles are attacker-influenced.
 12. **Every public write path is bounded globally, not just per IP** (`public_limits.py`: swipe and new-session budgets, per-session swipe dedupe, cold-start gate). A new public endpoint that writes rows or calls out needs the same.
 13. **No article text.** Never fetch, store or display publishers' article pages (ADR-015). Cards and summaries use only feed fields (headline, the feed's description, link, publisher) and what the database computes from them. Feeds are fetched as `FETCH_USER_AGENT` and robots.txt is obeyed.
-14. **No IP addresses or User-Agents at rest (ADR-017).** Never store either in a table, and never log the client address (uvicorn runs with `--no-access-log`; the `slowapi` logger stays at ERROR). The IP exists only as the rate limiter's in-memory key. A new stored field or retention window must also appear on `/privacy` (`templates/privacy.html`).
+14. **No IP addresses or User-Agents at rest (ADR-017).** Never store either in a table, and never log the client address (uvicorn runs with `--no-access-log`; the `slowapi` logger stays at ERROR). The IP exists only as the rate limiter's in-memory key, and anything keyed on a client uses `main.client_ip()`, never `request.client.host` (behind Cloudflare Tunnel the socket address is cloudflared's, ADR-018). A new stored field or retention window must also appear on `/privacy` (`templates/privacy.html`).
 
 ## Working conventions
 

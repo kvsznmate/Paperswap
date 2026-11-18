@@ -87,6 +87,10 @@ Set in `.env` (see `.env.example` for the annotated version). Compose refuses to
 | `GLOBAL_REQUESTS_PER_MINUTE` | `1800` | Ceiling on all requests together; 503 + `Retry-After` past it. Admin requests bypass it |
 | `UVICORN_LIMIT_CONCURRENCY` / `UVICORN_TIMEOUT_KEEP_ALIVE` | `64` / `3` | uvicorn answers 503 above this many open connections or in-flight requests. See docs/RATE_LIMITS.md, "Load shedding" |
 | `API_DOCS_ENABLED` | `true` | Serves `/docs`, `/redoc`, `/openapi.json`. Set `false` once public |
+| `CLIENT_IP_HEADER` | unset | Header holding the visitor's address behind a proxy (`CF-Connecting-IP` behind Cloudflare Tunnel). Read only from `TRUSTED_PROXIES`; unset = the socket address (ADR-018) |
+| `TRUSTED_PROXIES` | loopback + private ranges | CIDRs allowed to set `CLIENT_IP_HEADER` |
+| `API_BIND` | `0.0.0.0` | Compose only: the host address port 8000 is published on. `127.0.0.1` behind the tunnel |
+| `COMPOSE_PROFILES`, `CLOUDFLARE_TUNNEL_TOKEN` | unset | Compose only: `tunnel` starts the cloudflared service with this token (docs/DEPLOYMENT.md) |
 | `PUBLIC_CACHE_SECONDS` / `SUMMARY_CACHE_SECONDS` | `60` / `600` | In-memory cache and `Cache-Control` max-age for the public GET endpoints |
 | `FEED_COLD_FETCH_COOLDOWN` | `600` | Seconds between synchronous fetches for an empty topic selection |
 | `SUMMARY_GENERATOR` | `stories:v3` | `extractive:v1` is the old offline generator; `anthropic` uses `ANTHROPIC_API_KEY` + `SUMMARY_MODEL`; see `.env.example` for the rest of the summary settings |
@@ -139,7 +143,7 @@ docker compose exec news-cards-backend sh -c 'for t in tests/test_*.py; do echo 
 ## Known issues
 
 - No CI; the suites above are run by hand
-- Rate limits are keyed on the client IP with in-memory storage. Behind a reverse proxy every request appears to come from the proxy, collapsing all clients into one bucket — putting Caddy in front requires `X-Forwarded-For` handling first
+- Rate limits are keyed on the client IP with in-memory storage. Behind the tunnel that is `CF-Connecting-IP`, trusted only from `TRUSTED_PROXIES` (ADR-018)
 - `ADMIN_COOKIE_SECURE` is `false` by default and must be flipped once HTTPS terminates in front
 - The `/api/v1/feed` cold-start path fetches synchronously inside the request (at most once per topic selection per `FEED_COLD_FETCH_COOLDOWN`), so the first call against an empty database blocks for the duration of the outbound calls
 - `duration_seconds` is recomputed from `created_at` on every heartbeat, so a client that reuses one `session_id` across days reports a session lasting days

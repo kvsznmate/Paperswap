@@ -39,7 +39,10 @@ services:
     image: paperswap-backend:latest
     container_name: news_cards_backend
     ports:
-      - "8000:8000"
+      # Behind the tunnel (#32) set API_BIND=127.0.0.1 in .env: cloudflared
+      # reaches the API over the compose network, and the origin must not be
+      # reachable from the internet (see CLIENT_IP_HEADER below).
+      - "${API_BIND:-0.0.0.0}:8000:8000"
     environment:
       # host is the compose service name "db", not localhost
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-newsdb}
@@ -80,6 +83,10 @@ services:
       # Flip to true once HTTPS terminates in front; a Secure cookie over plain
       # HTTP is silently dropped and the sign-in form just reloads.
       ADMIN_COOKIE_SECURE: ${ADMIN_COOKIE_SECURE:-false}
+      # Client address behind a proxy (#32, ADR-018). CF-Connecting-IP behind
+      # Cloudflare Tunnel; unset = the socket address (local, CI, Tailscale).
+      CLIENT_IP_HEADER: ${CLIENT_IP_HEADER:-}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7}
       # --- Weekly topic summaries ---
       # Unset ANTHROPIC_API_KEY is fine: the default generator is offline.
       SUMMARY_GENERATOR: ${SUMMARY_GENERATOR:-stories:v2}
@@ -155,6 +162,27 @@ services:
       db:
         condition: service_healthy
     restart: "no"        # one-shot; restarting a finished batch would re-run it
+
+  # Cloudflare Tunnel (#32, ADR-018). An OUTBOUND connection to Cloudflare, so
+  # the VM opens no inbound port; HTTPS ends at Cloudflare. The tunnel and its
+  # public hostname are configured in the Cloudflare dashboard, which hands out
+  # the token: docs/DEPLOYMENT.md, "Public HTTPS".
+  #
+  # Behind the "tunnel" profile, so local runs and CI never start it. On the VM
+  # put COMPOSE_PROFILES=tunnel in .env and plain `docker compose up -d` starts it.
+  # The :? check would also fire for CI (Compose interpolates every service), so
+  # an unset token fails at cloudflared's start instead.
+  cloudflared:
+    # Pinned: a new cloudflared changes how the only way in behaves.
+    image: cloudflare/cloudflared:2026.10.7
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    profiles: ["tunnel"]
+    mem_limit: 128m
+    depends_on:
+      - news-cards-backend
+    restart: unless-stopped
 
 volumes:
   pgdata:
