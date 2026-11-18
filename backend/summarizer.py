@@ -48,6 +48,7 @@ from datetime import date, datetime, timedelta, timezone
 import requests
 
 import database as db
+import news_fetcher as nf
 
 logger = logging.getLogger("paperswap.summarizer")
 
@@ -403,8 +404,11 @@ def build_stories(articles: list, threshold: float = None) -> list:
         headline = (articles[rep].get("title") or "").strip()
         lede = _publisher_lede(articles[rep]) if described else None
 
-        source_counts = Counter(articles[i].get("source") for i in members
-                                if articles[i].get("source"))
+        # Credited the way the cards are (ADR-016), so a digest names "CNBC",
+        # not the feed's channel title, even for rows stored before the rule.
+        credits = [nf.publisher_credit(articles[i].get("url"), articles[i].get("source"))
+                   for i in members if articles[i].get("source")]
+        source_counts = Counter(credits)
         sources = [s for s, _ in sorted(source_counts.items(), key=lambda kv: (-kv[1], kv[0]))]
 
         stories.append({

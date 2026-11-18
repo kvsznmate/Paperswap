@@ -307,6 +307,7 @@
             <p class="sub">Kept in this browser. The deck reloads with your choice.</p>
             <div id="sheet-rows"></div>
             <button class="btn solid" id="sheet-apply" onclick="applySheet()">Show all topics</button>
+            <p class="note" style="margin-top:16px;font-size:12px">PaperSwap is a non-commercial demo project, not affiliated with any publisher. Stories, headlines and descriptions belong to their publishers, and every card links to the original.</p>
         </div>
     </div>
 
@@ -372,7 +373,7 @@
     }
 
     const CANNED = ['keyword_template', 'topic_fallback'];
-    const showsPhoto = a => !!safeUrl(a.image_url) && a.image_is_stock !== true;
+    const showsPhoto = a => !!safeUrl(a.image_url);
     const showsBlurb = a => !!a.description && !CANNED.includes(a.description_source);
     const shortTime = s => String(s || '').replace(/,\s*\d{4}/, '');
 

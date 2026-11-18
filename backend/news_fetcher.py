@@ -33,7 +33,6 @@ ROBOTS_CACHE_SECONDS = 24 * 3600
 #
 #   rss_urls        -> publisher feeds, round-robin. Verified with check_feeds.py
 #   summary_fallback-> used when the feed gives no usable description
-#   images          -> hero image used only when the article has none of its own
 #
 # These were Google News search feeds until every one of them was replaced.
 # Google News does not publish article links, it publishes redirect wrappers
@@ -53,12 +52,6 @@ TOPIC_FEEDS = {
             "https://www.engadget.com/rss.xml",
         ],
         "summary_fallback": "Breakthrough technology updates and strategic market shifts impacting digital infrastructure and software.",
-        "images": [
-            "https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=800&q=80",
-            "https://images.unsplash.com/photo-1451187580459-43490279c0fa?auto=format&fit=crop&w=800&q=80",
-            "https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?auto=format&fit=crop&w=800&q=80",
-            "https://images.unsplash.com/photo-1485827404703-89b55fcc595e?auto=format&fit=crop&w=800&q=80",
-        ],
     },
     "FINANCE": {
         "rss_urls": [
@@ -66,12 +59,6 @@ TOPIC_FEEDS = {
             "https://feeds.bbci.co.uk/news/business/rss.xml",
         ],
         "summary_fallback": "Financial sector analysis covering corporate earnings, market trends, and strategic investment movements.",
-        "images": [
-            "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?auto=format&fit=crop&w=800&q=80",
-            "https://images.unsplash.com/photo-1590283603385-17ffb3a7f29f?auto=format&fit=crop&w=800&q=80",
-            "https://images.unsplash.com/photo-1559526324-4b87b5e36e44?auto=format&fit=crop&w=800&q=80",
-            "https://images.unsplash.com/photo-1460925895917-afdab827c52f?auto=format&fit=crop&w=800&q=80",
-        ],
     },
     "SPORTS": {
         "rss_urls": [
@@ -79,12 +66,6 @@ TOPIC_FEEDS = {
             "https://www.skysports.com/rss/12040",
         ],
         "summary_fallback": "Match results, transfer moves, and championship standings from across the world of professional sport.",
-        "images": [
-            "https://loremflickr.com/800/1200/stadium,sport?lock=11",
-            "https://loremflickr.com/800/1200/football?lock=12",
-            "https://loremflickr.com/800/1200/basketball?lock=13",
-            "https://loremflickr.com/800/1200/athlete,running?lock=14",
-        ],
     },
     "POLITICS": {
         "rss_urls": [
@@ -92,12 +73,6 @@ TOPIC_FEEDS = {
             "https://feeds.npr.org/1014/rss.xml",
         ],
         "summary_fallback": "Legislative developments, election coverage, and policy debates shaping domestic and international governance.",
-        "images": [
-            "https://loremflickr.com/800/1200/parliament,building?lock=21",
-            "https://loremflickr.com/800/1200/capitol?lock=22",
-            "https://loremflickr.com/800/1200/voting,election?lock=23",
-            "https://loremflickr.com/800/1200/flag,government?lock=24",
-        ],
     },
     "PROGRAMMING": {
         "rss_urls": [
@@ -108,12 +83,6 @@ TOPIC_FEEDS = {
             "https://hnrss.org/frontpage",
         ],
         "summary_fallback": "Language releases, framework updates, and open-source project news relevant to working software engineers.",
-        "images": [
-            "https://loremflickr.com/800/1200/code,screen?lock=31",
-            "https://loremflickr.com/800/1200/keyboard,programming?lock=32",
-            "https://loremflickr.com/800/1200/terminal,computer?lock=33",
-            "https://loremflickr.com/800/1200/developer,laptop?lock=34",
-        ],
     },
     "SCIENCE": {
         "rss_urls": [
@@ -122,12 +91,6 @@ TOPIC_FEEDS = {
             "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
         ],
         "summary_fallback": "Peer-reviewed findings, space missions, and laboratory breakthroughs reported from the global research community.",
-        "images": [
-            "https://loremflickr.com/800/1200/laboratory,science?lock=41",
-            "https://loremflickr.com/800/1200/space,galaxy?lock=42",
-            "https://loremflickr.com/800/1200/microscope?lock=43",
-            "https://loremflickr.com/800/1200/telescope,observatory?lock=44",
-        ],
     },
     "BEAUTY": {
         "rss_urls": [
@@ -135,12 +98,6 @@ TOPIC_FEEDS = {
             "https://www.refinery29.com/en-us/beauty/rss.xml",
         ],
         "summary_fallback": "Product launches, skincare research, and brand movements across the global beauty and cosmetics industry.",
-        "images": [
-            "https://loremflickr.com/800/1200/cosmetics?lock=51",
-            "https://loremflickr.com/800/1200/skincare?lock=52",
-            "https://loremflickr.com/800/1200/makeup?lock=53",
-            "https://loremflickr.com/800/1200/perfume,beauty?lock=54",
-        ],
     },
 }
 
@@ -150,10 +107,6 @@ def get_topic_config(category: str) -> dict:
     return TOPIC_FEEDS.get(slug, TOPIC_FEEDS[db.DEFAULT_CATEGORY])
 
 
-def fallback_image(category: str, idx: int) -> str:
-    """Deterministic hero image for a topic when the article ships without one."""
-    images = get_topic_config(category)["images"]
-    return images[idx % len(images)]
 
 
 def clean_html(text: str) -> str:
@@ -295,11 +248,101 @@ def classify_category(title: str, description: str, fallback: str) -> str:
     return fallback
 
 
-# Lets us tell "generic topic filler" apart from a real article photo, so that
-# relabelling an article swaps its filler image but never clobbers a real one.
-# The feed also exposes it per article (image_is_stock), so the clients can drop
-# a filler photo instead of showing a laptop over an aviation story (ADR-013).
-_STOCK_IMAGES = {url for cfg in TOPIC_FEEDS.values() for url in cfg["images"]}
+# ---------------------------------------------------------------------------
+# PUBLISHERS (#71, #72, ADR-016)
+#
+# Who an article belongs to, keyed by its link: the host without "www.",
+# optionally with a path prefix. The longest match wins, so "bbc.co.uk/sport"
+# beats "bbc.co.uk", and a subdomain matches its parent ("feeds.npr.org" ->
+# "npr.org").
+#
+#   name            the credit shown on cards and in digests, in the wording the
+#                   publisher's terms ask for where they ask (#66 survey: NPR,
+#                   Science Daily, BBC News). The RSS channel title is not used:
+#                   CNBC's is "US Top News and Analysis".
+#   hotlink_images  False where the terms forbid linking to their images
+#                   (The Verge, Refinery29) or to their content "in-line"
+#                   (TechCrunch, CNBC). Those cards are type-only (ADR-013).
+#
+# A link that matches nothing keeps the feed's own name. Items from an
+# aggregator feed (AGGREGATORS, keyed by the feed's title) link to arbitrary
+# sites, so they are credited "<site> via <aggregator>".
+#
+# Applied at fetch time, and again at serve time so rows stored before a change
+# here pick it up. Both are idempotent.
+# ---------------------------------------------------------------------------
+PUBLISHERS = {
+    "arstechnica.com":   {"name": "Ars Technica"},
+    "theverge.com":      {"name": "The Verge", "hotlink_images": False},
+    "techcrunch.com":    {"name": "TechCrunch", "hotlink_images": False},
+    "engadget.com":      {"name": "Engadget"},
+    "cnbc.com":          {"name": "CNBC", "hotlink_images": False},
+    "bbc.co.uk":         {"name": "BBC News"},
+    "bbc.com":           {"name": "BBC News"},
+    "bbc.co.uk/sport":   {"name": "BBC Sport"},
+    "bbc.com/sport":     {"name": "BBC Sport"},
+    "skysports.com":     {"name": "Sky Sports"},
+    "npr.org":           {"name": "NPR"},
+    "dev.to":            {"name": "DEV Community"},
+    "infoq.com":         {"name": "InfoQ"},
+    "phys.org":          {"name": "Phys.org"},
+    "sciencedaily.com":  {"name": "Science Daily"},
+    "allure.com":        {"name": "Allure"},
+    "refinery29.com":    {"name": "Refinery29", "hotlink_images": False},
+}
+
+AGGREGATORS = {
+    "Hacker News: Front Page": "Hacker News",
+}
+
+
+def _host_and_path(url: str) -> tuple:
+    try:
+        parts = urlsplit(url or "")
+    except ValueError:
+        return "", ""
+    host = (parts.hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host, parts.path or "/"
+
+
+def publisher_for(url: str):
+    """The PUBLISHERS entry for an article link, or None."""
+    host, path = _host_and_path(url)
+    if not host:
+        return None
+    best, best_len = None, -1
+    for key, entry in PUBLISHERS.items():
+        k_host, _, k_path = key.partition("/")
+        if not (host == k_host or host.endswith("." + k_host)):
+            continue
+        if k_path and not (path == "/" + k_path or path.startswith("/" + k_path + "/")):
+            continue
+        if len(key) > best_len:
+            best, best_len = entry, len(key)
+    return best
+
+
+def publisher_credit(url: str, feed_source: str) -> str:
+    """The name to credit for an article: the registry's, else '<site> via
+    <aggregator>' for aggregator items, else the feed's own name."""
+    entry = publisher_for(url)
+    if entry:
+        return entry["name"]
+    feed_source = (feed_source or "").strip()
+    if feed_source in AGGREGATORS:
+        host, _ = _host_and_path(url)
+        if host:
+            return f"{host} via {AGGREGATORS[feed_source]}"
+    return feed_source or "Unknown"
+
+
+def image_allowed(url: str) -> bool:
+    """False when the article's publisher forbids hot-linking its images."""
+    entry = publisher_for(url)
+    return entry is None or entry.get("hotlink_images", True)
+
 
 # BBC feeds link a 240 px thumbnail; a card shows it 4-9x enlarged. The same
 # image is served at larger widths by changing that path segment (976 checked
@@ -316,15 +359,19 @@ def upgrade_image_url(url: str) -> str:
 
 
 def present_for_client(articles: list) -> list:
-    """Per-article fields the feed adds for the clients. Mutates and returns.
+    """The publisher rules and the BBC image upgrade, applied to a deck about to
+    be served. Mutates and returns.
 
-    Done at serve time rather than only at fetch time so rows stored before the
-    BBC upgrade get it too (they live up to PURGE_OLDER_THAN_DAYS).
+    Done at serve time as well as at fetch time, so rows stored before a rule
+    changed get it too (they live up to PURGE_OLDER_THAN_DAYS).
     """
     for item in articles:
-        url = item.get('image_url') or ''
-        item['image_is_stock'] = url in _STOCK_IMAGES
-        item['image_url'] = upgrade_image_url(url)
+        link = item.get('url') or ''
+        item['source'] = publisher_credit(link, item.get('source'))
+        image = item.get('image_url') or ''
+        item['image_url'] = upgrade_image_url(image) if image_allowed(link) else ''
+        for rel in item.get('related') or []:
+            rel['source'] = publisher_credit(rel.get('url'), rel.get('source'))
     return articles
 
 
@@ -591,9 +638,8 @@ def fetch_from_rss(category: str, count: int = ARTICLES_PER_CATEGORY) -> list:
 
             entry = entries[position]
 
-            source = feed_title or "Unknown"
-            if hasattr(entry, 'source') and hasattr(entry.source, 'title'):
-                source = entry.source.title
+            link = entry.get("link", "#")
+            source = publisher_credit(link, feed_title)
 
             # The old code stripped everything after the last ' - ' from both
             # title and source, because Google News appends ' - Publisher' to
@@ -619,8 +665,10 @@ def fetch_from_rss(category: str, count: int = ARTICLES_PER_CATEGORY) -> list:
                 "source": source,
                 "published_at": pub_str,
                 "category": category,
-                "image_url": upgrade_image_url(extract_rss_image(entry)) or fallback_image(category, len(results)),
-                "url": entry.get("link", "#"),
+                # No image is better than a stock one (ADR-013), and none at all
+                # where the publisher forbids hot-linking (ADR-016).
+                "image_url": upgrade_image_url(extract_rss_image(entry)) if image_allowed(link) else "",
+                "url": link,
             })
 
     return results
@@ -663,10 +711,6 @@ def fetch_and_sync_news_to_db(categories=None) -> list:
             item['category'] = true_category
             reclassified_count += 1
             print(f"[Reclassified] {query_category} -> {true_category}: {item['title'][:50]}...")
-            # Its filler hero image belonged to the old topic; only swap generic
-            # filler, never a real photo the publisher supplied.
-            if item.get('image_url') in _STOCK_IMAGES:
-                item['image_url'] = fallback_image(true_category, idx)
 
         # Rebuild the blurb against the FINAL topic so a politics story can never
         # keep a tech-flavoured fallback line. The tier is recaptured with it --

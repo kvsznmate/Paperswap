@@ -2,11 +2,13 @@
 
 A native Android app in **Kotlin** with **Jetpack Compose**. It talks to the FastAPI backend in `../backend` and shows topic-balanced news cards across seven categories in a swipe interface, a weekly edition, and a Saved list. The look is the Paper design (ADR-013): ink on paper by day, following the phone's dark mode at night. The package name is still `com.newsswipe.app`, a leftover from the project's original name.
 
+> **Non-commercial demo.** PaperSwap is a portfolio project with no ads, subscriptions or revenue, and it is not affiliated with any publisher. It shows each story's headline, the publisher's own feed description and a link to the original, credited to its publisher; it never copies article text (ADR-015). Stories belong to their publishers.
+
 ---
 
 ## Features
 
-- **Swipe deck.** Swipe right, or tap **Read →**, to open the article in Android Custom Tabs. Swipe left, or tap **Pass**, to skip. Cards lead with the headline; a photo shows only when the publisher sent one, and a canned blurb is hidden (`image_is_stock`, `description_source`).
+- **Swipe deck.** Swipe right, or tap **Read →**, to open the article in Android Custom Tabs. Swipe left, or tap **Pass**, to skip. Cards lead with the headline; a photo shows only when the publisher sent one and allows hot-linking it (ADR-016), and a canned blurb is hidden (`description_source`). Each card credits its real publisher.
 - **Card flip.** Tap a card to see the publisher's own description and **Also covered by**: the same story from other publishers, matched by the backend from article embeddings (ADR-015). Tap one to open it. Nothing on the card is copied from the article page.
 - **Swipe logging.** Each swipe sends `POST /api/v1/swipe` with `dwell_ms` and `flipped`. `dwell_ms` counts only the time the deck was actually on screen: the timer pauses on the other tabs, in the Custom Tab and in the background. If a swipe can't be saved, a notice appears under the deck.
 - **Undo.** Each swipe is held for 5 seconds before it is sent, so an undo within that window cancels it entirely. Older swipes have already been recorded, and undo only brings their card back.

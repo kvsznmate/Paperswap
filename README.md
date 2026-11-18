@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/kvsznmate/Paperswap/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/kvsznmate/Paperswap/actions/workflows/ci.yml)
 
+> **Non-commercial demo.** PaperSwap is a portfolio project with no ads, subscriptions or revenue, and it is not affiliated with any publisher. It shows each story's headline, the publisher's own feed description and a link to the original, credited to its publisher; it never copies article text (ADR-015). Stories belong to their publishers.
+
 **Swipe your news.**
 
 Paperswap borrows the Tinder interaction model for reading headlines. Instead of scrolling an endless list, you get one card at a time:

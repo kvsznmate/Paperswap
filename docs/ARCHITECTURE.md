@@ -438,6 +438,10 @@ Headlines use Noto Serif: it is Android's `FontFamily.Serif`, so the APK gains n
 
 `backend/tests/test_paper_feed.py`: the URL upgrade, `image_is_stock`, `description_source` passed through and never backfilled, and no embedding in the payload.
 
+### Revision (2026-11, #71) — no stock photos at all
+
+Both clients hid stock filler, so storing it was a pipeline whose output was always thrown away. ADR-016 stopped storing it: an article with no photo of its own gets `image_url = ""`, `init_db()` clears the stock URLs already stored, and `image_is_stock` is gone from the feed and both clients.
+
 ## ADR-014 — Publisher RSS is the only news source; NewsAPI removed
 
 **Status:** Accepted (2026-11, #66)
@@ -507,6 +511,37 @@ The app is a free, non-commercial demo for recruiters and friends. Before sharin
 - the robots.txt status rules.
 
 `test_stories.py` checks that a canned or NULL-sourced description is never a lede.
+
+## ADR-016 — A publisher registry: real credits, and images only where allowed
+
+**Status:** Accepted (2026-11, #71, #72)
+
+### Context
+
+- **Credits.** Cards credited the RSS channel title. CNBC's is "US Top News and Analysis", NPR's "NPR Topics: Politics", Sky's "SkySports | News". Several feeds' terms ask for a specific credit: "NPR", "Science Daily", "BBC News" with a link.
+- **Images.** The Verge (Penske Media) and Refinery29 (Sundial) forbid linking directly to their images. TechCrunch's and CNBC's terms forbid "in-line" linking of their content. The cards hot-linked all of them.
+- **Stock filler.** The fetcher stored a stock photo for every article without one, which both clients then hid (ADR-013 revision).
+
+### Decision
+
+`news_fetcher.PUBLISHERS` maps an article's link (host, optional path prefix, longest match wins, subdomains included) to:
+- the publisher's credit, in the wording its terms ask for;
+- `hotlink_images`, which is False for The Verge, Refinery29, TechCrunch and CNBC.
+
+Items from an aggregator feed (`AGGREGATORS`: Hacker News) are credited "<site> via Hacker News". A link that matches nothing keeps the feed's name.
+
+The rules apply at fetch time (what is stored) and again at serve time in `present_for_client` and the digest's coverage line, so rows stored earlier are served correctly without a data migration. Both functions are idempotent.
+
+A short note says the project is non-commercial, unaffiliated, and that stories belong to their publishers. It appears in the README, the Android README, and the topic sheet of both clients: once, where a reader looks for settings, not on every card.
+
+### Consequences
+
+- On the live deck of 18 Nov 2026, 56 of 300 cards (CNBC 27, TechCrunch 15, The Verge 14) became type-only. The Paper design treats that as a normal state.
+- A new feed needs a `PUBLISHERS` entry, written after reading its terms (#66). Without one it is credited with its channel title and its images are allowed.
+
+### Enforcement
+
+`backend/tests/test_paper_feed.py`, sections 2-5.
 
 ---
 
