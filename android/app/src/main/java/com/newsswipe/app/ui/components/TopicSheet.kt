@@ -143,6 +143,17 @@ fun TopicSheet(
                     fontFamily = PaperSans, fontWeight = FontWeight.Bold, fontSize = 16.sp
                 )
             }
+
+            // The project's standing with the publishers (#72), stated once
+            // where a reader looks for settings, not on every card.
+            Spacer(Modifier.height(16.dp))
+            Text(
+                "PaperSwap is a non-commercial demo project, not affiliated with any publisher. Stories, headlines and descriptions belong to their publishers, and every card links to the original.",
+                fontFamily = PaperSans,
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+                color = c.muted
+            )
         }
     }
 }

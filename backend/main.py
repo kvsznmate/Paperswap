@@ -826,7 +826,7 @@ def get_news_feed(
             rows = db.get_balanced_feed(limit=deck_limit, categories=selected)
         else:
             rows = db.get_latest_articles(limit=deck_limit, categories=selected)
-        # image_is_stock + the BBC thumbnail upgrade (ADR-013).
+        # Publisher credits, image rules and the BBC thumbnail upgrade (ADR-013, ADR-016).
         return present_for_client(rows)
 
     articles = query()

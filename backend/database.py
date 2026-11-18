@@ -352,6 +352,16 @@ def init_db():
         cursor.execute('ALTER TABLE articles DROP COLUMN IF EXISTS full_text')
         cursor.execute('ALTER TABLE articles DROP COLUMN IF EXISTS summary_bullets')
 
+        # The stock filler photos news_fetcher used to store for articles without
+        # an image (Unsplash and loremflickr URLs in the exact shapes it wrote).
+        # Both clients hid them anyway (ADR-013), and ADR-016 stopped storing
+        # them; this clears the ones already stored. A no-op once none are left.
+        cursor.execute('''
+            UPDATE articles SET image_url = ''
+            WHERE image_url LIKE 'https://images.unsplash.com/photo-%?auto=format&fit=crop&w=800&q=80'
+               OR image_url LIKE 'https://loremflickr.com/800/1200/%'
+        ''')
+
         # Retry budget for enrichment. enriched_at means "finished successfully";
         # this counts attempts, and the job selects WHERE enriched_at IS NULL AND
         # enrich_attempts < ENRICH_MAX_ATTEMPTS, so a row that keeps raising
