@@ -70,7 +70,7 @@ Oracle Cloud Always Free. The intended A1.Flex ARM shape was persistently out of
 
 €0/month, always-on, 10 TB egress. The 956 MB ceiling directly motivated ADR-001.
 
-Risks accepted: Oracle reclaims idle instances (the refresh job provides enough activity), the free ARM allowance was halved in June 2026 with no notice, and the public IP is ephemeral. The Android client now reaches the server over a Tailscale address instead, so the IP no longer matters to it — but that address is still hardcoded in `RetrofitInstance.kt`, and the phone must be on the same tailnet.
+Risks accepted: Oracle reclaims idle instances (the refresh job provides enough activity), the free ARM allowance was halved in June 2026 with no notice, and the public IP is ephemeral. The Android client reached the server over a Tailscale address instead, so the IP no longer mattered to it. Since ADR-018 the public entry is a Cloudflare Tunnel, and the base URL is a Gradle property (`paperswap.baseUrl`).
 
 ---
 
@@ -426,7 +426,7 @@ A light "paper" design that follows the phone's dark mode, on Android and the we
 - **Save for later is local only.** A copy of headline, link and source on the phone (`LocalStore`, SharedPreferences) or in the browser (`localStorage`). It is not a swipe: no row in `swipe_events`, and the deck does not advance. A copy, not an id, because the server deletes the article after 9 days.
 - **The topic filter is local too** (part of #19). It sends the existing `?categories=` parameter; every topic selected is stored as "no filter", so a topic added later is not silently excluded.
 
-Headlines use Noto Serif: it is Android's `FontFamily.Serif`, so the APK gains no font file (release APK 1.16 MB), and the web preview loads the same face from Google Fonts.
+Headlines use Noto Serif: it is Android's `FontFamily.Serif`, so the APK gains no font file (release APK 1.16 MB), and the web preview serves the same face itself (`backend/static/fonts/`, ADR-017).
 
 ### Consequences
 
@@ -542,6 +542,69 @@ A short note says the project is non-commercial, unaffiliated, and that stories 
 ### Enforcement
 
 `backend/tests/test_paper_feed.py`, sections 2-5.
+
+## ADR-017 — No IP addresses or User-Agents at rest; a privacy page with the real windows
+
+**Status:** Accepted (2026-11, #67)
+
+### Context
+
+- `user_sessions` stored the client IP and User-Agent of every new web session. No query, panel or job ever read either column.
+- uvicorn's access log starts every line with the client IP, and slowapi logs the limiter key (the IP) on every rejected request. Both went to the container log, which Docker keeps with no rotation.
+- The public pages loaded their fonts from Google Fonts, so every visit sent the visitor's IP address to Google.
+- There was no privacy policy, and a public demo in the EU needs one (GDPR Art. 13).
+
+### Decision
+
+1. **Drop, don't hash.** Nothing uses the IP, and a salted hash of an IPv4 address is still personal data (the space is small enough to enumerate). `init_db()` drops `user_sessions.ip_address` and `user_agent` along with what they held. The heartbeat stores the client's random id and timestamps only; an older page that still sends `user_agent` is accepted and the value ignored.
+2. **The IP lives only in memory.** It stays the rate limiter's key, in slowapi's in-memory counters, which expire with their window (at most an hour) or on restart. The container runs uvicorn with `--no-access-log` (and `python main.py` with `access_log=False`), and the `slowapi` logger is raised to ERROR. The app's request log already records route, method and status without an address.
+3. **Fonts are self-hosted** in `backend/static/fonts/` (Fontsource variable fonts, latin and latin-ext, OFL) and served from `/static`. The public pages (`/`, `/mobile`, `/privacy`) contact no third party except the publishers' image servers. `analytics.html` is operator-only and still uses Google Fonts.
+4. **`/privacy`** lists what is stored, why and for how long. The route fills in `PURGE_OLDER_THAN_DAYS`, `SESSION_RETENTION_DAYS` and `REQUEST_LOG_RETENTION_DAYS` at serve time, so the page states the windows the server actually runs with. It shows the browser's session id with a "Forget this id" button, which is how a visitor can exercise their rights (Art. 11: nothing else links rows to a person). Both clients link to it from the topic sheet.
+
+### Consequences
+
+- What remains is pseudonymous at most: a random id per browser (or per app run) attached to swipes and sessions, plus aggregate request statistics. `swipe_events` keeps that id indefinitely (ADR-012); with no IP stored, nothing links it to a person.
+- Telemetry provenance (ADR-010) is unchanged: no metric read either column.
+- Publishers still see a visitor's IP when a card photo loads from their server. The policy says so.
+
+### Enforcement
+
+`backend/tests/test_privacy.py`: the schema and migration, the heartbeat row, no address in the logs on a rejected request, the access-log flags, `/privacy` with the configured windows, and no Google Fonts on the public pages. CLAUDE.md invariant 14.
+
+## ADR-018 — Public HTTPS through Cloudflare Tunnel
+
+**Status:** Accepted (2026-11, #32)
+
+### Context
+
+The API served plain HTTP on port 8000, and the Android app allowed cleartext to reach it. Only the tailnet could use it. Sharing the app with recruiters and friends needs a public HTTPS address, without opening the 956 MB VM's 50 Mbps link to floods.
+
+### Options
+
+- **Tailscale Funnel**: free, no domain, and TLS ends on the VM. But it has no edge cache and no flood protection, and the URL carries the tailnet's name.
+- **Caddy + Let's Encrypt** on the VM: an open port 443, certificate renewal, and the VM's ephemeral public IP to track.
+- **Cloudflare Tunnel** with a domain (~€10/yr): no inbound port, HTTPS, an edge cache and flood filtering on the free plan. Cloudflare ends TLS and sees the traffic.
+
+### Decision
+
+Cloudflare Tunnel, chosen by the owner for the edge cache, the flood protection and a clean URL.
+
+- `cloudflared` is a Compose service behind the `tunnel` profile, pinned to a version, with the tunnel token from `.env`. Local runs and CI never start it.
+- `API_BIND=127.0.0.1` publishes port 8000 on the loopback only, and the OCI security list closes it. The tunnel is the only way in.
+- **Client address.** Every request now arrives from cloudflared, so `client_ip()` reads `CLIENT_IP_HEADER` (`CF-Connecting-IP`) instead, but **only** when the socket peer is in `TRUSTED_PROXIES` (loopback and private ranges). A client that sends the header from anywhere else is keyed on its real address. Unset, it is the socket address, as before. The limiter and anything else keyed on a client use `client_ip()`; the address is still never stored or logged (ADR-017).
+- **Android.** Release builds set `usesCleartextTraffic="false"`; a debug-only manifest keeps cleartext for the tailnet and the emulator. Gradle refuses to package a *signed* release whose `paperswap.baseUrl` is not `https://`, because that APK could not reach its server. The unsigned CI build is unaffected.
+- **Privacy page.** Behind Cloudflare (`CLIENT_IP_HEADER=CF-Connecting-IP`), `/privacy` names Cloudflare as a processor that sees each request and IP address; otherwise it says the connection is plain HTTP. The page cannot claim a transport the server is not using.
+- Cache rules for the public GETs and one rate-limiting rule on `POST /api/v1/swipe` are set in the dashboard (docs/DEPLOYMENT.md, "Public HTTPS"). The app already sends `Cache-Control: public, max-age=…`.
+
+### Consequences
+
+- Cloudflare is now a processor: it terminates TLS and sees every request and visitor IP. Its data processing addendum is part of the self-serve terms.
+- The API is no longer reachable on the Tailscale address. Debug builds use the HTTPS URL or an SSH tunnel.
+- If the tunnel is down, the app is down. The origin is deliberately unreachable.
+
+### Enforcement
+
+`backend/tests/test_proxy.py`: client_ip with and without a trusted peer, separate buckets per visitor through the app, an untrusted sender stuck in one bucket, the privacy wording per transport, and the Compose and Android settings.
 
 ---
 

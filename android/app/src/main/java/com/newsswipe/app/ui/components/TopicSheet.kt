@@ -1,6 +1,7 @@
 package com.newsswipe.app.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,10 +35,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.newsswipe.app.BuildConfig
+import com.newsswipe.app.openArticle
 import com.newsswipe.app.data.model.NewsCategory
 import com.newsswipe.app.ui.theme.Paper
 import com.newsswipe.app.ui.theme.PaperSans
@@ -153,6 +158,21 @@ fun TopicSheet(
                 fontSize = 12.sp,
                 lineHeight = 17.sp,
                 color = c.muted
+            )
+            // The privacy policy (#67) is served by the backend, so it always
+            // states the retention windows the server actually runs with.
+            val context = LocalContext.current
+            Text(
+                "Privacy",
+                fontFamily = PaperSans,
+                fontSize = 12.sp,
+                color = c.muted,
+                textDecoration = TextDecoration.Underline,
+                modifier = Modifier
+                    .clickable(role = Role.Button) {
+                        openArticle(context, BuildConfig.BASE_URL.trimEnd('/') + "/privacy")
+                    }
+                    .padding(vertical = 12.dp)
             )
         }
     }

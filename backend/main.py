@@ -1,5 +1,6 @@
 import os
 import time
+import ipaddress
 import logging
 import secrets
 import argparse
@@ -23,11 +24,11 @@ from fastapi import (
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.security import APIKeyHeader
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from apscheduler.schedulers.background import BackgroundScheduler
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 from starlette.routing import Match
 
 from news_fetcher import fetch_and_sync_news_to_db, present_for_client
@@ -188,7 +189,7 @@ _api_key_header = APIKeyHeader(
 # admin surface on a single-container deployment.
 SESSION_COOKIE = "paperswap_admin_session"
 SESSION_TTL_SECONDS = int(os.getenv("ADMIN_SESSION_TTL", "43200"))   # 12 h
-# Set true once HTTPS (Caddy) is in front. Left false by
+# Set true once HTTPS is in front (Cloudflare Tunnel, ADR-018). Left false by
 # default because a Secure cookie is silently dropped over plain HTTP, which
 # would present as "the login form just reloads forever".
 COOKIE_SECURE = os.getenv("ADMIN_COOKIE_SECURE", "false").lower() == "true"
@@ -278,11 +279,66 @@ def require_admin_session(
 # In-memory storage: per-process counters that reset on restart. Correct for a
 # single container, and avoids running Redis on a 956 MB VM.
 #
-# NOTE: keyed on the client IP. Behind a reverse proxy every request appears to
-# come from the proxy, collapsing all users into one bucket. Putting Caddy in
-# front requires X-Forwarded-For handling first -- see docs/RATE_LIMITS.md.
+# Keyed on client_ip() below, which reads the visitor address behind the
+# tunnel -- see docs/RATE_LIMITS.md.
 # ---------------------------------------------------------------------------
-limiter = Limiter(key_func=get_remote_address)
+# ---------------------------------------------------------------------------
+# CLIENT ADDRESS BEHIND A PROXY (#32, ADR-018)
+#
+# Behind Cloudflare Tunnel every request arrives from the cloudflared
+# container, so the socket address is the same for every visitor and the limits
+# above would become one shared bucket. Cloudflare puts the visitor's address in
+# CF-Connecting-IP.
+#
+# A header is only as trustworthy as whoever set it. CLIENT_IP_HEADER is read
+# ONLY when the request comes from an address in TRUSTED_PROXIES (private
+# ranges by default, where cloudflared sits on the compose network). A client
+# on the internet that sends its own CF-Connecting-IP straight to the origin is
+# keyed on its real address instead. The origin port must not be public anyway
+# (API_BIND=127.0.0.1, docs/DEPLOYMENT.md).
+#
+# Unset CLIENT_IP_HEADER (the default) keeps the socket address: local runs,
+# CI and the Tailscale-only setup.
+# ---------------------------------------------------------------------------
+CLIENT_IP_HEADER = os.getenv("CLIENT_IP_HEADER", "").strip()
+TRUSTED_PROXIES = [
+    ipaddress.ip_network(net.strip(), strict=False)
+    for net in os.getenv(
+        "TRUSTED_PROXIES",
+        "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7",
+    ).split(",")
+    if net.strip()
+]
+
+
+def client_ip(request: Request) -> str:
+    """The visitor's address: CLIENT_IP_HEADER from a trusted proxy, else the
+    socket address. Use this, never request.client.host, for anything keyed on
+    a client (invariant 14: it is never stored or logged)."""
+    peer = request.client.host if request.client else ""
+    if CLIENT_IP_HEADER:
+        try:
+            peer_addr = ipaddress.ip_address(peer)
+        except ValueError:
+            return peer or "unknown"
+        if any(peer_addr in net for net in TRUSTED_PROXIES):
+            # The last entry is the one the nearest proxy wrote; anything before
+            # it came from the client. CF-Connecting-IP holds a single address.
+            raw = request.headers.get(CLIENT_IP_HEADER, "").split(",")[-1].strip()
+            try:
+                return str(ipaddress.ip_address(raw))
+            except ValueError:
+                pass
+    return peer or "unknown"
+
+
+limiter = Limiter(key_func=client_ip)
+
+# The client IP is the limiter's key, and only lives in its in-memory counters
+# (ADR-017). slowapi logs that key at WARNING on every rejected request, which
+# would write IPs to the container log; 429s are already visible, without the
+# address, in the request log below.
+logging.getLogger("slowapi").setLevel(logging.ERROR)
 
 
 def refresh_pipeline():
@@ -484,6 +540,9 @@ app = FastAPI(
 )
 
 app.state.limiter = limiter
+# Self-hosted fonts (#67): the public pages make no request to Google.
+app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")),
+          name="static")
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # The deck is ~80 KB of JSON; gzip cuts it to roughly a third. Egress is the
 # one Oracle Always Free meter a client can drive (10 TB/month on a 50 Mbps link).
@@ -697,8 +756,9 @@ class SwipeRequest(BaseModel):
 
 
 class HeartbeatRequest(BaseModel):
+    # Only the random id. Older web pages also send user_agent; it is ignored
+    # and never stored (ADR-017).
     session_id: str = Field(min_length=1, max_length=64)
-    user_agent: Optional[str] = Field(default=None, max_length=256)
 
 
 class AdminLogin(BaseModel):
@@ -782,6 +842,47 @@ def read_root():
 def read_mobile_app():
     """Serve the touch swipe UI (deck + weekly summaries tabs)."""
     return _serve_template("mobile_preview.html")
+
+
+# Filled in at serve time so the page states the retention windows this server
+# actually runs with, not the defaults.
+PRIVACY_FIELDS = {
+    "{{ARTICLE_DAYS}}": lambda: PURGE_OLDER_THAN_DAYS,
+    "{{SESSION_DAYS}}": lambda: SESSION_RETENTION_DAYS,
+    "{{REQUEST_LOG_DAYS}}": lambda: REQUEST_LOG_RETENTION_DAYS,
+}
+
+# How a request reaches this server. Behind Cloudflare (CLIENT_IP_HEADER =
+# CF-Connecting-IP) the page must name Cloudflare as a processor (ADR-018).
+PRIVACY_TRANSPORT = {
+    "cloudflare": (
+        'Requests reach the server through <a href="https://www.cloudflare.com/privacypolicy/">'
+        "Cloudflare</a>, which provides the HTTPS connection and filters floods. Cloudflare "
+        "processes your IP address and each request on the project's behalf."
+    ),
+    "direct": (
+        'The connection is plain HTTP for now; HTTPS is planned '
+        '(<a href="https://github.com/kvsznmate/Paperswap/issues/32">#32</a>).'
+    ),
+}
+
+
+def _privacy_transport() -> str:
+    behind_cloudflare = CLIENT_IP_HEADER.lower() == "cf-connecting-ip"
+    return PRIVACY_TRANSPORT["cloudflare" if behind_cloudflare else "direct"]
+
+
+@app.get("/privacy", response_class=HTMLResponse, tags=["pages"])
+def read_privacy():
+    """The privacy policy (#67): what is stored, why and for how long."""
+    page = _serve_template("privacy.html")
+    if page.status_code != 200:
+        return page
+    html = page.body.decode("utf-8")
+    for placeholder, value in PRIVACY_FIELDS.items():
+        html = html.replace(placeholder, str(int(value())))
+    html = html.replace("{{TRANSPORT}}", _privacy_transport())
+    return HTMLResponse(content=html)
 
 
 @app.get("/api/v1/categories", tags=["public"])
@@ -1134,9 +1235,7 @@ def user_heartbeat(request: Request, req: HeartbeatRequest):
     if not db.refresh_session(req.session_id):
         if not SESSION_BUDGET.take():
             raise _busy(SESSION_BUDGET, "new sessions")
-        client_ip = request.client.host if request.client else "unknown"
-        user_agent = (req.user_agent or request.headers.get("user-agent", ""))[:256]
-        db.record_session_heartbeat(req.session_id, user_agent=user_agent, ip_address=client_ip)
+        db.record_session_heartbeat(req.session_id)
     return JSONResponse(content={"status": "ok", "session_id": req.session_id})
 
 
@@ -1228,4 +1327,5 @@ if __name__ == "__main__":
             "main:app", host="0.0.0.0", port=args.port, reload=False,
             limit_concurrency=int(os.getenv("UVICORN_LIMIT_CONCURRENCY", "64")),
             timeout_keep_alive=int(os.getenv("UVICORN_TIMEOUT_KEEP_ALIVE", "3")),
+            access_log=False,  # see the Dockerfile CMD (ADR-017)
         )

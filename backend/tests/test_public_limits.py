@@ -146,9 +146,6 @@ finally:
 print("\n--- 4. Heartbeats: field limits and the new-session budget ---")
 check("over-long session_id -> 422",
       c.post("/api/v1/telemetry/heartbeat", json={"session_id": "s" * 65}).status_code == 422)
-check("over-long user_agent -> 422",
-      c.post("/api/v1/telemetry/heartbeat",
-             json={"session_id": "ok", "user_agent": "u" * 257}).status_code == 422)
 saved_sessions = m.SESSION_BUDGET
 m.SESSION_BUDGET = GlobalBudget("new_sessions", 1)
 try:

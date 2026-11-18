@@ -26,6 +26,13 @@ if (!releaseSigningEnabled && signingValues.values.any { it != null }) {
     throw GradleException("Release signing is partly configured; missing: $missing (see android/README.md)")
 }
 
+// Backend address. Defaults to the server's Tailscale address (the phone must
+// be on the same tailnet). Override without editing this file:
+//   ./gradlew assembleDebug -Ppaperswap.baseUrl=http://10.0.2.2:8000/
+// or put paperswap.baseUrl=... in ~/.gradle/gradle.properties.
+val baseUrl = (project.findProperty("paperswap.baseUrl") as String?)
+    ?: "http://100.67.178.57:8000/"
+
 android {
     namespace = "com.newsswipe.app"
     compileSdk = 34
@@ -40,12 +47,6 @@ android {
         versionCode = 1
         versionName = "1.0"
 
-        // Backend address. Defaults to the server Tailscale address (the phone
-        // must be on the same tailnet). Override without editing this file:
-        //   ./gradlew assembleDebug -Ppaperswap.baseUrl=http://10.0.2.2:8000/
-        // or put paperswap.baseUrl=... in ~/.gradle/gradle.properties.
-        val baseUrl = (project.findProperty("paperswap.baseUrl") as String?)
-            ?: "http://100.67.178.57:8000/"
         buildConfigField("String", "BASE_URL", "\"$baseUrl\"")
 
         // The UI is English-only, so drop the translated strings that AndroidX
@@ -142,4 +143,21 @@ dependencies {
 
     // Tooling
     debugImplementation("androidx.compose.ui:ui-tooling")
+}
+
+// A signed release is the APK people install, and release builds allow no
+// cleartext (#32), so an http:// base URL would ship an app that cannot reach
+// its server. Checked when the APK is packaged, so debug builds and the
+// unsigned CI release build are unaffected.
+tasks.matching { it.name == "packageRelease" }.configureEach {
+    val url = baseUrl
+    val signed = releaseSigningEnabled
+    doFirst {
+        if (signed && !url.startsWith("https://")) {
+            throw GradleException(
+                "A signed release needs an https:// paperswap.baseUrl, not $url " +
+                    "(PAPERSWAP_BASE_URL=https://<domain>/ ./release.sh)"
+            )
+        }
+    }
 }

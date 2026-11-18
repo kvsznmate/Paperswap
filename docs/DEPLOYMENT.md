@@ -6,6 +6,72 @@ _Last verified: July 2026. Cloud free tiers and prices change constantly — rec
 
 ---
 
+## Public HTTPS: Cloudflare Tunnel (#32, ADR-018)
+
+The VM opens **no inbound port**. `cloudflared` (a Compose service behind the `tunnel` profile) makes an outbound connection to Cloudflare, HTTPS ends at Cloudflare, and requests reach the API over the Compose network. Cost: the domain (~€10/yr). The tunnel and the features below are on Cloudflare's free plan.
+
+### 1. Domain and tunnel (Cloudflare dashboard)
+
+1. Buy a domain and add it to Cloudflare on the Free plan. Cloudflare Registrar sells at cost; with another registrar, switch the domain's nameservers to the two Cloudflare gives you.
+2. **Zero Trust → Networks → Tunnels → Create a tunnel → Cloudflared.** Name it `paperswap`, choose **Docker**, and copy the token: the long string after `--token`. It is a secret.
+3. In the tunnel, **Public Hostname → Add**: pick the hostname (for example `paperswap.<domain>`), **Service type** `HTTP`, **URL** `news-cards-backend:8000`. That is the Compose service name, which cloudflared resolves on the Compose network.
+
+### 2. The VM
+
+Add to `backend/.env`:
+
+```bash
+COMPOSE_PROFILES=tunnel                 # docker compose up also starts cloudflared
+CLOUDFLARE_TUNNEL_TOKEN=<token from step 2>
+API_BIND=127.0.0.1                      # port 8000 on the loopback only
+CLIENT_IP_HEADER=CF-Connecting-IP       # rate limits per visitor, not per tunnel
+ADMIN_COOKIE_SECURE=true                # the admin cookie now travels over HTTPS
+API_DOCS_ENABLED=false                  # no public API map
+```
+
+Then `docker compose down && docker compose up -d`, and check:
+
+```bash
+docker compose logs cloudflared | grep -i "registered tunnel connection"   # expect 4 lines
+curl -sI https://paperswap.<domain>/api/v1/feed | head -1                   # HTTP/2 200
+curl -s https://paperswap.<domain>/privacy | grep -c Cloudflare             # 1 or more
+```
+
+`CLIENT_IP_HEADER` is read only from requests that come from `TRUSTED_PROXIES` (private ranges by default, where cloudflared sits). The origin still must not be reachable from the internet: anyone who can reach port 8000 directly can skip Cloudflare.
+
+### 3. Close the origin
+
+- **OCI console → Networking → Virtual cloud networks → the VCN → Security Lists → Default.** Delete the ingress rule for TCP 8000. Keep 22 (SSH).
+- On the VM, remove any `ACCEPT` rule for port 8000 that was added to `/etc/iptables/rules.v4`, then `sudo netfilter-persistent reload`.
+- From another machine, `curl -m 5 http://<vm-public-ip>:8000/` must time out.
+
+With `API_BIND=127.0.0.1`, the API is no longer on the Tailscale address either. Point debug builds at the HTTPS URL (`-Ppaperswap.baseUrl=https://paperswap.<domain>/`), or reach the VM with `ssh -L 8000:localhost:8000`.
+
+### 4. Cloudflare settings
+
+- **SSL/TLS → Edge Certificates:** turn on **Always Use HTTPS**.
+- **Caching → Cache Rules → Create rule** "API reads". When: hostname equals `paperswap.<domain>`, request method equals `GET`, and the URI path starts with `/api/v1/feed`, `/api/v1/categories` or `/api/v1/summaries`. Then: **Eligible for cache**, **Edge TTL: use cache-control header if present**. The app already sends `Cache-Control: public, max-age=60` (600 for summaries), so most reads are answered at the edge.
+- **Security → WAF → Rate limiting rules** (the free plan allows one) "Swipes". When: URI path equals `/api/v1/swipe` and method equals `POST`. Then: 40 requests per 10 seconds per IP, then **Block** for 10 seconds. That stays above the app's own limit (120 per minute per visitor), so it only stops floods before they reach the VM.
+
+### 5. The Android release
+
+```bash
+cd android && PAPERSWAP_BASE_URL=https://paperswap.<domain>/ ./release.sh --dry-run
+PAPERSWAP_BASE_URL=https://paperswap.<domain>/ ./release.sh
+```
+
+Release builds allow no cleartext, and Gradle refuses to package a signed APK with an `http://` URL.
+
+### 6. The Oracle account tier
+
+**Billing → Subscriptions** shows whether the tenancy is *Always Free* or *Pay As You Go*. On PAYG, create a budget (**Billing → Budgets**) of €1 with an alert, so a misconfiguration cannot run up a bill.
+
+### Rolling back
+
+Delete the six lines from `backend/.env`, run `docker compose down && docker compose up -d`, and re-add the TCP 8000 ingress rule. The privacy page switches back to "plain HTTP" by itself.
+
+---
+
 ## What we're actually deploying
 
 One Dockerized **FastAPI container** + one **Postgres** database. The workload is tiny: a few hundred article rows, a news fetch every 12 hours, and occasional swipe writes. Images are hot-linked from the source (publisher sites, Unsplash and loremflickr for fallback images), so we store and serve almost no bytes ourselves. Requirements: **data persistence** + a **public HTTPS endpoint** the phone can reach.
