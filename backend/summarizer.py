@@ -619,8 +619,7 @@ def generate_weekly_summaries(week_start: date = None, force: bool = False) -> d
 
             if len(articles) < MIN_ARTICLES_FOR_SUMMARY:
                 # No row rather than a thin one. Common for the narrow topics --
-                # Beauty and Programming on Google News RSS often have almost no
-                # publisher descriptions. This is the system working.
+                # Beauty and Programming often have few publisher descriptions. This is the system working.
                 skipped.append({
                     "topic": topic,
                     "usable": len(articles),

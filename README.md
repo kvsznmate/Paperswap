@@ -24,7 +24,7 @@ graph TD
     A -->|"POST /api/v1/swipe"| B
     A -->|"Swipe right"| C["🌐 Publisher webpage"]
     S["⏰ APScheduler — every 12 h"] -->|"refresh_pipeline: fetch → summarise → purge"| B
-    B --> D["⚡ news_fetcher.py — NewsAPI + publisher RSS"]
+    B --> D["⚡ news_fetcher.py — publisher RSS"]
     B --> E["🐘 PostgreSQL 16"]
     F["🧠 enrichment.py — cron, every 6 h, separate container"] -->|"full_text, bullets, embeddings"| E
 ```
@@ -33,7 +33,7 @@ The backend renders nothing. It stores article *fields* (headline, summary, sour
 
 ### How a card reaches the screen
 
-1. **Fetch.** `news_fetcher.py` pulls `ARTICLES_PER_CATEGORY` (12) items per topic, giving 84 candidates per refresh. It tries NewsAPI first and falls back to the publisher RSS feeds in `TOPIC_FEEDS`. **In production RSS is the only source that actually returns anything:** the free NewsAPI plan rejects requests from servers.
+1. **Fetch.** `news_fetcher.py` pulls `ARTICLES_PER_CATEGORY` (12) items per topic, giving 84 candidates per refresh. The only source is the publisher RSS feeds in `TOPIC_FEEDS`, read round-robin. NewsAPI was removed because its free plan rejects requests from servers ([ADR-014](docs/ARCHITECTURE.md)).
 2. **Classify.** A weighted keyword scorer reassigns an article away from its feed's topic only when another topic wins by a clear margin. Its accuracy is unmeasured ([ADR-007](docs/ARCHITECTURE.md)).
 3. **Deduplicate.** `article_key = md5(title + url)` is a unique column, and inserts use `ON CONFLICT DO NOTHING`, so dedup is atomic ([ADR-004](docs/ARCHITECTURE.md)).
 4. **Summarise and purge.** The weekly summariser runs inside the refresh, *before* the purge deletes its input. Articles are then purged after 9 days ([ADR-011](docs/ARCHITECTURE.md)).
@@ -88,7 +88,7 @@ cp .env.example .env      # fill in the required values first
 docker compose up --build
 ```
 
-Compose refuses to start without `NEWS_API_KEY`, `ADMIN_API_KEY`, `POSTGRES_USER` and `POSTGRES_PASSWORD`. This is deliberate: a missing secret should fail loudly rather than boot on a default ([ADR-008](docs/ARCHITECTURE.md)). Generate secrets with `openssl rand -hex 24` and never base64 ([ADR-009](docs/ARCHITECTURE.md)).
+Compose refuses to start without `ADMIN_API_KEY`, `POSTGRES_USER` and `POSTGRES_PASSWORD`. This is deliberate: a missing secret should fail loudly rather than boot on a default ([ADR-008](docs/ARCHITECTURE.md)). Generate secrets with `openssl rand -hex 24` and never base64 ([ADR-009](docs/ARCHITECTURE.md)).
 
 ### Local Python
 

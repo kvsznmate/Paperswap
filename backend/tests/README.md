@@ -76,7 +76,7 @@ not create.
 `.env`.
 
 **They bypass `lifespan()`** and open the pool directly. That is deliberate:
-running `lifespan()` would trigger a real news fetch and spend NewsAPI quota on
+running `lifespan()` would trigger a real fetch of every publisher RSS feed on
 every test run.
 
 **Rate limits are per-process and in-memory**, so `test_api_security.py` and

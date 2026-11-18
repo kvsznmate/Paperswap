@@ -13,7 +13,7 @@ cp .env.example .env      # fill in the required values first
 docker compose up --build
 ```
 
-Compose fails to start if `NEWS_API_KEY`, `ADMIN_API_KEY`, `POSTGRES_USER`, or `POSTGRES_PASSWORD` are missing. That is deliberate — a missing secret should fail loudly rather than boot on a default.
+Compose fails to start if `ADMIN_API_KEY`, `POSTGRES_USER`, or `POSTGRES_PASSWORD` are missing. That is deliberate — a missing secret should fail loudly rather than boot on a default.
 
 Without Docker, you need a PostgreSQL instance to point at:
 
@@ -32,7 +32,7 @@ python main.py --cli      # sync news once, print a per-topic summary, exit
 | --- | --- |
 | `main.py` | FastAPI app, routes, admin auth, request-log buffer, APScheduler lifespan, CLI runner |
 | `database.py` | Connection pool, schema + migrations (`init_db`), topic catalogue (`CATEGORIES`), queries, dedup, purges, telemetry |
-| `news_fetcher.py` | NewsAPI + publisher RSS ingestion (`TOPIC_FEEDS`), keyword classification, card blurbs with provenance |
+| `news_fetcher.py` | Publisher RSS ingestion (`TOPIC_FEEDS`), keyword classification, card blurbs with provenance |
 | `summarizer.py` | Weekly per-topic digests, run inside `refresh_pipeline` before the purge (ADR-011) |
 | `enrichment.py` | **One-shot job**, run every 6 h by `run_enrichment.sh`. Article body extraction, TextRank bullets, ONNX embeddings. Not imported by `main.py` (ADR-012) |
 | `check_feeds.py` | Health check for the RSS feeds in `TOPIC_FEEDS`; `--extract` proves a feed yields readable text |
@@ -73,7 +73,6 @@ Set in `.env` (see `.env.example` for the annotated version). Compose refuses to
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `NEWS_API_KEY` | — | **Required.** NewsAPI key for ingestion |
 | `ADMIN_API_KEY` | — | **Required.** Guards `POST /cards/refresh` and both telemetry routes. Unset means those endpoints return `503`, never open |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` | — | **Required.** Applied at initdb time only — see the rotation note below |
 | `POSTGRES_DB` | `newsdb` | Database name |

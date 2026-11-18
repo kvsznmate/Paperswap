@@ -430,6 +430,37 @@ Headlines use Noto Serif: it is Android's `FontFamily.Serif`, so the APK gains n
 
 `backend/tests/test_paper_feed.py`: the URL upgrade, `image_is_stock`, `description_source` passed through and never backfilled, and no embedding in the payload.
 
+## ADR-014 — Publisher RSS is the only news source; NewsAPI removed
+
+**Status:** Accepted (2026-11, #66)
+
+### Context
+
+`fetch_topic` asked NewsAPI first and fell back to RSS. NewsAPI's free Developer plan rejects requests from servers, so on the VM every call failed and RSS supplied everything. A check of the live feed on 18 Nov 2026 (300 articles, `balanced=false`) confirmed this: every article came from a feed in `TOPIC_FEEDS`, and none came from NewsAPI.
+
+The dead path still cost something:
+
+- Compose refused to boot without `NEWS_API_KEY`, a required secret for a source that never answered.
+- Each refresh made 7 rejected calls to newsapi.org with a development key from a production server.
+- The docs described NewsAPI as the primary source.
+- Before going public, its terms would have been a licensing question of their own (#66).
+
+### Decision
+
+Remove NewsAPI completely:
+
+- `fetch_from_news_api` and the `fetch_topic` wrapper; `fetch_and_sync_news_to_db` calls `fetch_from_rss` directly.
+- `newsapi_query` in `TOPIC_FEEDS`.
+- `NEWS_API_KEY` in the code, `.env.example`, `docker-compose.yml` and CI.
+
+A paid NewsAPI plan was not considered worth it for a project that keeps external costs near zero (see the cost note in ADR-011).
+
+### Consequences
+
+- Article supply is exactly the RSS feeds. A topic whose feeds all die gets no new articles; `check_feeds.py` is the tool for finding replacements.
+- An existing `backend/.env` may still contain `NEWS_API_KEY`. Compose no longer reads it, so it is harmless and can be deleted.
+- `requests` stays in `requirements.txt`: `summarizer.py` still uses it.
+
 ---
 
 ## Failure modes we've hit
